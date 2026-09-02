@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/tiredithumans/crt-query/security/advisories/new
+    about: Report privately, never as a public issue. See SECURITY.md.
+  - name: crt.sh is down, slow, or refusing connections
+    url: https://groups.google.com/g/crtsh
+    about: >-
+      crt.sh is a separate public service, not part of this project. Connection
+      limits and statement timeouts are expected and the tool retries them.

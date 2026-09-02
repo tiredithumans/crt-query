@@ -1,0 +1,47 @@
+name: Bug report
+description: Something behaves differently from what is documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: crt.sh refusing connections or timing out is expected
+        behaviour of a shared public service, not a bug in this tool. The
+        connection retry and the "guest database is at its connection limit"
+        message are both working as intended.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `crt-query --version`
+      placeholder: crt-query 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15.6 (aarch64) / Ubuntu 24.04 / Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran. Redact any `--db-url` credentials.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the output, and the exit code if it is relevant.
+    validations:
+      required: true

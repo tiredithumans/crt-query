@@ -1,0 +1,7 @@
+# cargo-audit configuration (read by `just audit` and the CI audit job).
+# Keep the ignore list in sync with the [advisories] ignore list in deny.toml.
+[advisories]
+# No advisories are currently tolerated. Every entry added here must carry the
+# advisory id, why it is unreachable or unavoidable in this project, and the
+# condition under which the ignore gets dropped again.
+ignore = []

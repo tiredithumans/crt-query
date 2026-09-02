@@ -1,0 +1,14 @@
+/target
+
+# CSV reports written by --csv into the working tree
+*.csv
+
+# Local Claude Code overrides (the skills in .claude/skills/ ARE committed)
+.claude/settings.local.json
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

@@ -1,0 +1,61 @@
+# cargo-deny configuration. Complements `cargo audit` (which only reads the
+# RustSec advisory DB) with license policy and crate-source gating.
+#
+# Run locally with `just deny`; CI runs it on every PR and on the weekly cron.
+
+[advisories]
+version = 2
+# A yanked crate in the lockfile is a supply-chain signal, not a warning.
+yanked = "deny"
+# Flag `unmaintained` advisories only for crates this project depends on
+# DIRECTLY. A transitive unmaintained crate is someone else's to fix and has no
+# upgrade path from here; listing those ids would be a churning allowlist that
+# buries the signal actually worth acting on — an unmaintained crate WE chose.
+# Vulnerabilities are unaffected: those still fail on any crate in the graph.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+# Surveyed with `cargo metadata` over the full 137-crate graph. Every entry is
+# permissive and compatible with this project's own `MIT OR Apache-2.0`. Add to
+# this list deliberately when a new dependency introduces a new license — the
+# point of the gate is that the addition is a decision, not a surprise.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# A few crates ship license text rather than a clean SPDX expression. Raise
+# this only if a legitimately-licensed crate trips it.
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate majors are common and usually benign in a transitive graph; surface
+# them without failing the build.
+multiple-versions = "warn"
+# A wildcard version requirement means "whatever the registry serves today",
+# which is exactly the supply-chain hole the lockfile exists to close.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# This tool speaks unencrypted Postgres to a public read-only database on
+# purpose (see the NoTls comment in src/db.rs), so no TLS stack should ever
+# appear in the graph. If one does, it arrived transitively and unreviewed —
+# and it would be carrying credentials-handling code into a binary that is
+# built to have none. Removing a ban is a decision to make deliberately, in the
+# same commit that explains why.
+[[bans.deny]]
+name = "openssl"
+[[bans.deny]]
+name = "openssl-sys"
+
+[sources]
+# crates.io only. A git or alternate-registry dependency must be added here
+# deliberately, with review.
+unknown-registry = "deny"
+unknown-git = "deny"

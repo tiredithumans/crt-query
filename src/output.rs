@@ -1,0 +1,264 @@
+use std::fmt::Display;
+use std::fs::{File, OpenOptions};
+use std::io::{self, IsTerminal, Write};
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use comfy_table::presets::UTF8_FULL_CONDENSED;
+use comfy_table::{ContentArrangement, Table};
+use serde::Serialize;
+
+use crate::cli::OutputOpts;
+
+/// Placeholder for a NULL column.
+const DASH: &str = "-";
+
+/// Table width used when stdout is not a terminal. `ContentArrangement::Dynamic`
+/// has nothing to measure against a pipe, so without this the table renders at
+/// its full natural width — often several hundred columns.
+const PIPED_WIDTH: u16 = 120;
+
+const TS_FORMAT: &str = "%Y-%m-%d %H:%M";
+
+/// One implementation per record type feeds all three output formats:
+/// serde derive covers JSON, `headers()`/`cells()` cover table and CSV.
+pub trait OutputRecord: Serialize {
+    fn headers() -> &'static [&'static str];
+    fn cells(&self) -> Vec<String>;
+
+    /// Rows to write in CSV mode; one row matching `cells()` by default.
+    ///
+    /// Records with a multi-valued column override this to emit one row per
+    /// value. Joining them into a single field would leave a CSV consumer
+    /// unable to tell a separator from a character inside a value.
+    fn csv_rows(&self) -> Vec<Vec<String>> {
+        vec![self.cells()]
+    }
+}
+
+/// Fail on an unwritable `--csv` destination before a connection is spent on
+/// the shared guest database. Creates the file if absent but never truncates:
+/// a later failure should not destroy the previous run's report.
+pub fn precheck_csv(out: &OutputOpts) -> Result<()> {
+    if let Some(path) = &out.csv {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .with_context(|| format!("cannot write CSV to {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Render a result list as a table (default) or JSON array on stdout,
+/// plus an optional CSV file.
+///
+/// An empty list still produces `[]` and a header-only CSV: both are contracts
+/// a script depends on, and skipping the CSV write would leave a stale file
+/// from a previous run in place.
+pub fn emit<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
+    write_csv_if_requested(rows, out)?;
+    if out.json {
+        return write_json(rows);
+    }
+    if rows.is_empty() {
+        // The caller has already explained the empty result on stderr.
+        return Ok(());
+    }
+    let mut table = new_table(out);
+    table.set_header(T::headers().to_vec());
+    for r in rows {
+        table.add_row(r.cells());
+    }
+    print_table(&table)
+}
+
+/// Render a single record as a key/value detail table, a JSON object,
+/// or a CSV file.
+pub fn emit_detail<T: OutputRecord>(record: &T, out: &OutputOpts) -> Result<()> {
+    let cells = record.cells();
+    debug_assert_eq!(
+        T::headers().len(),
+        cells.len(),
+        "OutputRecord headers()/cells() arity must match, or fields are silently dropped"
+    );
+    write_csv_if_requested(std::slice::from_ref(record), out)?;
+    if out.json {
+        return write_json(record);
+    }
+    let mut table = new_table(out);
+    for (header, cell) in T::headers().iter().zip(cells) {
+        table.add_row(vec![(*header).to_string(), cell]);
+    }
+    print_table(&table)
+}
+
+/// Emit the "nothing found" shape for a single-record lookup, so `--json` and
+/// `--csv` hold their contracts on this exit path too.
+pub fn emit_missing<T: OutputRecord>(out: &OutputOpts) -> Result<()> {
+    write_csv_if_requested::<T>(&[], out)?;
+    if out.json {
+        return write_json(&serde_json::Value::Null);
+    }
+    Ok(())
+}
+
+fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
+    if let Some(path) = &out.csv {
+        let file = File::create(path)
+            .with_context(|| format!("cannot write CSV to {}", path.display()))?;
+        let written = write_csv(rows, file)
+            .with_context(|| format!("cannot write CSV to {}", path.display()))?;
+        eprintln!("wrote {written} CSV row(s) to {}", path.display());
+    }
+    Ok(())
+}
+
+/// Write `rows` as CSV and return the number of data rows written.
+pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
+    let mut w = csv::Writer::from_writer(w);
+    w.write_record(T::headers())?;
+    let mut written = 0;
+    for r in rows {
+        for record in r.csv_rows() {
+            w.write_record(&record)?;
+            written += 1;
+        }
+    }
+    w.flush()?;
+    Ok(written)
+}
+
+fn new_table(out: &OutputOpts) -> Table {
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    if let Some(width) = out.width {
+        table.set_width(width);
+    } else if !io::stdout().is_terminal() {
+        table.set_width(PIPED_WIDTH);
+    }
+    table
+}
+
+fn print_table(table: &Table) -> Result<()> {
+    on_stdout(|w| writeln!(w, "{table}"))
+}
+
+fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
+    on_stdout(|w| {
+        serde_json::to_writer_pretty(&mut *w, value).map_err(io::Error::from)?;
+        writeln!(w)
+    })
+}
+
+/// Run a write against stdout, treating a reader that has gone away
+/// (`crt-query search … | head`) as a normal end of output rather than an
+/// error. Rust ignores SIGPIPE, so without this the write panics with
+/// "failed printing to stdout" and the process exits 101.
+fn on_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()> {
+    let stdout = io::stdout();
+    let mut w = stdout.lock();
+    match f(&mut w).and_then(|()| w.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) => Err(e).context("writing to stdout"),
+    }
+}
+
+/// Format a timestamp for the table. Values are UTC throughout; the column
+/// headers say so.
+pub fn fmt_ts(ts: Option<&DateTime<Utc>>) -> String {
+    fmt_opt(ts.map(|t| t.format(TS_FORMAT)))
+}
+
+/// Format any optional column, falling back to a dash for NULL.
+pub fn fmt_opt<T: Display>(value: Option<T>) -> String {
+    value.map_or_else(|| DASH.to_string(), |v| v.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queries::search::SearchRow;
+    use chrono::NaiveDate;
+
+    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+    }
+
+    fn row(identities: &[&str]) -> SearchRow {
+        SearchRow {
+            id: 7,
+            issuer_ca_id: Some(9),
+            issuer_name: Some("Test CA".to_string()),
+            matched_identities: identities.iter().map(|s| (*s).to_string()).collect(),
+            common_name: Some("example.com".to_string()),
+            serial: Some("0a1b".to_string()),
+            not_before: Some(utc(2026, 1, 1)),
+            not_after: Some(utc(2026, 4, 1)),
+        }
+    }
+
+    fn csv_string<T: OutputRecord>(rows: &[T]) -> String {
+        let mut buf = Vec::new();
+        write_csv(rows, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn headers_and_cells_agree_in_arity() {
+        let r = row(&["example.com"]);
+        assert_eq!(SearchRow::headers().len(), r.cells().len());
+    }
+
+    #[test]
+    fn csv_writes_one_row_per_identity() {
+        let out = csv_string(&[row(&["example.com", "www.example.com"])]);
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "header + one row per identity: {out}");
+        assert!(lines[1].contains("example.com"));
+        assert!(lines[2].contains("www.example.com"));
+        // Neither data row carries the other identity: they are separate rows,
+        // not a joined field a consumer would have to split.
+        assert!(!lines[1].contains("www.example.com"));
+    }
+
+    #[test]
+    fn csv_row_count_matches_rows_written() {
+        let mut buf = Vec::new();
+        let n = write_csv(&[row(&["a.example.com", "b.example.com"])], &mut buf).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn empty_result_still_writes_a_header_row() {
+        let out = csv_string::<SearchRow>(&[]);
+        assert_eq!(out.lines().count(), 1);
+        assert!(out.starts_with("crt.sh ID,"));
+    }
+
+    #[test]
+    fn separators_inside_a_value_survive_the_round_trip() {
+        // A Subject identity really can contain ", " — the old joined encoding
+        // made it indistinguishable from the separator.
+        let out = csv_string(&[row(&["O=Example, Inc."])]);
+        let mut rdr = csv::Reader::from_reader(out.as_bytes());
+        let rec = rdr.records().next().unwrap().unwrap();
+        assert_eq!(&rec[3], "O=Example, Inc.");
+    }
+
+    #[test]
+    fn fmt_opt_renders_a_dash_for_none() {
+        assert_eq!(fmt_opt(None::<i32>), "-");
+        assert_eq!(fmt_opt(Some(42)), "42");
+        assert_eq!(fmt_ts(None), "-");
+        assert_eq!(fmt_ts(Some(&utc(2026, 4, 1))), "2026-04-01 00:00");
+    }
+}

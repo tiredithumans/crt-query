@@ -1,0 +1,136 @@
+name: CI
+
+# Every `uses:` in this repo is pinned to a full commit SHA with the human-
+# readable version in a trailing comment. A tag is a movable pointer: whoever
+# controls the action's repo can repoint `v4` at new code, and a compromised
+# action runs with this workflow's token. Dependabot (see dependabot.yml)
+# advances both the SHA and the comment, so the pins stay fresh without ever
+# being trusted by name.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual re-run: with cancel-in-progress below, an Actions outage can leave a
+  # PR with cancelled checks and no other way to retry them.
+  workflow_dispatch:
+  schedule:
+    # Weekly RustSec refresh, so an advisory filed after merge still reaches us.
+    # Only the dependency jobs run on this tick — see their `if:` conditions.
+    - cron: "0 6 * * 1"
+
+# A new push to the same branch supersedes the in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege, declared explicitly so a change to the repo-level default
+# cannot silently re-broaden this workflow.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: just
+      - name: Formatting
+        run: just fmt-check
+      - name: Clippy
+        run: just lint
+      # Every test is offline by design — crt.sh is a shared public service and
+      # CI must never add load to it.
+      - name: Tests
+        run: just test
+      - name: Build
+        run: just build
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No toolchain action here on purpose: the recipe reads rust-version out
+      # of Cargo.toml and installs exactly that, so the gate cannot drift away
+      # from the number the manifest advertises.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: just
+      - name: Declared MSRV builds
+        run: just msrv
+
+  actionlint:
+    name: actionlint
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Workflow-file syntax gate. An unparseable workflow produces 0-second
+      # "workflow file issue" runs and no other signal; this turns that into a
+      # failing check. Pinned by version + checksum — there is no action to SHA-
+      # pin here, so the tarball is verified instead.
+      - name: actionlint
+        run: |
+          curl -sSfL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: just,cargo-audit
+      # RustSec advisory scan; ignore list lives in .cargo/audit.toml.
+      - name: Audit
+        run: just audit
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # License policy, crate sources and bans; config in deny.toml. Version-
+      # pinned rather than @latest because cargo-deny's 0.20 CLI refactor
+      # changed flag handling without warning.
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: just,cargo-deny@0.20.2
+      - name: Deny
+        run: just deny

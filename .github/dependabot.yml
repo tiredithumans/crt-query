@@ -1,0 +1,32 @@
+# SHA-pinning actions and lockfile-pinning crates freezes them at a known-good
+# commit — but a pin nobody advances rots, and the project silently misses
+# upstream security fixes. Dependabot opens review-gated PRs that move the pin
+# forward AND rewrite the `# vX.Y.Z` comment beside each SHA, so the pins stay
+# both current and untrusted-by-name.
+version: 2
+updates:
+  # Actions used by .github/workflows/*.yml — all pinned to full commit SHAs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      # One PR a week for all action bumps, not one PR per action.
+      actions:
+        patterns: ["*"]
+
+  # Cargo dependencies. Crates are pinned by exact version + checksum in
+  # Cargo.lock; Dependabot proposes the upgrades.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 10
+    groups:
+      # Patch-level bumps are noise individually and useful in aggregate.
+      patch:
+        update-types: ["patch"]

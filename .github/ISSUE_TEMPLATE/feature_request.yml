@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a capability or change
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a deliberately small tool. Proposals that keep it small are the
+        easiest to accept.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that the tool makes hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+      description: Include the command line you would expect to type.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including whether an existing flag nearly does it.
+    validations:
+      required: false

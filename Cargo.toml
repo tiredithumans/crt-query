@@ -1,0 +1,39 @@
+[package]
+name = "crt-query"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Query crt.sh certificate-transparency data directly from its public PostgreSQL database"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/tiredithumans/crt-query"
+homepage = "https://github.com/tiredithumans/crt-query"
+documentation = "https://github.com/tiredithumans/crt-query#readme"
+keywords = ["certificate", "transparency", "crtsh", "x509", "tls"]
+categories = ["command-line-utilities"]
+# Keep the published crate to what a consumer needs: sources, manifest, docs
+# and licences. Everything else is repo scaffolding.
+exclude = [
+    ".github/",
+    ".claude/",
+    ".cargo/",
+    "justfile",
+    "deny.toml",
+]
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+comfy-table = "8.0.0"
+csv = "1.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# One connection, one spawned driver task: the current-thread runtime is the
+# whole requirement, so the multi-threaded worker pool is not pulled in.
+tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
+tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4"] }
+
+[profile.release]
+lto = "thin"
+strip = true
