@@ -143,9 +143,13 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.guard.outputs.version }}"
+          # Stop at the next version header OR at the trailing link-definition
+          # block — the newest release has no section after it, so without the
+          # second rule the extraction runs to EOF and swallows the links.
           awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\] - " { inside = 1; next }
             inside && /^## \[/        { exit }
+            inside && /^\[[^]]+\]: /  { exit }
             inside                    { print }
           ' CHANGELOG.md > RELEASE_NOTES.md
           echo "--- notes ---"; cat RELEASE_NOTES.md
