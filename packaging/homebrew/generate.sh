@@ -48,8 +48,9 @@ MIN_COMPLETIONS_VERSION="0.2.0"
 ARM_MAC="aarch64-apple-darwin"
 INTEL_MAC="x86_64-apple-darwin"
 INTEL_LINUX="x86_64-unknown-linux-gnu"
+ARM_LINUX="aarch64-unknown-linux-gnu"
 
-for target in "$ARM_MAC" "$INTEL_MAC" "$INTEL_LINUX"; do
+for target in "$ARM_MAC" "$INTEL_MAC" "$INTEL_LINUX" "$ARM_LINUX"; do
     [ -n "$(sum_for "$target")" ] ||
         { echo "error: the ${version:-latest} release has no $target archive" >&2; exit 1; }
 done
@@ -125,6 +126,10 @@ class CrtQuery < Formula
     on_intel do
       url "$(url_for "$INTEL_LINUX")"
       sha256 "$(sum_for "$INTEL_LINUX")"
+    end
+    on_arm do
+      url "$(url_for "$ARM_LINUX")"
+      sha256 "$(sum_for "$ARM_LINUX")"
     end
   end
 

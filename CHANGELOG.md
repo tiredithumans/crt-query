@@ -11,6 +11,25 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- Prebuilt binaries for `aarch64-unknown-linux-gnu`. `install.sh` computed this
+  target on every ARM64 Linux host — Graviton, Ampere, a Raspberry Pi — and no
+  release shipped an archive for it, so the install failed with a list of what
+  was available. The Homebrew formula gains a matching `on_arm` block inside
+  `on_linux`.
+- Windows on ARM installs the x86-64 build, which Windows runs under emulation,
+  rather than failing outright when no native `aarch64-pc-windows-msvc` archive
+  exists. It says so when it does. The `x86` branch is gone: crt-query has never
+  shipped a 32-bit build, so it could only ever resolve to an archive that does
+  not exist.
+- Every release archive now carries a build-provenance attestation signed by the
+  workflow run that produced it. `SHA256SUMS` is served from the same release as
+  the archives it covers, so it proves they agree with each other and nothing
+  about where they came from — which matters because `check-update` points at
+  the same channel. Verify with
+  `gh attestation verify <archive> --repo tiredithumans/crt-query`.
+
 ### Changed
 
 - **`--csv` is now a machine format rather than a copy of the table.** It shared
@@ -22,6 +41,16 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   empty field and timestamps are full RFC 3339 instants. A script reading the
   `-` placeholder or parsing minute-precision timestamps needs updating; the
   table is unchanged.
+
+- **`cert` now exits `3`, not `2`, when no certificate has that crt.sh ID.**
+  clap exits `2` on a usage error, so `crt-query cert "$id"` with an empty or
+  unset `$id` reported "no such certificate" for what was a typo — turning a
+  shell slip into a false "the certificate is gone" alert, the exact confusion
+  the distinct code exists to prevent. A script keying on `2` for not-found
+  needs updating; `0` and `1` are unchanged.
+- `check-update --csv` and its table now use display column headers
+  (`Current`, `Latest`, `Update Available`, `Release URL`) like every other
+  record type. The `--json` keys are unchanged.
 
 ### Fixed
 
@@ -60,20 +89,6 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   Those fail identically on every attempt, so retrying only buried the real
   error under two misleading "retrying..." lines. Load and transport failures
   still get the full retry budget.
-
-### Changed
-
-- **`cert` now exits `3`, not `2`, when no certificate has that crt.sh ID.**
-  clap exits `2` on a usage error, so `crt-query cert "$id"` with an empty or
-  unset `$id` reported "no such certificate" for what was a typo — turning a
-  shell slip into a false "the certificate is gone" alert, the exact confusion
-  the distinct code exists to prevent. A script keying on `2` for not-found
-  needs updating; `0` and `1` are unchanged.
-- `check-update --csv` and its table now use display column headers
-  (`Current`, `Latest`, `Update Available`, `Release URL`) like every other
-  record type. The `--json` keys are unchanged.
-
-### Fixed
 
 - Windows installs no longer abort at the last step. `install.ps1` confirmed a
   good install by piping `crt-query --version` into `Select-Object -First 1`;

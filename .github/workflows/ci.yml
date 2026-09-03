@@ -17,7 +17,9 @@ on:
   workflow_dispatch:
   schedule:
     # Weekly RustSec refresh, so an advisory filed after merge still reaches us.
-    # Only the dependency jobs run on this tick — see their `if:` conditions.
+    # The `scripts` and `actionlint` jobs opt out of this tick (see their `if:`
+    # conditions); the rest run, which is free and occasionally catches a
+    # toolchain or dependency change that nothing in the repo triggered.
     - cron: "0 6 * * 1"
 
 # A new push to the same branch supersedes the in-flight run.
@@ -63,6 +65,14 @@ jobs:
         run: just test
       - name: Build
         run: just build
+
+      # The release profile (lto = "thin", strip = true) is otherwise compiled
+      # for the first time by the tag push — after an annotated tag exists, and
+      # with fail-fast disabled, so a bad leg leaves artifacts uploaded, the
+      # draft skipped and a tag to delete. One Linux leg is enough to catch it.
+      - name: Release profile builds
+        if: runner.os == 'Linux'
+        run: just build-release
 
       # install.ps1 confirms a good install by running the binary it just
       # copied. `lint-scripts` only parses that file, so a runtime fault in the
@@ -131,6 +141,13 @@ jobs:
       # "workflow file issue" runs and no other signal; this turns that into a
       # failing check. Pinned by version + checksum — there is no action to SHA-
       # pin here, so the tarball is verified instead.
+      #
+      # Not via taiki-e/install-action, which is used for `just` above and would
+      # verify the checksum itself: its manifest does not carry actionlint, and
+      # the cargo-binstall fallback cannot help because actionlint is a Go
+      # program with no crates.io entry. Tried, and it fails with
+      # "install-action does not support actionlint@1.7.12". Bump the version
+      # and the SHA-256 together.
       - name: actionlint
         run: |
           curl -sSfL -o actionlint.tar.gz \
