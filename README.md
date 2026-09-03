@@ -82,12 +82,22 @@ $expected = ((Select-String -Path SHA256SUMS -Pattern ([regex]::Escape("crt-quer
 $actual   = (Get-FileHash crt-query.zip -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $expected) { throw "checksum mismatch: expected $expected, got $actual" }
 
-Expand-Archive crt-query.zip -DestinationPath .
+Expand-Archive crt-query.zip -DestinationPath . -Force
+$InstallDir = "$env:LOCALAPPDATA\Programs\crt-query"
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+Move-Item "crt-query-$Version-$Target\crt-query.exe" "$InstallDir\crt-query.exe" -Force
+Remove-Item "crt-query-$Version-$Target" -Recurse
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$InstallDir*") {
+    $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+}
 ```
 
-This extracts a `crt-query-$Version-$Target\` folder containing `crt-query.exe`.
-Move it to a folder on your `PATH` (e.g. `C:\Tools`, added once via
-*System Properties → Environment Variables → Path*).
+Installs to `%LOCALAPPDATA%\Programs\crt-query` and adds it to your user
+`PATH` — no admin rights needed. Open a new terminal window for the updated
+`PATH` to take effect.
 
 ### From source
 
