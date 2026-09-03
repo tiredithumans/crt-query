@@ -18,13 +18,22 @@ const IDENTITIES_COL: usize = 3;
 /// Without it the LIMIT takes an arbitrary slice of every certificate ever
 /// issued for the term, which in practice is the oldest rows — and the
 /// client-side sort below then presents that sample as a newest-first list.
+///
+/// `$3` is `--skip-expired`: a hard floor at the server's own clock, so the
+/// window holds only certificates that are valid right now. It is a separate
+/// predicate rather than a look-back of zero days because zero is already
+/// spoken for by `--all-history`, and it composes with `$2` — the stricter of
+/// the two decides, which is always this one when it is set.
 static SEARCH_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{IDENTITY_QUERY}
    AND ($2 = 0
         OR coalesce(x509_notAfter(cai.certificate), 'infinity'::timestamp)
              >= (now() AT TIME ZONE 'UTC') - make_interval(days => $2))
- LIMIT $3"
+   AND (NOT $3
+        OR coalesce(x509_notAfter(cai.certificate), 'infinity'::timestamp)
+             >= (now() AT TIME ZONE 'UTC'))
+ LIMIT $4"
     )
 });
 
@@ -112,28 +121,41 @@ impl OutputRecord for SearchRow {
     }
 }
 
+/// Search one or more terms and merge the results into a single list.
+///
+/// One statement per term, run in sequence, for the same reasons as
+/// [`crate::queries::expiring::run_expiring`]: the tsquery predicate has to
+/// stay index-driven to survive the statement timeout, `--limit` is therefore
+/// per term so a busy one cannot crowd out the rest, and the tool holds a
+/// single connection to a database with a connection limit.
 pub async fn run_search(
     db: &Db,
-    query: &str,
+    queries: &[String],
     valid_since_days: i32,
+    skip_expired: bool,
     limit: i64,
     dedupe: bool,
 ) -> Result<Vec<SearchRow>> {
-    let rows = db
-        .query(
-            &format!("\"{query}\""),
-            SEARCH_SQL.as_str(),
-            &[
-                (&query, Type::TEXT),
-                (&valid_since_days, Type::INT4),
-                (&limit, Type::INT8),
-            ],
-        )
-        .await?;
-    let raw = rows
-        .iter()
-        .map(RawRow::from_pg)
-        .collect::<Result<Vec<_>>>()?;
+    let mut raw: Vec<RawRow> = Vec::new();
+    for query in queries {
+        let rows = db
+            .query(
+                &format!("\"{query}\""),
+                SEARCH_SQL.as_str(),
+                &[
+                    (&query, Type::TEXT),
+                    (&valid_since_days, Type::INT4),
+                    (&skip_expired, Type::BOOL),
+                    (&limit, Type::INT8),
+                ],
+            )
+            .await?;
+        for row in &rows {
+            raw.push(RawRow::from_pg(row)?);
+        }
+    }
+    // Dedup runs over the merged rows, so a certificate matching two of the
+    // terms appears once, carrying both matched identities.
     let mut out = to_rows(raw, dedupe);
     out.sort_by_key(|r| std::cmp::Reverse(r.not_before));
     Ok(out)
@@ -167,15 +189,24 @@ mod tests {
 
     #[test]
     fn sql_binds_every_placeholder_it_declares() {
-        for p in ["$1", "$2", "$3"] {
+        for p in ["$1", "$2", "$3", "$4"] {
             assert!(SEARCH_SQL.contains(p), "missing {p}");
         }
-        assert!(!SEARCH_SQL.contains("$4"));
+        assert!(!SEARCH_SQL.contains("$5"));
+    }
+
+    #[test]
+    fn skip_expired_floors_the_window_at_the_server_clock() {
+        // Guarded because the predicate must compare against the server's own
+        // now(), not a client-side timestamp: the same rule that keeps
+        // `expiring --skip-expired` from surfacing an EXPIRED row.
+        assert!(SEARCH_SQL.contains("NOT $3"));
+        assert!(SEARCH_SQL.contains("AND (NOT $3\n        OR coalesce"));
     }
 
     #[test]
     fn sql_keeps_the_limit_last_and_adds_no_server_side_ordering() {
-        assert!(SEARCH_SQL.trim_end().ends_with("LIMIT $3"));
+        assert!(SEARCH_SQL.trim_end().ends_with("LIMIT $4"));
         assert!(!SEARCH_SQL.contains("ORDER BY"));
     }
 

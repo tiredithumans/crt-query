@@ -38,7 +38,7 @@ const NO_WRAP_HEADERS: &[&str] = &[
 /// Free-text columns that do have natural wrap points (spaces, dots, commas)
 /// but still need a floor: without one they end up squeezed to a
 /// character-per-line sliver once the columns above claim their content
-/// width. A minimum here can push the table wider than the target width —
+/// width. A minimum here can push the table past the width it was aiming for —
 /// preferred over a technically-fitting table nobody can read.
 const MIN_WIDTH_HEADERS: &[(&str, u16)] = &[
     ("Issuer", 20),
@@ -49,6 +49,11 @@ const MIN_WIDTH_HEADERS: &[(&str, u16)] = &[
 /// Apply [`NO_WRAP_HEADERS`] and [`MIN_WIDTH_HEADERS`] to `table` by matching
 /// on the header text already set via `set_header`, so this works across
 /// [`OutputRecord`] types without hard-coding column positions.
+///
+/// Only used for the automatic layout. Both constraint sets are heuristics for
+/// "we picked this width, make it readable", and comfy-table honours a column
+/// constraint over the table width — so leaving them on would let them silently
+/// overrule an explicit `--width`. See [`new_table`].
 fn constrain_columns(table: &mut Table, headers: &[&str]) {
     for (i, header) in headers.iter().enumerate() {
         let constraint = if NO_WRAP_HEADERS.contains(header) {
@@ -115,13 +120,7 @@ pub fn emit<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
         // The caller has already explained the empty result on stderr.
         return Ok(());
     }
-    let mut table = new_table(out);
-    table.set_header(T::headers().to_vec());
-    constrain_columns(&mut table, T::headers());
-    for r in rows {
-        table.add_row(r.cells());
-    }
-    print_table(&table)
+    print_table(&build_table(rows, out))
 }
 
 /// Render a single record as a key/value detail table, a JSON object,
@@ -237,15 +236,44 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
     Ok(written)
 }
 
+/// Build the table for `rows`, sized per [`new_table`].
+fn build_table<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Table {
+    let mut table = new_table(out);
+    table.set_header(T::headers().to_vec());
+    if out.width.is_none() {
+        constrain_columns(&mut table, T::headers());
+    }
+    for r in rows {
+        table.add_row(r.cells());
+    }
+    table
+}
+
+/// An empty table sized for `out`.
+///
+/// `--width` is an instruction, not a hint, so an explicit one is met exactly
+/// in both directions: `DynamicFullWidth` spends surplus space instead of
+/// stopping at the natural content width, and [`build_table`] leaves the column
+/// constraints off, since comfy-table honours those over the table width and
+/// they would otherwise hold the table open well past a narrow request.
+///
+/// Choosing the width automatically keeps both — there is no instruction to
+/// respect, only a layout to keep readable.
 fn new_table(out: &OutputOpts) -> Table {
     let mut table = Table::new();
-    table
-        .load_style(UTF8_FULL_CONDENSED)
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    if let Some(width) = out.width {
-        table.set_width(width);
-    } else if !io::stdout().is_terminal() {
-        table.set_width(PIPED_WIDTH);
+    table.load_style(UTF8_FULL_CONDENSED);
+    match out.width {
+        Some(width) => {
+            table
+                .set_content_arrangement(ContentArrangement::DynamicFullWidth)
+                .set_width(width);
+        }
+        None => {
+            table.set_content_arrangement(ContentArrangement::Dynamic);
+            if !io::stdout().is_terminal() {
+                table.set_width(PIPED_WIDTH);
+            }
+        }
     }
     table
 }
@@ -317,6 +345,75 @@ mod tests {
         let mut buf = Vec::new();
         write_csv(rows, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    fn opts(width: Option<u16>) -> OutputOpts {
+        OutputOpts {
+            json: false,
+            csv: None,
+            width,
+        }
+    }
+
+    /// Widest rendered line, in display columns. Every character the box-drawing
+    /// preset uses is single-width, so counting chars is counting columns.
+    fn rendered_width<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> usize {
+        build_table(rows, out)
+            .to_string()
+            .lines()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn an_explicit_width_is_met_exactly() {
+        // The widest record type: its constraints alone add up past 180
+        // columns, which is what used to make a narrower request unachievable.
+        let rows = [row(&["example.com"])];
+        for want in [60_u16, 80, 100, 132, 160] {
+            assert_eq!(
+                rendered_width(&rows, &opts(Some(want))),
+                usize::from(want),
+                "--width {want} was not honoured"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_width_widens_as_well_as_narrows() {
+        // Dynamic alone stops at the natural content width, so asking for more
+        // than the content needs used to be a no-op.
+        let rows = [row(&["example.com"])];
+        let natural = rendered_width(&rows, &opts(None));
+        let wider = u16::try_from(natural).unwrap() + 40;
+        assert_eq!(
+            rendered_width(&rows, &opts(Some(wider))),
+            usize::from(wider)
+        );
+    }
+
+    #[test]
+    fn two_different_widths_render_differently() {
+        // The regression this guards: every requested width collapsed to the
+        // same table, because the column constraints outrank the table width.
+        let rows = [row(&["example.com"])];
+        assert_ne!(
+            rendered_width(&rows, &opts(Some(90))),
+            rendered_width(&rows, &opts(Some(150)))
+        );
+    }
+
+    #[test]
+    fn the_automatic_layout_still_refuses_to_wrap_atomic_columns() {
+        // With no --width the readability constraints stay on, so a hex serial
+        // is never broken across lines.
+        let rows = [row(&["example.com"])];
+        let rendered = build_table(&rows, &opts(None)).to_string();
+        assert!(
+            rendered.contains("0a1b"),
+            "the serial should appear intact:\n{rendered}"
+        );
     }
 
     fn status(current: &str, latest: &str, update_available: bool) -> UpdateStatus {

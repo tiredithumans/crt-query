@@ -43,19 +43,31 @@ async fn run() -> Result<i32> {
             query,
             valid_since,
             all_history,
+            skip_expired,
             limit,
             no_dedupe,
         } => {
+            let terms = Commands::unique_terms(query);
             let lookback = Commands::search_lookback(*valid_since, *all_history);
             let db = open_db(&cli).await?;
-            let rows =
-                queries::search::run_search(&db, query, lookback, *limit, !no_dedupe).await?;
+            let rows = queries::search::run_search(
+                &db,
+                &terms,
+                lookback,
+                *skip_expired,
+                *limit,
+                !no_dedupe,
+            )
+            .await?;
             if rows.is_empty() {
-                if lookback == cli::ALL_HISTORY {
-                    eprintln!("No certificates found for \"{query}\".");
+                let names = quoted(&terms);
+                if *skip_expired {
+                    eprintln!("No unexpired certificates found for {names}.");
+                } else if lookback == cli::ALL_HISTORY {
+                    eprintln!("No certificates found for {names}.");
                 } else {
                     eprintln!(
-                        "No certificates found for \"{query}\" valid within the last \
+                        "No certificates found for {names} valid within the last \
                          {lookback} day(s); widen with --valid-since or --all-history."
                     );
                 }
@@ -83,7 +95,7 @@ async fn run() -> Result<i32> {
             limit,
             no_dedupe,
         } => {
-            let domains = Commands::unique_domains(domain);
+            let domains = Commands::unique_terms(domain);
             let lookback = Commands::expiring_lookback(*since_expired, *skip_expired);
             let db = open_db(&cli).await?;
             let rows = queries::expiring::run_expiring(
@@ -91,7 +103,8 @@ async fn run() -> Result<i32> {
             )
             .await?;
             if rows.is_empty() {
-                let (names, limit_note) = describe_domains(&domains);
+                let names = quoted(&domains);
+                let limit_note = limit_note(&domains);
                 if lookback == 0 {
                     eprintln!(
                         "No unexpired certificates for {names} expiring within \
@@ -124,21 +137,23 @@ async fn open_db(cli: &Cli) -> Result<Db> {
     db::connect(&config::resolve(&cli.conn, &file)).await
 }
 
-/// How to name a set of requested domains in an empty-result message: the
-/// quoted list, and the `--limit` caveat, which reads differently once more
-/// than one domain is in play because the limit applies to each of them.
-fn describe_domains(domains: &[String]) -> (String, &'static str) {
-    let names = domains
+/// How to name the requested terms in an empty-result message.
+fn quoted(terms: &[String]) -> String {
+    terms
         .iter()
-        .map(|d| format!("\"{d}\""))
+        .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
-        .join(", ");
-    let limit_note = if domains.len() == 1 {
+        .join(", ")
+}
+
+/// The `--limit` caveat, which reads differently once more than one domain is
+/// in play because the limit applies to each of them.
+fn limit_note(domains: &[String]) -> &'static str {
+    if domains.len() == 1 {
         "in the first --limit rows"
     } else {
         "in the first --limit rows per domain"
-    };
-    (names, limit_note)
+    }
 }
 
 #[cfg(test)]
@@ -147,15 +162,15 @@ mod tests {
 
     #[test]
     fn one_domain_reads_as_a_single_limit_window() {
-        let (names, note) = describe_domains(&["example.com".to_string()]);
-        assert_eq!(names, "\"example.com\"");
-        assert_eq!(note, "in the first --limit rows");
+        let domains = ["example.com".to_string()];
+        assert_eq!(quoted(&domains), "\"example.com\"");
+        assert_eq!(limit_note(&domains), "in the first --limit rows");
     }
 
     #[test]
     fn several_domains_are_listed_and_the_limit_is_marked_per_domain() {
-        let (names, note) = describe_domains(&["a.example".to_string(), "b.example".to_string()]);
-        assert_eq!(names, "\"a.example\", \"b.example\"");
-        assert_eq!(note, "in the first --limit rows per domain");
+        let domains = ["a.example".to_string(), "b.example".to_string()];
+        assert_eq!(quoted(&domains), "\"a.example\", \"b.example\"");
+        assert_eq!(limit_note(&domains), "in the first --limit rows per domain");
     }
 }
