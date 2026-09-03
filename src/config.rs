@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -39,17 +40,48 @@ pub struct Conn {
 pub fn config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let appdata = std::env::var_os("APPDATA")?;
-        Some(config_path_in(&PathBuf::from(appdata)))
+        Some(config_path_in(&config_root(std::env::var_os("APPDATA"))?))
     }
     #[cfg(not(windows))]
     {
-        let root = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(config_path_in(&root))
+        Some(config_path_in(&config_root(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )?))
     }
+}
+
+/// The directory the config file is looked up under, or `None` if the
+/// environment does not name one absolutely.
+///
+/// Absolute is the whole point. The XDG spec requires a relative
+/// `$XDG_CONFIG_HOME` to be ignored, and a relative or empty `$HOME` is no
+/// better: either resolves the config file against the process's current
+/// directory, so running inside a tree that happens to carry
+/// `./.config/crt-query/config.toml` would silently redirect every query —
+/// `db_url` included — to a host the caller never chose. The only clue would be
+/// the stderr hint, which is suppressed when stderr is not a terminal, so the
+/// environments where this is easiest to hit (cron, systemd units, containers,
+/// `env -i`) are exactly the ones that would never show it.
+///
+/// Taking the values as arguments rather than reading the environment keeps
+/// this testable: `std::env::set_var` is `unsafe` under edition 2024.
+#[cfg(not(windows))]
+fn config_root(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    // `is_absolute` subsumes the emptiness check: "" is not an absolute path.
+    xdg.map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|h| h.join(".config"))
+        })
+}
+
+/// Windows counterpart: `%APPDATA%` is subject to the same reasoning.
+#[cfg(windows)]
+fn config_root(appdata: Option<OsString>) -> Option<PathBuf> {
+    appdata.map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
 fn config_path_in(config_root: &Path) -> PathBuf {
@@ -103,6 +135,59 @@ pub fn resolve(cli: &ConnOpts, file: &FileConfig) -> Conn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    fn root(xdg: Option<&str>, home: Option<&str>) -> Option<String> {
+        config_root(xdg.map(Into::into), home.map(Into::into))
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn an_absolute_xdg_config_home_wins() {
+        assert_eq!(
+            root(Some("/xdg"), Some("/home/u")),
+            Some("/xdg".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_relative_xdg_config_home_is_ignored_as_the_spec_requires() {
+        // Not "./.config" resolved against wherever the process started —
+        // that would let a directory the caller merely happens to be standing
+        // in redirect every query, db_url included.
+        assert_eq!(
+            root(Some(".config"), Some("/home/u")),
+            Some("/home/u/.config".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn an_empty_xdg_config_home_falls_through_to_home() {
+        assert_eq!(
+            root(Some(""), Some("/home/u")),
+            Some("/home/u/.config".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_relative_or_missing_home_yields_no_config_path_at_all() {
+        assert_eq!(root(Some(".config"), Some("home/u")), None);
+        assert_eq!(root(None, None), None);
+        assert_eq!(root(Some(""), Some("")), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn only_an_absolute_appdata_yields_a_config_path() {
+        assert!(config_root(Some(r"C:\\Users\\u\\AppData\\Roaming".into())).is_some());
+        assert!(config_root(Some(r"AppData\\Roaming".into())).is_none());
+        assert!(config_root(Some("".into())).is_none());
+        assert!(config_root(None).is_none());
+    }
 
     fn cli(host: Option<&str>, db_url: Option<&str>) -> ConnOpts {
         ConnOpts {
