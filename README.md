@@ -78,7 +78,7 @@ $Target  = "x86_64-pc-windows-msvc"
 Invoke-WebRequest -Uri "https://github.com/tiredithumans/crt-query/releases/download/$Version/crt-query-$Version-$Target.zip" -OutFile "crt-query.zip"
 Invoke-WebRequest -Uri "https://github.com/tiredithumans/crt-query/releases/download/$Version/SHA256SUMS" -OutFile "SHA256SUMS"
 
-$expected = ((Select-String -Path SHA256SUMS -Pattern [regex]::Escape("crt-query-$Version-$Target.zip")).Line -split '\s+')[0]
+$expected = ((Select-String -Path SHA256SUMS -Pattern ([regex]::Escape("crt-query-$Version-$Target.zip"))).Line -split '\s+')[0]
 $actual   = (Get-FileHash crt-query.zip -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $expected) { throw "checksum mismatch: expected $expected, got $actual" }
 
