@@ -33,13 +33,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history so the diff below can reach the PR base / previous
+          # push, whichever commit that is.
+          fetch-depth: 0
+
+      # "Analyze" is a required check, so the job itself must always run and
+      # report a status — an `on: paths-ignore` at the workflow level would
+      # instead leave it permanently "waiting" on a docs-only PR and block
+      # the merge. Skipping the actual analysis steps below, conditioned on
+      # this diff, gets the same effect without that trap. The weekly
+      # schedule run always analyzes in full: a newly published CodeQL query
+      # still needs to run against unchanged code.
+      - name: Detect code changes
+        id: changes
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE="${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            # No usable base to diff against (e.g. a branch's first push) —
+            # analyze rather than risk skipping real code.
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE" "${{ github.sha }}" \
+              | grep -qE '^(src/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.github/workflows/codeql\.yml$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+        if: steps.changes.outputs.code == 'true'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.changes.outputs.code == 'true'
       - name: Initialize CodeQL
+        if: steps.changes.outputs.code == 'true'
         uses: github/codeql-action/init@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
         with:
           languages: rust
       - name: Analyze
+        if: steps.changes.outputs.code == 'true'
         uses: github/codeql-action/analyze@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
         with:
           category: "/language:rust"
