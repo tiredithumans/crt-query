@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Config, NoTls, Row};
 
-use crate::cli::ConnOpts;
+use crate::config::Conn;
 
 const CONNECT_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -28,17 +29,36 @@ pub struct Db {
 impl Db {
     /// Run a query, translating guest-DB failure modes into actionable errors.
     ///
+    /// `subject` is what this statement is looking up — a domain, a search
+    /// term, a certificate ID — and appears in the progress hint.
+    ///
     /// `query_typed` uses the unnamed prepared statement: crt.sh sits behind a
     /// transaction-pooling pgbouncer, where named prepared statements fail.
     pub async fn query(
         &self,
+        subject: &str,
         sql: &str,
         params: &[(&(dyn ToSql + Sync), Type)],
     ) -> Result<Vec<Row>> {
+        self.hint(subject);
         self.client
             .query_typed(sql, params)
             .await
             .map_err(|e| self.explain(e))
+    }
+
+    /// Announce a statement on stderr before it is sent.
+    ///
+    /// The guest database is intermittently slow, so without this a query
+    /// that takes several seconds is indistinguishable from a hang — and
+    /// `expiring` over several domains sends one statement per domain, where
+    /// silence hides how far along it is. Gated on stderr being a terminal so
+    /// scheduled runs keep clean logs, and on stderr rather than stdout so it
+    /// never lands in a piped table or JSON document.
+    fn hint(&self, subject: &str) {
+        if std::io::stderr().is_terminal() {
+            eprintln!("querying {} for {subject}…", self.target);
+        }
     }
 
     fn explain(&self, err: tokio_postgres::Error) -> anyhow::Error {
@@ -86,15 +106,15 @@ impl Db {
     }
 }
 
-fn build_config(opts: &ConnOpts) -> Result<Config> {
-    let mut config = match &opts.db_url {
+fn build_config(conn: &Conn) -> Result<Config> {
+    let mut config = match &conn.db_url {
         Some(url) => url.parse::<Config>().context("invalid --db-url")?,
         None => {
             let mut c = Config::new();
-            c.host(&opts.host)
-                .port(opts.port)
-                .dbname(&opts.dbname)
-                .user(&opts.user);
+            c.host(&conn.host)
+                .port(conn.port)
+                .dbname(&conn.dbname)
+                .user(&conn.user);
             c
         }
     };
@@ -129,8 +149,8 @@ fn chain(err: &tokio_postgres::Error) -> String {
     out
 }
 
-pub async fn connect(opts: &ConnOpts) -> Result<Db> {
-    let config = build_config(opts)?;
+pub async fn connect(conn: &Conn) -> Result<Db> {
+    let config = build_config(conn)?;
     let target = target(&config);
     let mut last_err = None;
     for attempt in 1..=CONNECT_ATTEMPTS {
@@ -174,10 +194,9 @@ pub async fn connect(opts: &ConnOpts) -> Result<Db> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ConnOpts;
 
-    fn opts(db_url: Option<&str>) -> ConnOpts {
-        ConnOpts {
+    fn conn(db_url: Option<&str>) -> Conn {
+        Conn {
             host: "crt.sh".to_string(),
             port: 5432,
             dbname: "certwatch".to_string(),
@@ -188,13 +207,13 @@ mod tests {
 
     #[test]
     fn target_is_host_and_port_for_the_default_config() {
-        let config = build_config(&opts(None)).unwrap();
+        let config = build_config(&conn(None)).unwrap();
         assert_eq!(target(&config), "crt.sh:5432");
     }
 
     #[test]
     fn target_never_echoes_a_db_url_password() {
-        let config = build_config(&opts(Some(
+        let config = build_config(&conn(Some(
             "postgresql://me:hunter2@db.internal:6432/certwatch",
         )))
         .unwrap();
@@ -205,6 +224,6 @@ mod tests {
 
     #[test]
     fn invalid_db_url_is_rejected_before_connecting() {
-        assert!(build_config(&opts(Some("not a url"))).is_err());
+        assert!(build_config(&conn(Some("not a url"))).is_err());
     }
 }
