@@ -1,6 +1,6 @@
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -95,12 +95,23 @@ pub trait OutputRecord: Serialize {
 /// a later failure should not destroy the previous run's report.
 pub fn precheck_csv(out: &OutputOpts) -> Result<()> {
     if let Some(path) = &out.csv {
+        let existed = path.exists();
         OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
             .open(path)
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
+        // Creating the file is a side effect of testing that it can be
+        // written, not the point of it. Left behind when the run then fails,
+        // it is an empty file where the documented contract promises a header
+        // row — a consumer testing for existence finds a report and parses
+        // nothing out of it, which is worse than the absence it replaced. An
+        // already-present file is untouched: that is the previous run's report
+        // and outliving a later failure is exactly what it is for.
+        if !existed {
+            let _ = std::fs::remove_file(path);
+        }
     }
     Ok(())
 }
@@ -186,7 +197,10 @@ impl UpdateStatus {
 
 impl OutputRecord for UpdateStatus {
     fn headers() -> &'static [&'static str] {
-        &["current", "latest", "update_available", "release_url"]
+        // Display headers, like every other record: `headers()` feeds the table
+        // and the CSV, while the JSON keys come from the serde field names and
+        // are unaffected by what this returns.
+        &["Current", "Latest", "Update Available", "Release URL"]
     }
 
     fn cells(&self) -> Vec<String> {
@@ -282,6 +296,13 @@ fn print_table(table: &Table) -> Result<()> {
     on_stdout(|w| writeln!(w, "{table}"))
 }
 
+/// Write bytes that were rendered elsewhere — currently the completion scripts
+/// — through the same stdout handling as every other output, so a closed reader
+/// ends the run cleanly instead of panicking.
+pub fn emit_raw(bytes: &[u8]) -> Result<()> {
+    on_stdout(|w| w.write_all(bytes))
+}
+
 fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
     on_stdout(|w| {
         serde_json::to_writer_pretty(&mut *w, value).map_err(io::Error::from)?;
@@ -295,7 +316,10 @@ fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
 /// "failed printing to stdout" and the process exits 101.
 fn on_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()> {
     let stdout = io::stdout();
-    let mut w = stdout.lock();
+    // Buffered, because `StdoutLock` is a `LineWriter`: unbuffered it costs one
+    // `write(2)` per line, which pretty-printed JSON emits by the hundred
+    // thousand. The explicit flush below is what makes this safe.
+    let mut w = BufWriter::new(stdout.lock());
     match f(&mut w).and_then(|()| w.flush()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
@@ -455,9 +479,68 @@ mod tests {
         let csv = csv_string(&[status("0.1.0", "0.2.0", true)]);
         assert_eq!(
             csv.lines().next().unwrap(),
-            "current,latest,update_available,release_url"
+            "Current,Latest,Update Available,Release URL"
         );
         assert!(csv.lines().nth(1).unwrap().starts_with("0.1.0,0.2.0,true,"));
+    }
+
+    #[test]
+    fn the_json_keys_are_serde_field_names_not_the_display_headers() {
+        // headers() feeds the table and the CSV only. Renaming a header must
+        // never move a JSON key, which is the machine-readable contract.
+        let json = serde_json::to_value(status("0.1.0", "0.2.0", true)).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["current", "latest", "release_url", "update_available"]
+        );
+    }
+
+    #[test]
+    fn precheck_does_not_leave_behind_a_file_it_only_created_to_test_writability() {
+        let dir = std::env::temp_dir().join(format!("crt-query-precheck-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.csv");
+        let opts = OutputOpts {
+            json: false,
+            csv: Some(path.clone()),
+            width: None,
+        };
+
+        precheck_csv(&opts).unwrap();
+        assert!(
+            !path.exists(),
+            "an empty placeholder is neither the header-only report the \
+             contract promises nor a clean absence"
+        );
+
+        // An existing report is the previous run's, and outliving a later
+        // failure is the whole point of not truncating it.
+        std::fs::write(&path, "Matched Identities\nexample.com\n").unwrap();
+        precheck_csv(&opts).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Matched Identities\nexample.com\n"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn precheck_still_fails_on_an_unwritable_destination() {
+        let opts = OutputOpts {
+            json: false,
+            csv: Some(std::path::PathBuf::from(
+                "/crt-query-no-such-directory/report.csv",
+            )),
+            width: None,
+        };
+        let err = precheck_csv(&opts).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot write CSV to"),
+            "{err:#}"
+        );
     }
 
     #[test]

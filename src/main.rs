@@ -18,7 +18,13 @@ const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 /// The requested certificate ID does not exist. Distinct from EXIT_ERROR so a
 /// script can tell "no such certificate" from "the query failed".
-const EXIT_NOT_FOUND: i32 = 2;
+///
+/// 3 rather than the more obvious 2: clap exits 2 on a usage error, so
+/// `crt-query cert "$id"` with an empty or unset `$id` would otherwise report
+/// "no such certificate" for what is a typo — turning a shell slip into a
+/// false "the certificate is gone" alert, which is the exact confusion this
+/// code exists to prevent.
+const EXIT_NOT_FOUND: i32 = 3;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -36,7 +42,13 @@ async fn run() -> Result<i32> {
     // Check the CSV destination before any real work: before a connection is
     // spent on the shared guest database, which is a genuinely scarce
     // resource, and before check-update's network round trip.
-    output::precheck_csv(&cli.out)?;
+    //
+    // `completions` is exempt: it emits a shell script, never a record, so the
+    // output flags do not apply to it and touching the path would only leave a
+    // file behind for a run that was never going to write one.
+    if !matches!(cli.command, Commands::Completions { .. }) {
+        output::precheck_csv(&cli.out)?;
+    }
 
     match &cli.command {
         Commands::Search {
@@ -121,7 +133,16 @@ async fn run() -> Result<i32> {
         }
         // Neither of the following needs the database.
         Commands::CheckUpdate => update::run_check_update(&cli.out)?,
-        Commands::Completions { shell } => cli::write_completions(*shell, &mut std::io::stdout()),
+        Commands::Completions { shell } => {
+            // Rendered to memory first, then written through the same stdout
+            // path as every other output: clap_complete's generate() panics on
+            // a write error, so handing it a raw stdout makes
+            // `crt-query completions bash | head -1` an exit-101 panic rather
+            // than the clean end of output it is everywhere else.
+            let mut script = Vec::new();
+            cli::write_completions(*shell, &mut script);
+            output::emit_raw(&script)?;
+        }
     }
     Ok(EXIT_OK)
 }
@@ -159,6 +180,25 @@ fn limit_note(domains: &[String]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// clap exits 2 on a usage error and we do not control that number, so the
+    /// only way "no such certificate" stays distinguishable from "you typed the
+    /// command wrong" is for none of our codes to be 2.
+    #[test]
+    fn no_exit_code_collides_with_claps_usage_error() {
+        const CLAP_USAGE_ERROR: i32 = 2;
+        for (name, code) in [
+            ("EXIT_OK", EXIT_OK),
+            ("EXIT_ERROR", EXIT_ERROR),
+            ("EXIT_NOT_FOUND", EXIT_NOT_FOUND),
+        ] {
+            assert_ne!(code, CLAP_USAGE_ERROR, "{name} collides with clap's exit 2");
+        }
+        let mut codes = [EXIT_OK, EXIT_ERROR, EXIT_NOT_FOUND];
+        codes.sort_unstable();
+        let distinct = codes.windows(2).all(|w| w[0] != w[1]);
+        assert!(distinct, "exit codes must stay distinguishable: {codes:?}");
+    }
 
     #[test]
     fn one_domain_reads_as_a_single_limit_window() {

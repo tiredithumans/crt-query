@@ -11,6 +11,18 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Changed
+
+- **`cert` now exits `3`, not `2`, when no certificate has that crt.sh ID.**
+  clap exits `2` on a usage error, so `crt-query cert "$id"` with an empty or
+  unset `$id` reported "no such certificate" for what was a typo — turning a
+  shell slip into a false "the certificate is gone" alert, the exact confusion
+  the distinct code exists to prevent. A script keying on `2` for not-found
+  needs updating; `0` and `1` are unchanged.
+- `check-update --csv` and its table now use display column headers
+  (`Current`, `Latest`, `Update Available`, `Release URL`) like every other
+  record type. The `--json` keys are unchanged.
+
 ### Fixed
 
 - Windows installs no longer abort at the last step. `install.ps1` confirmed a

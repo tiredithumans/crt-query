@@ -160,10 +160,10 @@ anything close to renewal.
 | --- | --- |
 | Timestamps | UTC everywhere. JSON carries an explicit `Z`; table columns are labelled `(UTC)` |
 | `--json` | Always valid JSON, including `[]` for an empty result and `null` for a missing `cert` ID |
-| `--csv` | Always writes the file, header-only when empty, so a scheduled job never re-reads a stale report |
+| `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. A run that fails before emitting leaves the previous report untouched rather than an empty one |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
 | Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |
-| Exit codes | `0` completed, even with no results · `1` failed · `2` no certificate with that crt.sh ID |
+| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
 
 Left to size itself, the table keeps atomic columns — an ID, a hex serial, a
 timestamp — off the wrapping list, and holds a floor under the free-text ones so
