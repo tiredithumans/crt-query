@@ -53,6 +53,27 @@ allow-wildcard-paths = true
 name = "openssl"
 [[bans.deny]]
 name = "openssl-sys"
+# The comment above says "no TLS stack", but only OpenSSL was actually named,
+# so rustls or native-tls could arrive transitively without tripping anything.
+# These are the crates that would carry one in.
+[[bans.deny]]
+name = "rustls"
+[[bans.deny]]
+name = "tokio-rustls"
+[[bans.deny]]
+name = "native-tls"
+[[bans.deny]]
+name = "tokio-native-tls"
+[[bans.deny]]
+name = "postgres-native-tls"
+[[bans.deny]]
+name = "postgres-openssl"
+[[bans.deny]]
+name = "schannel"
+[[bans.deny]]
+name = "security-framework"
+# Not banned: rustls-pki-types. It is a types crate with no TLS implementation
+# in it and turns up in dependency graphs that never negotiate anything.
 
 [sources]
 # crates.io only. A git or alternate-registry dependency must be added here

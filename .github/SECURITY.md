@@ -23,6 +23,9 @@ by default, writes no state beyond files you ask for with `--csv`, and the
 Things that are in scope:
 
 - Anything that could execute code or write outside a path the user specified.
+  Note that `check-update` shells out to the system `curl`, resolved through
+  `PATH` — the only external process this tool starts, and the only place a
+  `PATH` entry the user did not intend could get code running.
 - Credential disclosure through `--db-url` when pointing the tool at a private
   database — for example a password reaching stderr, a log, or an error message.
 - Injection into the SQL sent to the server. Every user value is bound as a

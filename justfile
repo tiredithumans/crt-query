@@ -44,8 +44,9 @@ test:
 check:
     cargo check --locked --all-targets
 
-# Lint gate for the install scripts. They are piped into a shell by people who
-# have not read them, so they get a gate like everything else.
+# They are piped into a shell by people who have not read them, so they get a
+# gate like everything else.
+# Lint gate for install.sh and install.ps1.
 lint-scripts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -95,13 +96,13 @@ deny:
 # --- Aggregates ------------------------------------------------------------
 
 # Every offline CI gate, in CI order. Run this before opening a PR.
-verify: fmt-check lint test msrv lint-scripts
+verify: fmt-check lint test msrv lint-scripts build
     @echo ""
     @echo "verify OK — NOT run (needs network): audit, deny."
     @echo "  just verify-full = full CI parity (adds the dependency gates)"
 
 # Full CI parity: the offline gates plus both dependency-policy scans.
-verify-full: fmt-check lint test msrv lint-scripts audit deny
+verify-full: fmt-check lint test msrv lint-scripts build audit deny
     @echo ""
     @echo "verify-full OK — every required check should pass on the PR."
 

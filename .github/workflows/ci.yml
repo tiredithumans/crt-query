@@ -17,7 +17,9 @@ on:
   workflow_dispatch:
   schedule:
     # Weekly RustSec refresh, so an advisory filed after merge still reaches us.
-    # Only the dependency jobs run on this tick — see their `if:` conditions.
+    # The `scripts` and `actionlint` jobs opt out of this tick (see their `if:`
+    # conditions); the rest run, which is free and occasionally catches a
+    # toolchain or dependency change that nothing in the repo triggered.
     - cron: "0 6 * * 1"
 
 # A new push to the same branch supersedes the in-flight run.
@@ -63,6 +65,14 @@ jobs:
         run: just test
       - name: Build
         run: just build
+
+      # The release profile (lto = "thin", strip = true) is otherwise compiled
+      # for the first time by the tag push — after an annotated tag exists, and
+      # with fail-fast disabled, so a bad leg leaves artifacts uploaded, the
+      # draft skipped and a tag to delete. One Linux leg is enough to catch it.
+      - name: Release profile builds
+        if: runner.os == 'Linux'
+        run: just build-release
 
       # install.ps1 confirms a good install by running the binary it just
       # copied. `lint-scripts` only parses that file, so a runtime fault in the
@@ -129,15 +139,14 @@ jobs:
           persist-credentials: false
       # Workflow-file syntax gate. An unparseable workflow produces 0-second
       # "workflow file issue" runs and no other signal; this turns that into a
-      # failing check. Pinned by version + checksum — there is no action to SHA-
-      # pin here, so the tarball is verified instead.
+      # failing check. install-action verifies the download's checksum itself,
+      # which retires the hand-maintained SHA-256 that had to be edited by hand
+      # on every version bump.
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: actionlint@1.7.12
       - name: actionlint
-        run: |
-          curl -sSfL -o actionlint.tar.gz \
-            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
-          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
-          tar -xzf actionlint.tar.gz actionlint
-          ./actionlint -color
+        run: actionlint -color
 
   audit:
     name: cargo-audit
