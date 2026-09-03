@@ -11,6 +11,30 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Fixed
+
+- A search term containing a backslash no longer reports "No certificates
+  found" for certificates that exist. The identity filter's `ILIKE` had no
+  `ESCAPE` clause, so Postgres' default backslash escape applied: every
+  backslash was swallowed and the character after it taken literally, making
+  `a\b` search for `ab` and a trailing backslash build a pattern that cannot
+  match at all. `--help` documents `%` and `_` as the only wildcards, and
+  `ESCAPE ''` now makes that true. Hostnames do not contain backslashes, so
+  this shows up on identity terms — a DN fragment, an email SAN — where a
+  confident, wrong "nothing exists" is the worst possible answer.
+- A stalled crt.sh no longer hangs the run. `connect_timeout` bounds only the
+  TCP connect, not the startup exchange and not the query, so a server that
+  accepted the socket and then stopped answering left the process silent until
+  the two-hour keepalive default noticed — wedging a scheduled `expiring --csv`
+  slot instead of failing into the next run. A statement is now capped at 180s
+  and a connection attempt at 15s. The statement cap sits deliberately above
+  crt.sh's own ~120s timeout so the server's more specific "narrow your query"
+  message stays the one you see.
+- A rejected credential or a missing database is no longer retried three times.
+  Those fail identically on every attempt, so retrying only buried the real
+  error under two misleading "retrying..." lines. Load and transport failures
+  still get the full retry budget.
+
 ### Changed
 
 - **`cert` now exits `3`, not `2`, when no certificate has that crt.sh ID.**

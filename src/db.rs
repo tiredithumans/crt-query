@@ -14,6 +14,25 @@ use crate::config::Conn;
 const CONNECT_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// Ceiling on a single statement, handshake to last row.
+///
+/// `Config::connect_timeout` covers only `TcpStream::connect` — not the
+/// startup and authentication exchange, and not the query itself. A server
+/// that accepts the socket and then stops answering leaves the process silent
+/// until the two-hour keepalive default notices, which for a scheduled
+/// `expiring --csv` means a wedged slot rather than a fast failure into the
+/// next run.
+///
+/// Set well above crt.sh's own statement timeout (~120s) on purpose: the
+/// server's `QUERY_CANCELED` names the real problem and suggests a narrower
+/// search, so it should be what fires in the ordinary too-broad-query case.
+/// This bound is for the case where nothing comes back at all.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Ceiling on one connection attempt, including the startup exchange that
+/// `connect_timeout` leaves uncovered.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// A connected client plus whatever killed its connection task, if anything.
 pub struct Db {
     client: Client,
@@ -41,10 +60,16 @@ impl Db {
         params: &[(&(dyn ToSql + Sync), Type)],
     ) -> Result<Vec<Row>> {
         self.hint(subject);
-        self.client
-            .query_typed(sql, params)
-            .await
-            .map_err(|e| self.explain(e))
+        match tokio::time::timeout(QUERY_TIMEOUT, self.client.query_typed(sql, params)).await {
+            Ok(result) => result.map_err(|e| self.explain(e)),
+            Err(_) => Err(anyhow::anyhow!(
+                "{} did not answer within {}s; the guest database is shared and \
+                 intermittently slow — retry, or narrow the query with a more \
+                 specific term or a lower --limit",
+                self.target,
+                QUERY_TIMEOUT.as_secs()
+            )),
+        }
     }
 
     /// Announce a statement on stderr before it is sent.
@@ -149,14 +174,53 @@ fn chain(err: &tokio_postgres::Error) -> String {
     out
 }
 
+/// Whether a failed connection attempt is worth retrying.
+///
+/// Retrying is for load and transport: the guest database drops connections
+/// when busy, and that is what `CONNECT_ATTEMPTS` exists for. A rejected
+/// password or a database that does not exist will be rejected the same way
+/// three times, so retrying only delays the error the caller has to read —
+/// with two misleading "retrying..." lines in front of it.
+fn worth_retrying(err: &tokio_postgres::Error) -> bool {
+    match err.code() {
+        // Class 28 — invalid authorization specification.
+        Some(code) if code.code().starts_with("28") => false,
+        Some(&SqlState::INVALID_CATALOG_NAME) => false,
+        _ => true,
+    }
+}
+
 pub async fn connect(conn: &Conn) -> Result<Db> {
     let config = build_config(conn)?;
     let target = target(&config);
-    let mut last_err = None;
+    let mut last_err: Option<anyhow::Error> = None;
     for attempt in 1..=CONNECT_ATTEMPTS {
         // NoTls: the guest DB serves public read-only data with passwordless
         // auth. Switch to tokio-postgres-rustls if transport privacy is needed.
-        match config.connect(NoTls).await {
+        //
+        // Wrapped in a timeout because `connect_timeout` in the config bounds
+        // only the TCP connect: a host that accepts the socket and never
+        // completes the startup exchange would otherwise hang here forever.
+        let attempted = match tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await {
+            Ok(result) => result,
+            Err(_) => {
+                let stalled = anyhow::anyhow!(
+                    "no response from {target} within {}s (connected, but the startup \
+                     exchange never completed)",
+                    CONNECT_TIMEOUT.as_secs()
+                );
+                if attempt < CONNECT_ATTEMPTS {
+                    eprintln!(
+                        "connection attempt {attempt}/{CONNECT_ATTEMPTS} to {target} \
+                         failed: {stalled}; retrying..."
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                last_err = Some(stalled);
+                continue;
+            }
+        };
+        match attempted {
             Ok((client, connection)) => {
                 let conn_err: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
                 let slot = Arc::clone(&conn_err);
@@ -172,21 +236,26 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
                 });
             }
             Err(e) => {
-                if attempt < CONNECT_ATTEMPTS {
+                let retryable = worth_retrying(&e);
+                if attempt < CONNECT_ATTEMPTS && retryable {
                     eprintln!(
                         "connection attempt {attempt}/{CONNECT_ATTEMPTS} to {target} failed: {}; retrying...",
                         chain(&e)
                     );
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
-                last_err = Some(e);
+                let fatal = !retryable;
+                last_err = Some(anyhow::Error::new(e));
+                if fatal {
+                    break;
+                }
             }
         }
     }
-    Err(anyhow::Error::new(last_err.expect("at least one attempt"))).with_context(|| {
+    Err(last_err.expect("at least one attempt")).with_context(|| {
         format!(
-            "could not connect to {target} after {CONNECT_ATTEMPTS} attempts; the crt.sh \
-             guest database is shared and may be overloaded — wait a moment and retry"
+            "could not connect to {target}; the crt.sh guest database is shared \
+             and may be overloaded — wait a moment and retry"
         )
     })
 }
@@ -225,5 +294,37 @@ mod tests {
     #[test]
     fn invalid_db_url_is_rejected_before_connecting() {
         assert!(build_config(&conn(Some("not a url"))).is_err());
+    }
+
+    #[test]
+    fn the_query_deadline_sits_above_the_servers_own_statement_timeout() {
+        // crt.sh cancels at roughly 120s and says so in a way that names the
+        // fix. If this bound dropped below that, every too-broad query would
+        // surface as our generic "did not answer" instead of the server's
+        // actionable QUERY_CANCELED.
+        assert!(
+            QUERY_TIMEOUT > Duration::from_secs(120),
+            "QUERY_TIMEOUT {QUERY_TIMEOUT:?} would pre-empt the server's own timeout"
+        );
+        // And a connection attempt must not be able to outlast the whole
+        // retry budget it is one third of.
+        assert!(CONNECT_TIMEOUT < QUERY_TIMEOUT);
+    }
+
+    #[test]
+    fn a_rejected_credential_is_not_retried() {
+        // Retrying is for load and transport. A password the server rejected
+        // will be rejected identically twice more, so retrying only buries the
+        // real error under two misleading "retrying..." lines.
+        for code in [
+            SqlState::INVALID_PASSWORD,
+            SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+        ] {
+            assert!(
+                code.code().starts_with("28"),
+                "{code:?} is no longer class 28; worth_retrying needs updating"
+            );
+        }
+        assert_eq!(SqlState::INVALID_CATALOG_NAME.code(), "3D000");
     }
 }
