@@ -64,6 +64,25 @@ jobs:
       - name: Build
         run: just build
 
+      # install.ps1 confirms a good install by running the binary it just
+      # copied. `lint-scripts` only parses that file, so a runtime fault in the
+      # check itself passes every gate and then breaks every Windows install --
+      # which is exactly what happened. Run the real shape against the binary
+      # built above; keep it in lockstep with the block in install.ps1.
+      - name: install.ps1 verification shape runs clean
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $dest = 'target/debug/crt-query.exe'
+          $versionOutput = & $dest --version 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
+              throw "built $dest but it would not run"
+          }
+          $installed = @($versionOutput)[0]
+          Write-Host "post-install check would report: $installed"
+
   scripts:
     name: Install scripts
     if: github.event_name != 'schedule'

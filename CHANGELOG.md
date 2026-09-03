@@ -11,6 +11,26 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows installs no longer abort at the last step. `install.ps1` confirmed a
+  good install by piping `crt-query --version` into `Select-Object -First 1`;
+  the pipeline short-circuits on that one line, a short-circuited native command
+  never sets `$LASTEXITCODE`, and reading an unset variable under
+  `Set-StrictMode -Version Latest` is a terminating error. The binary was
+  already in place, so the failure came after a successful install: no PATH
+  entry, an error on stderr, and — for the documented `irm | iex` route — a
+  shell killed by the `exit 1`. It presented as intermittent because a session
+  where any earlier native command had run had a stale `$LASTEXITCODE` to read.
+  CI now runs that verification shape against a freshly built binary on
+  `windows-latest`; the existing script gate only parses the file.
+- `install.ps1` no longer flattens `%VAR%` entries in your user `PATH`.
+  `[Environment]::GetEnvironmentVariable` expands them and
+  `SetEnvironmentVariable` writes the expanded text back as `REG_SZ`, so adding
+  crt-query to `PATH` permanently resolved every other installer's unexpanded
+  entry — rustup's `%USERPROFILE%\.cargo\bin` among them. The value is now read
+  and written through the registry with its kind preserved.
+
 ## [0.3.0] - 2026-09-03
 
 ### Added

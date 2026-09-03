@@ -149,21 +149,47 @@ Build from source instead:
     # upgrade: the mark comes back with each new download.
     Unblock-File -Path $dest -ErrorAction SilentlyContinue
 
-    $installed = (& $dest --version 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or -not $installed) {
+    # Capture first, slice after. Piping into `Select-Object -First 1` stops the
+    # pipeline as soon as it has its one line, and a short-circuited native
+    # command never sets $LASTEXITCODE -- which is a terminating error under the
+    # StrictMode above, so the check meant to confirm a good install was the
+    # thing that failed it.
+    $versionOutput = & $dest --version 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
         throw "installed $dest but it would not run"
     }
+    $installed = @($versionOutput)[0]
     Write-Host "Installed $installed to $dest"
 
     # --- PATH --------------------------------------------------------------
 
     if (-not $NoPathUpdate) {
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        $onPath = $userPath -and (($userPath -split ';') -contains $Dir)
-        if (-not $onPath) {
-            $newPath = if ($userPath) { "$userPath;$Dir" } else { $Dir }
-            [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-            Write-Host "Added $Dir to your user PATH. Open a new terminal for it to take effect."
+        # Go to the registry rather than [Environment]::GetEnvironmentVariable:
+        # that expands %USERPROFILE% and friends, and SetEnvironmentVariable
+        # writes the expanded result back as REG_SZ. Together they silently
+        # flatten every unexpanded entry another installer put there on purpose
+        # -- rustup's %USERPROFILE%\.cargo\bin is the one people hit -- which
+        # then stops following the user account it was written for.
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        try {
+            $hasPath = @($key.GetValueNames()) -contains 'Path'
+            $userPath = $key.GetValue(
+                'Path', '',
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $onPath = $userPath -and (($userPath -split ';') -contains $Dir)
+            if (-not $onPath) {
+                # A new value is REG_EXPAND_SZ so a later %VAR% entry still works.
+                $kind = if ($hasPath) { $key.GetValueKind('Path') }
+                        else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+                $newPath = if ($userPath) { "$userPath;$Dir" } else { $Dir }
+                $key.SetValue('Path', $newPath, $kind)
+                # Writing the key directly skips the WM_SETTINGCHANGE broadcast
+                # SetEnvironmentVariable sends, so a new terminal is required
+                # rather than merely recommended.
+                Write-Host "Added $Dir to your user PATH. Open a new terminal for it to take effect."
+            }
+        } finally {
+            if ($key) { $key.Dispose() }
         }
     }
 
