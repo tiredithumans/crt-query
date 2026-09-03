@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Write};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use comfy_table::presets::UTF8_FULL_CONDENSED;
-use comfy_table::{ContentArrangement, Table};
+use comfy_table::{ColumnConstraint, ContentArrangement, Table, Width};
 use serde::Serialize;
 
 use crate::cli::OutputOpts;
@@ -17,6 +17,55 @@ const DASH: &str = "-";
 /// has nothing to measure against a pipe, so without this the table renders at
 /// its full natural width — often several hundred columns.
 const PIPED_WIDTH: u16 = 120;
+
+/// Columns with no natural wrap point — an ID, a hex serial, a fixed-format
+/// timestamp — pinned to their exact content width. `ContentArrangement::Dynamic`
+/// only exempts a column from wrapping when its content is already narrower
+/// than the current average, so header text alone (e.g. "Not Before (UTC)")
+/// can push these into the "wrap when squeezed" bucket even though breaking a
+/// serial mid-hex-digit or a timestamp between date and time makes them
+/// harder to read, not easier.
+const NO_WRAP_HEADERS: &[&str] = &[
+    "crt.sh ID",
+    "Issuer CA ID",
+    "Serial",
+    "Not Before (UTC)",
+    "Not After (UTC)",
+    "Days Left",
+    "Status",
+];
+
+/// Free-text columns that do have natural wrap points (spaces, dots, commas)
+/// but still need a floor: without one they end up squeezed to a
+/// character-per-line sliver once the columns above claim their content
+/// width. A minimum here can push the table wider than the target width —
+/// preferred over a technically-fitting table nobody can read.
+const MIN_WIDTH_HEADERS: &[(&str, u16)] = &[
+    ("Issuer", 20),
+    ("Matched Identities", 20),
+    ("Common Name", 18),
+];
+
+/// Apply [`NO_WRAP_HEADERS`] and [`MIN_WIDTH_HEADERS`] to `table` by matching
+/// on the header text already set via `set_header`, so this works across
+/// [`OutputRecord`] types without hard-coding column positions.
+fn constrain_columns(table: &mut Table, headers: &[&str]) {
+    for (i, header) in headers.iter().enumerate() {
+        let constraint = if NO_WRAP_HEADERS.contains(header) {
+            Some(ColumnConstraint::ContentWidth)
+        } else {
+            MIN_WIDTH_HEADERS
+                .iter()
+                .find(|(name, _)| name == header)
+                .map(|(_, min)| ColumnConstraint::LowerBoundary(Width::Fixed(*min)))
+        };
+        if let Some(constraint) = constraint
+            && let Some(column) = table.column_mut(i)
+        {
+            column.set_constraint(constraint);
+        }
+    }
+}
 
 const TS_FORMAT: &str = "%Y-%m-%d %H:%M";
 
@@ -68,6 +117,7 @@ pub fn emit<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
     }
     let mut table = new_table(out);
     table.set_header(T::headers().to_vec());
+    constrain_columns(&mut table, T::headers());
     for r in rows {
         table.add_row(r.cells());
     }
@@ -260,5 +310,38 @@ mod tests {
         assert_eq!(fmt_opt(Some(42)), "42");
         assert_eq!(fmt_ts(None), "-");
         assert_eq!(fmt_ts(Some(&utc(2026, 4, 1))), "2026-04-01 00:00");
+    }
+
+    #[test]
+    fn constrain_columns_pins_ids_serial_and_timestamps_to_content_width() {
+        let headers = SearchRow::headers();
+        let mut table = Table::new();
+        table.set_header(headers.to_vec());
+        constrain_columns(&mut table, headers);
+
+        for (i, header) in headers.iter().enumerate() {
+            let constraint = table.column(i).unwrap().constraint();
+            match *header {
+                "crt.sh ID" | "Issuer CA ID" | "Serial" | "Not Before (UTC)"
+                | "Not After (UTC)" => {
+                    // No natural wrap point in an ID, a hex serial, or a
+                    // formatted timestamp: wrapping only garbles them.
+                    assert_eq!(
+                        constraint,
+                        Some(&ColumnConstraint::ContentWidth),
+                        "{header} should never wrap"
+                    );
+                }
+                "Issuer" | "Matched Identities" | "Common Name" => {
+                    // Free text with real wrap points still needs a floor,
+                    // or it gets squeezed to a character-per-line sliver.
+                    assert!(
+                        matches!(constraint, Some(ColumnConstraint::LowerBoundary(_))),
+                        "{header} should have a minimum width, got {constraint:?}"
+                    );
+                }
+                other => panic!("unhandled SearchRow header {other:?} in this test"),
+            }
+        }
     }
 }
