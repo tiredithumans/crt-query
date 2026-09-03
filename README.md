@@ -29,14 +29,14 @@ Output is a table, JSON, or CSV.
 
 ## Install
 
-### Prebuilt binary
+Prebuilt archives are on the [latest release](https://github.com/tiredithumans/crt-query/releases/latest)
+for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`
+and `x86_64-pc-windows-msvc`. Each comes with a `SHA256SUMS` file covering
+every archive in the release — always verify before installing.
 
-Download the archive for your platform from the
-[latest release](https://github.com/tiredithumans/crt-query/releases/latest),
-verify it, and put the binary on your `PATH`:
+### Linux
 
 ```sh
-# Linux x86_64 — adjust the tag and target for your platform
 VERSION=v0.1.0
 TARGET=x86_64-unknown-linux-gnu
 curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/crt-query-$VERSION-$TARGET.tar.gz"
@@ -46,12 +46,52 @@ tar -xzf "crt-query-$VERSION-$TARGET.tar.gz"
 sudo install -m 0755 "crt-query-$VERSION-$TARGET/crt-query" /usr/local/bin/
 ```
 
-Releases ship for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
-`x86_64-apple-darwin` and `x86_64-pc-windows-msvc`. macOS binaries are unsigned,
-so Gatekeeper will quarantine them: clear it with
-`xattr -d com.apple.quarantine ./crt-query`.
+### macOS
+
+Pick the target for your chip: `aarch64-apple-darwin` for Apple Silicon (M-series),
+`x86_64-apple-darwin` for Intel.
+
+```sh
+VERSION=v0.1.0
+TARGET=aarch64-apple-darwin   # Intel: x86_64-apple-darwin
+curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/crt-query-$VERSION-$TARGET.tar.gz"
+curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/SHA256SUMS"
+shasum -a 256 --ignore-missing -c SHA256SUMS
+tar -xzf "crt-query-$VERSION-$TARGET.tar.gz"
+sudo install -m 0755 "crt-query-$VERSION-$TARGET/crt-query" /usr/local/bin/
+```
+
+The binaries are unsigned, so Gatekeeper quarantines them on first run. Clear
+the quarantine attribute once, after installing:
+
+```sh
+xattr -d com.apple.quarantine /usr/local/bin/crt-query
+```
+
+### Windows
+
+Run in PowerShell:
+
+```powershell
+$Version = "v0.1.0"
+$Target  = "x86_64-pc-windows-msvc"
+Invoke-WebRequest -Uri "https://github.com/tiredithumans/crt-query/releases/download/$Version/crt-query-$Version-$Target.zip" -OutFile "crt-query.zip"
+Invoke-WebRequest -Uri "https://github.com/tiredithumans/crt-query/releases/download/$Version/SHA256SUMS" -OutFile "SHA256SUMS"
+
+$expected = ((Select-String -Path SHA256SUMS -Pattern [regex]::Escape("crt-query-$Version-$Target.zip")).Line -split '\s+')[0]
+$actual   = (Get-FileHash crt-query.zip -Algorithm SHA256).Hash.ToLower()
+if ($actual -ne $expected) { throw "checksum mismatch: expected $expected, got $actual" }
+
+Expand-Archive crt-query.zip -DestinationPath .
+```
+
+This extracts a `crt-query-$Version-$Target\` folder containing `crt-query.exe`.
+Move it to a folder on your `PATH` (e.g. `C:\Tools`, added once via
+*System Properties → Environment Variables → Path*).
 
 ### From source
+
+Any OS with Rust 1.98+ (see `rust-toolchain.toml`):
 
 ```sh
 cargo install --git https://github.com/tiredithumans/crt-query
