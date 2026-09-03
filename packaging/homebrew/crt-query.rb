@@ -18,27 +18,27 @@ class CrtQuery < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/tiredithumans/crt-query/releases/download/v0.1.0/crt-query-v0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "51d2378f182d8a6235ae8953f48b28409024eb61f63c094073bf3dd76dd945e0"
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.2.0/crt-query-v0.2.0-aarch64-apple-darwin.tar.gz"
+      sha256 "194de5f7e536d7b181374f48f3a1026c0065b049dc64f128d40f3f607bee7b46"
     end
     on_intel do
-      url "https://github.com/tiredithumans/crt-query/releases/download/v0.1.0/crt-query-v0.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "edc60e9062f7308f042ebcb678262d591c666ef17caf2e38a894680f5e27cbad"
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.2.0/crt-query-v0.2.0-x86_64-apple-darwin.tar.gz"
+      sha256 "7b6d4192357c02dece3f04eca1d79cf12ac98e1df24ab6530539d3dd41dd5513"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/tiredithumans/crt-query/releases/download/v0.1.0/crt-query-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "a643ebf770b9ab63f08e99c159c010ce0dc6c8b09f5e035e8f048d1087c2d0a0"
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.2.0/crt-query-v0.2.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "45047feca1e0dea24cd9c8f5b2898990b26463017da2d7b74ae01044bd8bb71b"
     end
   end
 
   def install
     bin.install "crt-query"
-    # No completions here: `crt-query completions` arrived in v0.2.0,
-    # and Homebrew generates them by running the installed binary, so calling
-    # it against v0.1.0 would abort the install.
+    # `crt-query completions <shell>` takes the shell as a bare argument, which
+    # is this helper's default parameter form.
+    generate_completions_from_executable(bin/"crt-query", "completions")
   end
 
   test do
