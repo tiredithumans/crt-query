@@ -428,16 +428,69 @@ mod tests {
         );
     }
 
+    /// A row wide enough that the automatic layout has to make a choice.
+    ///
+    /// The shared `row()` fixture cannot test this: its four-character serial
+    /// fits at any width, so the assertion held whether or not the layout
+    /// heuristic ran at all. These are realistic values — a full 36-hex-digit
+    /// serial, a real-shaped issuer DN, two long identities — whose combined
+    /// width exceeds the 120-column fallback and forces the wrap decision.
+    fn wide_row() -> SearchRow {
+        SearchRow {
+            id: 22625564176,
+            issuer_ca_id: Some(204411),
+            issuer_name: Some(
+                "C=GB, O=Sectigo Limited, CN=Sectigo Public Server Authentication CA OV R36"
+                    .to_string(),
+            ),
+            matched_identities: vec![
+                "very-long-subdomain-name.service.example.com".to_string(),
+                "another-long-subdomain-name.service.example.org".to_string(),
+            ],
+            common_name: Some("very-long-subdomain-name.service.example.com".to_string()),
+            serial: Some("009de10580fa26441939f38af4afb1cb40".to_string()),
+            not_before: Some(utc(2026, 1, 1)),
+            not_after: Some(utc(2026, 4, 1)),
+        }
+    }
+
     #[test]
     fn the_automatic_layout_still_refuses_to_wrap_atomic_columns() {
         // With no --width the readability constraints stay on, so a hex serial
-        // is never broken across lines.
-        let rows = [row(&["example.com"])];
+        // is never broken across lines even under real wrapping pressure.
+        let rows = [wide_row()];
         let rendered = build_table(&rows, &opts(None)).to_string();
+        let serial = rows[0].serial.as_deref().unwrap();
         assert!(
-            rendered.contains("0a1b"),
-            "the serial should appear intact:\n{rendered}"
+            rendered.lines().any(|l| l.contains(serial)),
+            "the 34-character serial was split across lines, so the atomic-column \
+             constraint did not apply:\n{rendered}"
         );
+        // The same row must still be wrapped somewhere — otherwise the fixture
+        // is not exerting the pressure this test claims to measure.
+        assert!(
+            rendered.lines().count() > 4,
+            "fixture too narrow to force any wrapping; this test proves nothing:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_width_is_honoured_exactly() {
+        // --width is an instruction, not a hint: it overrides the readability
+        // constraints above rather than being clamped by them.
+        for width in [60usize, 100, 200] {
+            let rendered = build_table(&[wide_row()], &opts(Some(width as u16))).to_string();
+            let widest = rendered
+                .lines()
+                .map(str::chars)
+                .map(Iterator::count)
+                .max()
+                .unwrap();
+            assert_eq!(
+                widest, width,
+                "--width {width} produced a {widest}-column table:\n{rendered}"
+            );
+        }
     }
 
     fn status(current: &str, latest: &str, update_available: bool) -> UpdateStatus {
