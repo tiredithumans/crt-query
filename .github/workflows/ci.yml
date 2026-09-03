@@ -64,6 +64,23 @@ jobs:
       - name: Build
         run: just build
 
+  scripts:
+    name: Install scripts
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: just
+      # shellcheck and pwsh are both preinstalled on the ubuntu runner image,
+      # so the recipe below is the same command a contributor runs locally.
+      - name: Lint install.sh and install.ps1
+        run: just lint-scripts
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
