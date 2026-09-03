@@ -11,6 +11,14 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Fixed
+
+- Table output: the crt.sh ID, Issuer CA ID, Serial, and both timestamp
+  columns no longer wrap — a serial cut mid-hex-digit or a timestamp split
+  between date and time is harder to read, not easier. Issuer, Matched
+  Identities, and Common Name now keep a minimum width instead of being
+  squeezed to a character per line once those columns claim their space.
+
 ## [0.1.0] - 2026-09-02
 
 Initial release.
