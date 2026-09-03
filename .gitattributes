@@ -1,0 +1,15 @@
+# Normalise line endings in the working tree, not just in the repository.
+#
+# `include_str!` embeds a file byte for byte, so a golden SQL snapshot checked
+# out with CRLF cannot equal a constant written with LF — the assertion fails on
+# Windows and only on Windows, which is the worst place to discover it.
+* text=auto
+
+# These are compared byte for byte or executed by a shell, so LF is not a
+# preference here.
+*.sql text eol=lf
+*.sh  text eol=lf
+*.rs  text eol=lf
+
+# PowerShell is the one file Windows tooling is expected to edit in place.
+*.ps1 text eol=crlf

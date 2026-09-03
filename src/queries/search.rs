@@ -161,9 +161,26 @@ pub async fn run_search(
     Ok(out)
 }
 
+/// The exact statement this module sends, for the golden-file test in
+/// `queries::tests`. Reading it through one accessor keeps the snapshot tied
+/// to what actually runs.
+#[cfg(test)]
+pub(crate) fn sql() -> &'static str {
+    SEARCH_SQL.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// README: "--json … including `[]` for an empty result". Serialising an
+    /// empty Vec is what makes that true, and a future switch to an object
+    /// wrapper would break every consumer silently.
+    #[test]
+    fn an_empty_search_serialises_as_an_empty_json_array() {
+        let rows: Vec<SearchRow> = Vec::new();
+        assert_eq!(serde_json::to_string(&rows).unwrap(), "[]");
+    }
     use chrono::NaiveDate;
 
     fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {

@@ -141,6 +141,15 @@ pub async fn run_expiring(
             raw.push(RawRow::from_pg(row)?);
         }
     }
+    Ok(assemble_expiring(raw, dedupe))
+}
+
+/// Turn the rows every statement returned into the finished, sorted list.
+///
+/// Split out from `run_expiring` because everything above it needs a database
+/// and everything here does not: this is where the one non-obvious rule in
+/// this module lives, and a rule with no test is a rule that comes back.
+fn assemble_expiring(raw: Vec<RawRow>, dedupe: bool) -> Vec<ExpiringRow> {
     // The same clock the server used to choose the window decides the labels,
     // so --skip-expired can never surface a row marked EXPIRED. Across
     // several statements that means the *earliest* clock: every row satisfied
@@ -158,7 +167,15 @@ pub async fn run_expiring(
         .map(|r| ExpiringRow::new(r, now))
         .collect();
     out.sort_by_key(|r| r.cert.not_after);
-    Ok(out)
+    out
+}
+
+/// The exact statement this module sends, for the golden-file test in
+/// `queries::tests`. Reading it through one accessor keeps the snapshot tied
+/// to what actually runs.
+#[cfg(test)]
+pub(crate) fn sql() -> &'static str {
+    EXPIRING_SQL.as_str()
 }
 
 #[cfg(test)]
@@ -186,6 +203,112 @@ mod tests {
             not_after: Some(now() + offset),
         };
         ExpiringRow::new(cert, now())
+    }
+
+    fn raw(id: i64, not_after: DateTime<Utc>, server_now: DateTime<Utc>) -> RawRow {
+        RawRow {
+            id,
+            issuer_ca_id: Some(1),
+            issuer_name: None,
+            matched_identity: "example.com".to_string(),
+            common_name: None,
+            serial: Some(format!("{id:02x}")),
+            not_before: Some(server_now - Duration::days(90)),
+            not_after: Some(not_after),
+            server_now,
+        }
+    }
+
+    /// `expiring` over several domains sends one statement per domain, each
+    /// stamping its own `now()`. Labelling against anything but the *earliest*
+    /// of those clocks can mark a row EXPIRED that its own query accepted as
+    /// live — which is exactly what `--skip-expired` promises cannot happen.
+    /// This is the one non-obvious rule in this module and it was previously
+    /// unreachable from a test.
+    #[test]
+    fn labels_come_from_the_earliest_server_clock_across_statements() {
+        let early = now();
+        let late = now() + Duration::seconds(10);
+        // Expires between the two clocks: live by the earlier, dead by the later.
+        let boundary = now() + Duration::seconds(5);
+
+        let rows = assemble_expiring(
+            vec![
+                raw(1, boundary, late),
+                raw(2, boundary + Duration::days(30), early),
+            ],
+            true,
+        );
+
+        let boundary_row = rows.iter().find(|r| r.cert.id == 1).expect("row 1 present");
+        assert_ne!(
+            boundary_row.status, "EXPIRED",
+            "labelled EXPIRED against the later clock; the earliest statement's \
+             now() still had this certificate live"
+        );
+    }
+
+    #[test]
+    fn an_empty_result_assembles_without_reaching_for_a_clock() {
+        assert!(assemble_expiring(Vec::new(), true).is_empty());
+    }
+
+    #[test]
+    fn assembled_rows_are_ordered_by_expiry() {
+        let n = now();
+        let rows = assemble_expiring(
+            vec![
+                raw(1, n + Duration::days(30), n),
+                raw(2, n + Duration::days(3), n),
+                raw(3, n + Duration::days(10), n),
+            ],
+            true,
+        );
+        let order: Vec<i64> = rows.iter().map(|r| r.cert.id).collect();
+        assert_eq!(order, vec![2, 3, 1]);
+    }
+
+    /// `--json` is a machine contract: `days_left` and `status` sit beside the
+    /// certificate's own fields rather than under a nested object, and that is
+    /// `#[serde(flatten)]` doing it. Dropping the attribute reshapes every
+    /// document this tool has ever emitted, and nothing else would notice.
+    #[test]
+    fn the_expiring_json_document_stays_flat() {
+        let value = serde_json::to_value(at(Duration::days(5))).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "common_name",
+                "days_left",
+                "id",
+                "issuer_ca_id",
+                "issuer_name",
+                "matched_identities",
+                "not_after",
+                "not_before",
+                "serial",
+                "status",
+            ],
+            "the --json shape changed; #[serde(flatten)] on ExpiringRow::cert \
+             is what keeps these ten keys at the top level"
+        );
+    }
+
+    #[test]
+    fn json_timestamps_carry_an_explicit_utc_marker() {
+        let value = serde_json::to_value(at(Duration::days(5))).unwrap();
+        let not_after = value["not_after"].as_str().expect("not_after is a string");
+        assert!(
+            not_after.ends_with('Z'),
+            "README promises JSON timestamps carry an explicit Z: {not_after}"
+        );
     }
 
     #[test]
