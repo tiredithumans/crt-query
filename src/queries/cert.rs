@@ -86,7 +86,9 @@ impl OutputRecord for CertDetail {
 }
 
 pub async fn run_cert(db: &Db, id: i64) -> Result<Option<CertDetail>> {
-    let rows = db.query(CERT_SQL, &[(&id, Type::INT8)]).await?;
+    let rows = db
+        .query(&format!("crt.sh ID {id}"), CERT_SQL, &[(&id, Type::INT8)])
+        .await?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };

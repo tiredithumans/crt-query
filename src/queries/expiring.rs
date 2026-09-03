@@ -104,32 +104,55 @@ impl OutputRecord for ExpiringRow {
     }
 }
 
+/// Check one or more domains and merge the results into a single report.
+///
+/// One statement per domain, run in sequence. Folding the domains into a
+/// single `IN`/`ANY` predicate would take the query off the full-text index
+/// that keeps it inside the guest database's statement timeout, and `--limit`
+/// is per domain for the same reason: a shared limit would let one busy
+/// domain crowd the others out of the window entirely.
+///
+/// Sequential, not concurrent: the guest database has a connection limit and
+/// this tool holds exactly one connection, so the domains queue behind each
+/// other rather than opening a connection each.
 pub async fn run_expiring(
     db: &Db,
-    domain: &str,
+    domains: &[String],
     within: i32,
     since_expired: i32,
     limit: i64,
     dedupe: bool,
 ) -> Result<Vec<ExpiringRow>> {
-    let rows = db
-        .query(
-            EXPIRING_SQL.as_str(),
-            &[
-                (&domain, Type::TEXT),
-                (&within, Type::INT4),
-                (&since_expired, Type::INT4),
-                (&limit, Type::INT8),
-            ],
-        )
-        .await?;
-    let raw = rows
-        .iter()
-        .map(RawRow::from_pg)
-        .collect::<Result<Vec<_>>>()?;
+    let mut raw: Vec<RawRow> = Vec::new();
+    for domain in domains {
+        let rows = db
+            .query(
+                &format!("\"{domain}\""),
+                EXPIRING_SQL.as_str(),
+                &[
+                    (&domain, Type::TEXT),
+                    (&within, Type::INT4),
+                    (&since_expired, Type::INT4),
+                    (&limit, Type::INT8),
+                ],
+            )
+            .await?;
+        for row in &rows {
+            raw.push(RawRow::from_pg(row)?);
+        }
+    }
     // The same clock the server used to choose the window decides the labels,
-    // so --skip-expired can never surface a row marked EXPIRED.
-    let now = raw.first().map_or_else(Utc::now, |r| r.server_now);
+    // so --skip-expired can never surface a row marked EXPIRED. Across
+    // several statements that means the *earliest* clock: every row satisfied
+    // its own query's `now()`, which is at or after this one, so labelling
+    // against the earliest can only ever be conservative.
+    let now = raw
+        .iter()
+        .map(|r| r.server_now)
+        .min()
+        .unwrap_or_else(Utc::now);
+    // Dedup runs over the merged rows, so a certificate covering two of the
+    // requested domains appears once, carrying both matched identities.
     let mut out: Vec<ExpiringRow> = to_rows(raw, dedupe)
         .into_iter()
         .map(|r| ExpiringRow::new(r, now))

@@ -154,6 +154,63 @@ pub fn emit_missing<T: OutputRecord>(out: &OutputOpts) -> Result<()> {
     Ok(())
 }
 
+/// The running version against the newest release. What `check-update`
+/// reports.
+#[derive(Serialize)]
+pub struct UpdateStatus {
+    pub current: String,
+    pub latest: String,
+    pub update_available: bool,
+    pub release_url: String,
+}
+
+impl UpdateStatus {
+    /// The one line a human reads. Also covers running *ahead* of the newest
+    /// release — a build from a tagged-but-unreleased tree, or from `main` —
+    /// which is not an update but is not "up to date" either.
+    pub fn summary(&self) -> String {
+        if self.update_available {
+            format!(
+                "crt-query {} is available (running {}): {}",
+                self.latest, self.current, self.release_url
+            )
+        } else if self.current == self.latest {
+            format!("crt-query {} is the latest release.", self.current)
+        } else {
+            format!(
+                "crt-query {} is newer than the latest release ({}).",
+                self.current, self.latest
+            )
+        }
+    }
+}
+
+impl OutputRecord for UpdateStatus {
+    fn headers() -> &'static [&'static str] {
+        &["current", "latest", "update_available", "release_url"]
+    }
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.current.clone(),
+            self.latest.clone(),
+            self.update_available.to_string(),
+            self.release_url.clone(),
+        ]
+    }
+}
+
+/// Emit an update status: one human-readable line by default, the JSON object
+/// with `--json`, and — like every other record — a one-row CSV file with
+/// `--csv`.
+pub fn emit_update_status(status: &UpdateStatus, out: &OutputOpts) -> Result<()> {
+    write_csv_if_requested(std::slice::from_ref(status), out)?;
+    if out.json {
+        return write_json(status);
+    }
+    on_stdout(|w| writeln!(w, "{}", status.summary()))
+}
+
 fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
     if let Some(path) = &out.csv {
         let file = File::create(path)
@@ -260,6 +317,50 @@ mod tests {
         let mut buf = Vec::new();
         write_csv(rows, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    fn status(current: &str, latest: &str, update_available: bool) -> UpdateStatus {
+        UpdateStatus {
+            current: current.to_string(),
+            latest: latest.to_string(),
+            update_available,
+            release_url: format!("https://example.invalid/releases/tag/v{latest}"),
+        }
+    }
+
+    #[test]
+    fn an_available_update_names_both_versions_and_links_the_release() {
+        let line = status("0.1.0", "0.2.0", true).summary();
+        assert!(line.contains("0.2.0"), "{line}");
+        assert!(line.contains("0.1.0"), "{line}");
+        assert!(
+            line.contains("https://example.invalid/releases/tag/v0.2.0"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_current_build_says_so() {
+        assert_eq!(
+            status("0.1.0", "0.1.0", false).summary(),
+            "crt-query 0.1.0 is the latest release."
+        );
+    }
+
+    #[test]
+    fn a_build_ahead_of_the_latest_release_is_not_reported_as_current() {
+        let line = status("0.2.0", "0.1.0", false).summary();
+        assert!(line.contains("newer than the latest release"), "{line}");
+    }
+
+    #[test]
+    fn an_update_status_csv_row_matches_its_headers() {
+        let csv = csv_string(&[status("0.1.0", "0.2.0", true)]);
+        assert_eq!(
+            csv.lines().next().unwrap(),
+            "current,latest,update_available,release_url"
+        );
+        assert!(csv.lines().nth(1).unwrap().starts_with("0.1.0,0.2.0,true,"));
     }
 
     #[test]

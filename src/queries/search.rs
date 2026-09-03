@@ -121,6 +121,7 @@ pub async fn run_search(
 ) -> Result<Vec<SearchRow>> {
     let rows = db
         .query(
+            &format!("\"{query}\""),
             SEARCH_SQL.as_str(),
             &[
                 (&query, Type::TEXT),

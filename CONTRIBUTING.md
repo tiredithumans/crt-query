@@ -8,13 +8,19 @@ changes is that they keep it small and focused.
 ```sh
 git clone https://github.com/tiredithumans/crt-query
 cd crt-query
-just verify        # fmt-check · lint · test · msrv
+just verify        # fmt-check · lint · test · msrv · lint-scripts
 ```
 
 `rust-toolchain.toml` pins the toolchain, so rustup provisions the right Rust
 version and components automatically on first build. [`just`](https://just.systems)
 is the task runner — `just --list` shows everything available. You can run the
 underlying `cargo` commands directly, but the recipes are what CI runs.
+
+`lint-scripts` checks `install.sh` and `install.ps1`, so it needs
+[`shellcheck`](https://www.shellcheck.net) and
+[`pwsh`](https://aka.ms/powershell) on PATH (`brew install shellcheck
+powershell`, or the equivalent for your package manager). Both are preinstalled
+on the CI runner.
 
 ## Before opening a PR
 

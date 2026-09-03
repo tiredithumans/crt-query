@@ -1,12 +1,15 @@
 mod cli;
+mod config;
 mod db;
 mod output;
 mod queries;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Commands};
+use crate::db::Db;
 use crate::queries::cert::CertDetail;
 
 /// Completed; results were emitted, even if there were none.
@@ -30,10 +33,10 @@ async fn main() {
 
 async fn run() -> Result<i32> {
     let cli = Cli::parse();
-    // Check the CSV destination before spending a connection on the shared
-    // guest database, which is a genuinely scarce resource.
+    // Check the CSV destination before any real work: before a connection is
+    // spent on the shared guest database, which is a genuinely scarce
+    // resource, and before check-update's network round trip.
     output::precheck_csv(&cli.out)?;
-    let db = db::connect(&cli.conn).await?;
 
     match &cli.command {
         Commands::Search {
@@ -44,6 +47,7 @@ async fn run() -> Result<i32> {
             no_dedupe,
         } => {
             let lookback = Commands::search_lookback(*valid_since, *all_history);
+            let db = open_db(&cli).await?;
             let rows =
                 queries::search::run_search(&db, query, lookback, *limit, !no_dedupe).await?;
             if rows.is_empty() {
@@ -60,14 +64,17 @@ async fn run() -> Result<i32> {
             // --csv still owes a file, or a stale one is silently reused.
             output::emit(&rows, &cli.out)?;
         }
-        Commands::Cert { id } => match queries::cert::run_cert(&db, *id).await? {
-            Some(detail) => output::emit_detail(&detail, &cli.out)?,
-            None => {
-                eprintln!("No certificate with crt.sh ID {id}.");
-                output::emit_missing::<CertDetail>(&cli.out)?;
-                return Ok(EXIT_NOT_FOUND);
+        Commands::Cert { id } => {
+            let db = open_db(&cli).await?;
+            match queries::cert::run_cert(&db, *id).await? {
+                Some(detail) => output::emit_detail(&detail, &cli.out)?,
+                None => {
+                    eprintln!("No certificate with crt.sh ID {id}.");
+                    output::emit_missing::<CertDetail>(&cli.out)?;
+                    return Ok(EXIT_NOT_FOUND);
+                }
             }
-        },
+        }
         Commands::Expiring {
             domain,
             within,
@@ -76,25 +83,79 @@ async fn run() -> Result<i32> {
             limit,
             no_dedupe,
         } => {
+            let domains = Commands::unique_domains(domain);
             let lookback = Commands::expiring_lookback(*since_expired, *skip_expired);
-            let rows =
-                queries::expiring::run_expiring(&db, domain, *within, lookback, *limit, !no_dedupe)
-                    .await?;
+            let db = open_db(&cli).await?;
+            let rows = queries::expiring::run_expiring(
+                &db, &domains, *within, lookback, *limit, !no_dedupe,
+            )
+            .await?;
             if rows.is_empty() {
+                let (names, limit_note) = describe_domains(&domains);
                 if lookback == 0 {
                     eprintln!(
-                        "No unexpired certificates for \"{domain}\" expiring within \
-                         {within} day(s) (in the first --limit rows)."
+                        "No unexpired certificates for {names} expiring within \
+                         {within} day(s) ({limit_note})."
                     );
                 } else {
                     eprintln!(
-                        "No certificates for \"{domain}\" expiring within {within} day(s) \
-                         or expired in the last {lookback} day(s) (in the first --limit rows)."
+                        "No certificates for {names} expiring within {within} day(s) \
+                         or expired in the last {lookback} day(s) ({limit_note})."
                     );
                 }
             }
             output::emit(&rows, &cli.out)?;
         }
+        // Neither of the following needs the database.
+        Commands::CheckUpdate => update::run_check_update(&cli.out)?,
+        Commands::Completions { shell } => cli::write_completions(*shell, &mut std::io::stdout()),
     }
     Ok(EXIT_OK)
+}
+
+/// Resolve the connection settings — CLI flags over config file over built-in
+/// defaults — and connect.
+///
+/// Called from inside the subcommand arms rather than once up front, so that
+/// `completions` and `check-update` neither read the config file nor open a
+/// connection to a shared public service they have no use for.
+async fn open_db(cli: &Cli) -> Result<Db> {
+    let file = config::load()?;
+    db::connect(&config::resolve(&cli.conn, &file)).await
+}
+
+/// How to name a set of requested domains in an empty-result message: the
+/// quoted list, and the `--limit` caveat, which reads differently once more
+/// than one domain is in play because the limit applies to each of them.
+fn describe_domains(domains: &[String]) -> (String, &'static str) {
+    let names = domains
+        .iter()
+        .map(|d| format!("\"{d}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let limit_note = if domains.len() == 1 {
+        "in the first --limit rows"
+    } else {
+        "in the first --limit rows per domain"
+    };
+    (names, limit_note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_domain_reads_as_a_single_limit_window() {
+        let (names, note) = describe_domains(&["example.com".to_string()]);
+        assert_eq!(names, "\"example.com\"");
+        assert_eq!(note, "in the first --limit rows");
+    }
+
+    #[test]
+    fn several_domains_are_listed_and_the_limit_is_marked_per_domain() {
+        let (names, note) = describe_domains(&["a.example".to_string(), "b.example".to_string()]);
+        assert_eq!(names, "\"a.example\", \"b.example\"");
+        assert_eq!(note, "in the first --limit rows per domain");
+    }
 }
