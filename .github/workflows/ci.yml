@@ -139,14 +139,22 @@ jobs:
           persist-credentials: false
       # Workflow-file syntax gate. An unparseable workflow produces 0-second
       # "workflow file issue" runs and no other signal; this turns that into a
-      # failing check. install-action verifies the download's checksum itself,
-      # which retires the hand-maintained SHA-256 that had to be edited by hand
-      # on every version bump.
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
-        with:
-          tool: actionlint@1.7.12
+      # failing check. Pinned by version + checksum — there is no action to SHA-
+      # pin here, so the tarball is verified instead.
+      #
+      # Not via taiki-e/install-action, which is used for `just` above and would
+      # verify the checksum itself: its manifest does not carry actionlint, and
+      # the cargo-binstall fallback cannot help because actionlint is a Go
+      # program with no crates.io entry. Tried, and it fails with
+      # "install-action does not support actionlint@1.7.12". Bump the version
+      # and the SHA-256 together.
       - name: actionlint
-        run: actionlint -color
+        run: |
+          curl -sSfL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
 
   audit:
     name: cargo-audit
