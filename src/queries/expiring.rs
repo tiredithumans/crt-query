@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio_postgres::types::Type;
 
 use crate::db::Db;
-use crate::output::{OutputRecord, fmt_opt};
+use crate::output::{OutputRecord, csv_opt, fmt_opt};
 use crate::queries::search::SearchRow;
 use crate::queries::{IDENTITY_QUERY, RawRow, to_rows};
 
@@ -91,12 +91,21 @@ impl OutputRecord for ExpiringRow {
         cells
     }
 
+    fn csv_cells(&self) -> Vec<String> {
+        let mut cells = self.cert.csv_cells();
+        cells.push(csv_opt(self.days_left));
+        cells.push(self.status.clone());
+        cells
+    }
+
     fn csv_rows(&self) -> Vec<Vec<String>> {
         self.cert
             .csv_rows()
             .into_iter()
             .map(|mut cells| {
-                cells.push(fmt_opt(self.days_left));
+                // Empty, not a dash: days_left is the column a script reads as
+                // a number, and one placeholder types the whole column as text.
+                cells.push(csv_opt(self.days_left));
                 cells.push(self.status.clone());
                 cells
             })

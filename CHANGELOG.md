@@ -11,7 +11,33 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Changed
+
+- **`--csv` is now a machine format rather than a copy of the table.** It shared
+  the table's formatters, so a NULL was written as `-` and timestamps lost their
+  seconds. The `Days Left` column therefore mixed `-30` with a literal `-`,
+  which types the whole column as text in pandas and Excel — contradicting the
+  code's own claim that `days_left` "is usable on its own in JSON and CSV" — and
+  a certificate expiring at 23:59:59 was recorded as `23:59`. NULL is now an
+  empty field and timestamps are full RFC 3339 instants. A script reading the
+  `-` placeholder or parsing minute-precision timestamps needs updating; the
+  table is unchanged.
+
 ### Fixed
+
+- CSV fields that a spreadsheet would evaluate as a formula are now prefixed
+  with `'`. Issuer, subject, common name and SAN are text lifted from a public
+  certificate-transparency log — whoever got the certificate issued chose them —
+  and Excel and LibreOffice execute a cell beginning `=`, `+`, `@`, tab or
+  carriage return. The rule deliberately excludes `-`, so `days_left`'s
+  negatives stay numeric.
+- Control characters in a certificate field no longer corrupt the terminal.
+  comfy-table counts ANSI escape bytes as printable width, so an escape inside a
+  common name was split mid-sequence by wrapping: the reset landed on a
+  different line, the row was drawn narrower than its own borders, and the
+  colour leaked into the rest of the session. A carriage return returned the
+  cursor to column 0 and overwrote the line just drawn. Both are now escaped to
+  visible text in table output. JSON was never affected.
 
 - A search term containing a backslash no longer reports "No certificates
   found" for certificates that exist. The identity filter's `ILIKE` had no

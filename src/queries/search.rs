@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio_postgres::types::Type;
 
 use crate::db::Db;
-use crate::output::{OutputRecord, fmt_opt, fmt_ts};
+use crate::output::{OutputRecord, csv_opt, csv_ts, fmt_opt, fmt_ts};
 use crate::queries::{IDENTITY_QUERY, RawRow, to_rows};
 
 /// Column index of the multi-valued identity field within `cells()`.
@@ -106,14 +106,27 @@ impl OutputRecord for SearchRow {
         ]
     }
 
+    fn csv_cells(&self) -> Vec<String> {
+        vec![
+            self.id.to_string(),
+            csv_opt(self.issuer_ca_id),
+            csv_opt(self.issuer_name.as_deref()),
+            self.matched_identities.join(", "),
+            csv_opt(self.common_name.as_deref()),
+            csv_opt(self.serial.as_deref()),
+            csv_ts(self.not_before.as_ref()),
+            csv_ts(self.not_after.as_ref()),
+        ]
+    }
+
     fn csv_rows(&self) -> Vec<Vec<String>> {
         if self.matched_identities.is_empty() {
-            return vec![self.cells()];
+            return vec![self.csv_cells()];
         }
         self.matched_identities
             .iter()
             .map(|identity| {
-                let mut cells = self.cells();
+                let mut cells = self.csv_cells();
                 cells[IDENTITIES_COL] = identity.clone();
                 cells
             })
