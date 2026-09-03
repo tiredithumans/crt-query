@@ -105,10 +105,13 @@ Two things that catch people out doing this by hand on macOS:
 # Certificates for a domain or identity, crt.sh style
 crt-query search example.com --limit 100
 
+# Several names at once, and only certificates that are still valid
+crt-query search example.com example.org --skip-expired
+
 # Everything in one certificate, by crt.sh ID
 crt-query cert 22625564176
 
-# What is expiring or recently expired — across as many domains as you like
+# What is expiring, or recently expired
 crt-query expiring example.com example.org --within 30
 ```
 
@@ -120,10 +123,11 @@ crt-query search example.com --json | jq '.[].id'
 crt-query expiring example.com example.org --within 90 --csv report.csv
 ```
 
-`expiring` queries one domain at a time — the guest database's statement timeout
-rules out folding them into a single query — so `--limit` applies per domain.
-Results merge into one report, and a certificate covering two of the domains
-appears once, carrying both matched identities.
+`search` and `expiring` both take any number of names. Each one is queried
+separately — the guest database's statement timeout rules out folding them into
+a single query — so `--limit` applies per name. The results merge into one
+report, and a certificate matching two of the names appears once, carrying both
+matched identities.
 
 Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
 `--db-url postgresql://…`. Set them once in a [config file](#configuration)
@@ -141,6 +145,7 @@ certificates you care about:
 | --- | --- | --- |
 | `search --valid-since <days>` | 365 | Only certificates still valid within this many days of now |
 | `search --all-history` | off | No validity floor; search everything crt.sh holds |
+| `search --skip-expired` | off | Only certificates that have not expired — stricter than `--valid-since`, and combines with `--all-history` to mean "everything crt.sh holds that is live today" |
 | `expiring --within <days>` | 30 | Look-ahead: certificates expiring within this window |
 | `expiring --since-expired <days>` | 30 | Look-back: how far back to include already-expired certificates |
 | `expiring --skip-expired` | off | Exclude expired certificates entirely (same as `--since-expired 0`) |
@@ -157,8 +162,13 @@ anything close to renewal.
 | `--json` | Always valid JSON, including `[]` for an empty result and `null` for a missing `cert` ID |
 | `--csv` | Always writes the file, header-only when empty, so a scheduled job never re-reads a stale report |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
-| Table width | Follows the terminal, or 120 columns when stdout is a pipe. Override with `--width` |
+| Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |
 | Exit codes | `0` completed, even with no results · `1` failed · `2` no certificate with that crt.sh ID |
+
+Left to size itself, the table keeps atomic columns — an ID, a hex serial, a
+timestamp — off the wrapping list, and holds a floor under the free-text ones so
+they cannot be squeezed to a character per line. An explicit `--width` is an
+instruction rather than a hint, so it overrides both and is honoured exactly.
 
 Multi-valued columns (matched identities, SANs) reach CSV as one row per value
 rather than joined into a field, so the file stays round-trippable. While a query

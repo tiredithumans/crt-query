@@ -11,6 +11,32 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- `search` accepts several names, like `expiring` already did:
+  `crt-query search example.com example.org`. One statement per name — the
+  statement timeout rules out folding them into a single query — so `--limit`
+  applies per name, results merge into one list, and a certificate matching two
+  of the names appears once carrying both matched identities.
+- `search --skip-expired` — only certificates that have not expired. It floors
+  the window at the server's own clock rather than a client-side timestamp, the
+  same rule that stops `expiring --skip-expired` surfacing an `EXPIRED` row. A
+  separate predicate rather than a zero-day `--valid-since`, because zero is
+  already `--all-history`; the two compose, and `--all-history --skip-expired`
+  means "everything crt.sh holds that is live today".
+
+### Fixed
+
+- `--width` is now honoured exactly, in both directions. It could previously
+  neither narrow nor widen the wide result tables: comfy-table applies a column
+  constraint over the table width, so the no-wrap and minimum-width heuristics
+  added in 0.2.0 held every request open at roughly 190 columns, and
+  `ContentArrangement::Dynamic` stops at the natural content width rather than
+  spending surplus space. An explicit `--width` now switches to
+  `DynamicFullWidth` and drops those constraints — they exist to keep the
+  *automatic* layout readable, and should not overrule a width someone asked
+  for. Choosing the width automatically is unchanged.
+
 ## [0.2.0] - 2026-09-03
 
 ### Added

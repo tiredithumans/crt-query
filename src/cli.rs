@@ -58,8 +58,9 @@ pub struct OutputOpts {
     #[arg(long, global = true, value_name = "PATH")]
     pub csv: Option<PathBuf>,
 
-    /// Table width in columns; defaults to the terminal width, or 120 when
-    /// stdout is not a terminal
+    /// Render the table at exactly this width. Overrides the column
+    /// heuristics used for the automatic layout, which otherwise defaults to
+    /// the terminal width, or 120 when stdout is not a terminal
     #[arg(
         long,
         global = true,
@@ -73,8 +74,11 @@ pub struct OutputOpts {
 pub enum Commands {
     /// Search certificates by domain or identity (crt.sh-style)
     Search {
-        /// Domain or identity to search for (% and _ act as wildcards)
-        query: String,
+        /// Domains or identities to search for (% and _ act as wildcards).
+        /// Several may be given; --limit applies per term, and results are
+        /// merged (and deduplicated) across all of them
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
 
         /// Only consider certificates still valid within this many days of
         /// now; bounds the server-side window so --limit is not spent on
@@ -90,6 +94,12 @@ pub enum Commands {
         /// Search the full history instead, with no validity floor
         #[arg(long, conflicts_with = "valid_since")]
         all_history: bool,
+
+        /// Only certificates that are still valid; excludes anything already
+        /// expired. Stricter than --valid-since, and composes with
+        /// --all-history to mean "everything crt.sh holds that is live today"
+        #[arg(long)]
+        skip_expired: bool,
 
         /// Max identity rows fetched server-side; the deduplicated
         /// certificate count may be lower
@@ -185,20 +195,20 @@ impl Commands {
         if skip_expired { 0 } else { since_expired }
     }
 
-    /// The `expiring` domain list with repeats removed, preserving the order
-    /// they were given in.
+    /// A `search` or `expiring` term list with repeats removed, preserving the
+    /// order they were given in.
     ///
-    /// Each domain costs one statement against a shared public database, and
-    /// the identity match is case-insensitive, so `a.example A.example` would
+    /// Each term costs one statement against a shared public database, and the
+    /// identity match is case-insensitive, so `a.example A.example` would
     /// otherwise buy two identical result sets for twice the load.
-    pub fn unique_domains(domains: &[String]) -> Vec<String> {
-        let mut seen = Vec::with_capacity(domains.len());
-        let mut out = Vec::with_capacity(domains.len());
-        for domain in domains {
-            let key = domain.to_lowercase();
+    pub fn unique_terms(terms: &[String]) -> Vec<String> {
+        let mut seen = Vec::with_capacity(terms.len());
+        let mut out = Vec::with_capacity(terms.len());
+        for term in terms {
+            let key = term.to_lowercase();
             if !seen.contains(&key) {
                 seen.push(key);
-                out.push(domain.clone());
+                out.push(term.clone());
             }
         }
         out
@@ -237,10 +247,10 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_domains_are_collapsed_case_insensitively() {
+    fn duplicate_terms_are_collapsed_case_insensitively() {
         let given = ["a.example", "A.EXAMPLE", "b.example", "a.example"].map(String::from);
         assert_eq!(
-            Commands::unique_domains(&given),
+            Commands::unique_terms(&given),
             vec!["a.example".to_string(), "b.example".to_string()],
             "the first spelling given should survive, in order"
         );
@@ -261,6 +271,53 @@ mod tests {
     #[test]
     fn expiring_needs_at_least_one_domain() {
         assert!(Cli::try_parse_from(["crt-query", "expiring"]).is_err());
+    }
+
+    #[test]
+    fn search_accepts_several_terms() {
+        let cli = Cli::try_parse_from(["crt-query", "search", "a.example", "b.example"]).unwrap();
+        let Commands::Search { query, .. } = cli.command else {
+            panic!("expected the search subcommand");
+        };
+        assert_eq!(
+            query,
+            vec!["a.example".to_string(), "b.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn search_needs_at_least_one_term() {
+        assert!(Cli::try_parse_from(["crt-query", "search"]).is_err());
+    }
+
+    #[test]
+    fn search_skip_expired_composes_with_the_window_flags() {
+        // Stricter than --valid-since rather than contradicting it, and
+        // meaningful alongside --all-history, so neither is a conflict.
+        for args in [
+            vec!["crt-query", "search", "a.example", "--skip-expired"],
+            vec![
+                "crt-query",
+                "search",
+                "a.example",
+                "--skip-expired",
+                "--valid-since",
+                "30",
+            ],
+            vec![
+                "crt-query",
+                "search",
+                "a.example",
+                "--skip-expired",
+                "--all-history",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            let Commands::Search { skip_expired, .. } = cli.command else {
+                panic!("expected the search subcommand");
+            };
+            assert!(skip_expired, "{args:?}");
+        }
     }
 
     #[test]
