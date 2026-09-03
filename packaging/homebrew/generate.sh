@@ -38,6 +38,13 @@ archive_for() {
     ' "$tmp/SHA256SUMS"
 }
 
+# `crt-query completions` first shipped in this release. Homebrew generates the
+# completion scripts by RUNNING the installed binary, so emitting that call for
+# an older release does not degrade gracefully -- it aborts `brew install`
+# outright. Nothing in this repo's gates catches it, because none of them runs
+# the released binary.
+MIN_COMPLETIONS_VERSION="0.2.0"
+
 ARM_MAC="aarch64-apple-darwin"
 INTEL_MAC="x86_64-apple-darwin"
 INTEL_LINUX="x86_64-unknown-linux-gnu"
@@ -63,6 +70,27 @@ url_for() {
     echo "https://github.com/$REPO/releases/download/$tag/$(archive_for "$1")"
 }
 
+# Lowest version sorts first, so the minimum leading means this release is at
+# or above it.
+oldest=$(printf '%s\n%s\n' "$MIN_COMPLETIONS_VERSION" "$plain" | sort -V | head -1)
+if [ "$oldest" = "$MIN_COMPLETIONS_VERSION" ]; then
+    completions=$(
+        cat <<'BLOCK'
+    # `crt-query completions <shell>` takes the shell as a bare argument, which
+    # is this helper's default parameter form.
+    generate_completions_from_executable(bin/"crt-query", "completions")
+BLOCK
+    )
+else
+    completions=$(
+        cat <<BLOCK
+    # No completions here: \`crt-query completions\` arrived in v$MIN_COMPLETIONS_VERSION,
+    # and Homebrew generates them by running the installed binary, so calling
+    # it against $tag would abort the install.
+BLOCK
+    )
+fi
+
 cat > "$OUT" <<RUBY
 # Homebrew formula for crt-query. GENERATED — do not edit by hand.
 #
@@ -78,7 +106,8 @@ cat > "$OUT" <<RUBY
 class CrtQuery < Formula
   desc "Query crt.sh certificate-transparency data from its public PostgreSQL database"
   homepage "https://github.com/$REPO"
-  version "$plain"
+  # No \`version\` stanza: Homebrew scans it out of the URLs below, and
+  # declaring it as well is a \`brew audit --strict\` failure.
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
@@ -101,9 +130,7 @@ class CrtQuery < Formula
 
   def install
     bin.install "crt-query"
-    # \`crt-query completions <shell>\` takes the shell as a bare argument,
-    # which is this helper's default parameter form.
-    generate_completions_from_executable(bin/"crt-query", "completions")
+$completions
   end
 
   test do
