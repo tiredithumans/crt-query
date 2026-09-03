@@ -19,6 +19,14 @@ use crate::queries::search::SearchRow;
 /// table would hit the guest DB's statement timeout. No server-side ORDER
 /// BY/DISTINCT for the same reason: LIMIT must be able to terminate early.
 ///
+/// `ESCAPE ''` turns off Postgres' default backslash escape, leaving `%` and
+/// `_` as the only metacharacters — which is what `--help` documents. Without
+/// it every backslash in the term is swallowed and the character after it is
+/// taken literally, so `a\b` searches for `ab` and a trailing backslash builds
+/// a pattern that cannot match at all. Either way the run reports "No
+/// certificates found", which is a result people act on. Identity terms — a DN
+/// fragment, an email SAN — are where a backslash actually turns up.
+///
 /// `server_now` rides along on every row so that window membership and the
 /// EXPIRED/days-left labels are decided by a single clock. Comparing a
 /// server-side `now()` against a client-side one sampled after the query
@@ -34,7 +42,7 @@ SELECT cai.certificate_id AS id, cai.issuer_ca_id, ca.name AS issuer_name,
   FROM certificate_and_identities cai
   LEFT JOIN ca ON ca.id = cai.issuer_ca_id
  WHERE plainto_tsquery('certwatch', $1) @@ identities(cai.certificate)
-   AND cai.name_value ILIKE ('%' || $1 || '%')";
+   AND cai.name_value ILIKE ('%' || $1 || '%') ESCAPE ''";
 
 /// Read a column, naming it if the type or nullability does not match.
 pub fn column<'a, T: FromSql<'a>>(row: &'a Row, name: &str) -> Result<T> {
@@ -140,6 +148,19 @@ pub fn to_rows(raw: Vec<RawRow>, dedupe: bool) -> Vec<SearchRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_identity_filter_disables_the_backslash_escape() {
+        // Without `ESCAPE ''` every backslash is swallowed and the next
+        // character taken literally, so `a\b` searches for `ab` and a trailing
+        // backslash cannot match at all — and the run reports "No certificates
+        // found", a result people act on. `--help` documents `%` and `_` as the
+        // only wildcards; this is what makes that true.
+        assert!(
+            IDENTITY_QUERY.contains("ILIKE ('%' || $1 || '%') ESCAPE ''"),
+            "IDENTITY_QUERY lost its ESCAPE clause:\n{IDENTITY_QUERY}"
+        );
+    }
     use chrono::NaiveDate;
 
     fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
