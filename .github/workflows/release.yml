@@ -60,6 +60,11 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # Native ARM64 runner, so no cross-compilation toolchain is needed.
+          # install.sh computes this target on every ARM64 Linux host, and
+          # before this existed it resolved to an archive no release shipped.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
@@ -119,8 +124,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The only job that needs write access, and only to create the draft.
+    # id-token and attestations are what let the run sign a provenance
+    # statement for the archives it just built.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,6 +145,17 @@ jobs:
           cd artifacts
           sha256sum ./* > SHA256SUMS
           cat SHA256SUMS
+
+      # SHA256SUMS proves the archives agree with each other; it is served from
+      # the same release, so it says nothing about where they came from. An
+      # attestation is signed by the workflow run itself, which is the one link
+      # a downloader cannot otherwise verify — and self-update replaces the
+      # running binary with what this release publishes, so that link is worth
+      # having. Verify with:
+      #   gh attestation verify <archive> --repo tiredithumans/crt-query
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: artifacts/*
 
       # Notes come from the changelog section the guard job already verified
       # exists, so the release page and CHANGELOG.md can never disagree.

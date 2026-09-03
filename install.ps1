@@ -53,10 +53,13 @@ try {
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
 
+# Windows on ARM runs x64 binaries under emulation, so an ARM64 machine has a
+# working fallback rather than no install at all. No 'x86' case: crt-query has
+# never shipped a 32-bit build, so that branch could only ever have resolved to
+# an archive that does not exist.
 switch ($arch) {
-    'AMD64' { $target = 'x86_64-pc-windows-msvc' }
-    'ARM64' { $target = 'aarch64-pc-windows-msvc' }
-    'x86'   { $target = 'i686-pc-windows-msvc' }
+    'AMD64' { $targets = @('x86_64-pc-windows-msvc') }
+    'ARM64' { $targets = @('aarch64-pc-windows-msvc', 'x86_64-pc-windows-msvc') }
     default { throw "unsupported CPU architecture: $arch" }
 }
 
@@ -95,10 +98,24 @@ try {
         }
     }
 
-    $wanted = "-$target.zip"
-    $entry = @($entries | Where-Object { $_.Name.EndsWith($wanted) })
+    # Take the first target this release actually ships. On ARM64 that means a
+    # native build when one exists and the emulated x64 build when it does not.
+    $target = $null
+    $entry = @()
+    foreach ($candidate in $targets) {
+        $match = @($entries | Where-Object { $_.Name.EndsWith("-$candidate.zip") })
+        if ($match.Count -gt 0) {
+            if ($candidate -ne $targets[0]) {
+                Write-Host "No native $($targets[0]) build in this release; installing the $candidate build, which Windows runs under emulation."
+            }
+            $target = $candidate
+            $entry = $match
+            break
+        }
+    }
 
     if ($entry.Count -eq 0) {
+        $target = $targets[0]
         $available = ($entries | ForEach-Object { "  " + $_.Name }) -join "`n"
         throw @"
 the $label release has no build for ${target}.

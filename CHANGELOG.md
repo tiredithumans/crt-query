@@ -11,6 +11,25 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- Prebuilt binaries for `aarch64-unknown-linux-gnu`. `install.sh` computed this
+  target on every ARM64 Linux host — Graviton, Ampere, a Raspberry Pi — and no
+  release shipped an archive for it, so the install failed with a list of what
+  was available. The Homebrew formula gains a matching `on_arm` block inside
+  `on_linux`.
+- Windows on ARM installs the x86-64 build, which Windows runs under emulation,
+  rather than failing outright when no native `aarch64-pc-windows-msvc` archive
+  exists. It says so when it does. The `x86` branch is gone: crt-query has never
+  shipped a 32-bit build, so it could only ever resolve to an archive that does
+  not exist.
+- Every release archive now carries a build-provenance attestation signed by the
+  workflow run that produced it. `SHA256SUMS` is served from the same release as
+  the archives it covers, so it proves they agree with each other and nothing
+  about where they came from — which matters because `check-update` points at
+  the same channel. Verify with
+  `gh attestation verify <archive> --repo tiredithumans/crt-query`.
+
 ### Fixed
 
 - A search term containing a backslash no longer reports "No certificates

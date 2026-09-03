@@ -34,9 +34,9 @@ $ crt-query cert 22625564176
 
 | Platform | Command |
 | --- | --- |
-| macOS · Linux | `brew install tiredithumans/tap/crt-query` |
+| macOS · Linux (x86-64 · ARM64) | `brew install tiredithumans/tap/crt-query` |
 | macOS · Linux | `curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \| sh` |
-| Windows | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
+| Windows (x86-64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
 | From source | `cargo install --git https://github.com/tiredithumans/crt-query` |
 
 Every prebuilt route resolves the newest release, verifies the archive against
@@ -61,7 +61,11 @@ go after `sh -s --`:
 curl -fsSL .../install.sh | sh -s -- --dir "$HOME/.local/bin"
 ```
 
-`install.ps1` takes `-Dir <path>`, `-Version vX.Y.Z` and `-NoPathUpdate`. It
+`install.sh` also reads `CRT_QUERY_DIR` and `CRT_QUERY_VERSION`, which is the
+ergonomic way to configure the piped form — no `sh -s --` needed.
+
+`install.ps1` takes `-Dir <path>`, `-Version vX.Y.Z` and `-NoPathUpdate`. It has
+no environment-variable equivalent. It
 installs to `%LOCALAPPDATA%\Programs\crt-query` and adds that to your user
 `PATH` — no admin rights, but open a new terminal for it to take effect. To pass
 options, the script has to become a scriptblock first:
@@ -71,20 +75,30 @@ options, the script has to become a scriptblock first:
 ```
 
 **Manual download.** Releases ship archives for `x86_64-unknown-linux-gnu`,
-`aarch64-apple-darwin`, `x86_64-apple-darwin` and `x86_64-pc-windows-msvc`, plus
-one `SHA256SUMS` covering all of them:
+`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
+`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them:
 
 ```sh
-VERSION=v0.2.0
 TARGET=x86_64-unknown-linux-gnu        # Apple Silicon: aarch64-apple-darwin
-BASE=https://github.com/tiredithumans/crt-query/releases/download/$VERSION
-curl -LO "$BASE/crt-query-$VERSION-$TARGET.tar.gz"
+# `latest` redirects to the newest release, so there is no version to keep
+# up to date here. The tag is in the archive name once it lands.
+BASE=https://github.com/tiredithumans/crt-query/releases/latest/download
 curl -LO "$BASE/SHA256SUMS"
+ARCHIVE=$(awk -v t="$TARGET" '$2 ~ t {sub(/^\*?\.\//, "", $2); print $2}' SHA256SUMS)
+curl -LO "$BASE/$ARCHIVE"
 
 sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missing -c
 
-tar -xzf "crt-query-$VERSION-$TARGET.tar.gz"
-sudo install -m 0755 "crt-query-$VERSION-$TARGET/crt-query" /usr/local/bin/
+tar -xzf "$ARCHIVE"
+sudo install -m 0755 "${ARCHIVE%.tar.gz}/crt-query" /usr/local/bin/
+```
+
+Every archive also carries a build-provenance attestation signed by the release
+workflow. `SHA256SUMS` proves the archives agree with each other; the
+attestation is what ties them to the run that built them:
+
+```sh
+gh attestation verify "$ARCHIVE" --repo tiredithumans/crt-query
 ```
 
 Two things that catch people out doing this by hand on macOS:
@@ -207,7 +221,8 @@ the command line, where the run that produced a report also records how.
 `crt-query check-update` reports whether a newer release exists, and exits `0`
 either way — being out of date is a report, not a failure. It is the only
 subcommand that contacts anything other than crt.sh, and only when you ask;
-nothing checks in the background. `--json` gives `current`, `latest`,
+nothing checks in the background. It shells out to the system `curl`, so that
+has to be on `PATH` — the only path in this tool that runs an external program. `--json` gives `current`, `latest`,
 `update_available` and `release_url` for a scheduled check.
 
 To upgrade, re-run whatever you installed with: `brew upgrade crt-query`,
