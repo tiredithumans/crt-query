@@ -106,6 +106,14 @@ pub async fn run_cert(db: &Db, id: i64) -> Result<Option<CertDetail>> {
     }))
 }
 
+/// The exact statement this module sends, for the golden-file test in
+/// `queries::tests`. Reading it through one accessor keeps the snapshot tied
+/// to what actually runs.
+#[cfg(test)]
+pub(crate) fn sql() -> &'static str {
+    CERT_SQL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

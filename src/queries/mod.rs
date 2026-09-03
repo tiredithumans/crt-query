@@ -149,6 +149,48 @@ pub fn to_rows(raw: Vec<RawRow>, dedupe: bool) -> Vec<SearchRow> {
 mod tests {
     use super::*;
 
+    /// Snapshots of the three statements this tool sends.
+    ///
+    /// These are the contract between the SQL and the structs that read it:
+    /// every `column("…")` call names an alias defined here, and a projection
+    /// or join edit that drops one still compiles and still passes every other
+    /// test, then fails at runtime against the real database — which no offline
+    /// suite can reach. Re-blessing a snapshot is the prompt to re-check the
+    /// readers in that module.
+    ///
+    /// Verified to catch the mutation they exist for: renaming
+    /// `AS matched_identity` in `IDENTITY_QUERY` fails the two snapshots that
+    /// embed it and leaves `cert.sql` correctly green.
+    #[test]
+    fn the_search_statement_matches_its_snapshot() {
+        assert_eq!(
+            crate::queries::search::sql(),
+            include_str!("golden/search.sql"),
+            "SEARCH_SQL changed; re-bless src/queries/golden/search.sql and \
+             re-check the columns SearchRow reads"
+        );
+    }
+
+    #[test]
+    fn the_expiring_statement_matches_its_snapshot() {
+        assert_eq!(
+            crate::queries::expiring::sql(),
+            include_str!("golden/expiring.sql"),
+            "EXPIRING_SQL changed; re-bless src/queries/golden/expiring.sql and \
+             re-check the columns ExpiringRow reads"
+        );
+    }
+
+    #[test]
+    fn the_cert_statement_matches_its_snapshot() {
+        assert_eq!(
+            crate::queries::cert::sql(),
+            include_str!("golden/cert.sql"),
+            "CERT_SQL changed; re-bless src/queries/golden/cert.sql and \
+             re-check the columns CertDetail reads"
+        );
+    }
+
     #[test]
     fn the_identity_filter_disables_the_backslash_escape() {
         // Without `ESCAPE ''` every backslash is swallowed and the next
