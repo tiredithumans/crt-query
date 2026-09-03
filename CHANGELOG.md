@@ -11,6 +11,45 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- `install.sh` and `install.ps1`: one-line installers for Linux/macOS and
+  Windows. Each detects the target triple, resolves the newest release through
+  `releases/latest/download` (so no version is hardcoded in the script or the
+  README), verifies the archive against that release's `SHA256SUMS`, and
+  installs. Re-running one is the upgrade path: it replaces the binary and
+  clears the macOS quarantine attribute or the Windows mark-of-the-web that
+  every fresh download arrives with. `--dir`/`-Dir` picks the destination and
+  `--version`/`-Version` pins a release.
+- Homebrew formula under `packaging/homebrew/`, so `brew upgrade` can carry the
+  macOS/Linux cohort forward. It is generated from a release's `SHA256SUMS` by
+  `just homebrew-formula`, which keeps its checksums from drifting away from
+  the archives they name.
+- `crt-query check-update` — reports whether a newer release exists, and exits
+  `0` either way. Opt-in on purpose: it is the only subcommand that contacts
+  anything other than crt.sh, and nothing checks in the background. `--json`
+  gives `current`, `latest`, `update_available` and `release_url`.
+- `crt-query completions <shell>` — completion scripts for bash, zsh, fish,
+  PowerShell and elvish, generated from the same clap definition the parser
+  uses, so they cannot drift from the flags they describe.
+- A config file for connection settings, read from
+  `$XDG_CONFIG_HOME/crt-query/config.toml` (`%APPDATA%\crt-query\config.toml`
+  on Windows), so a custom `--db-url` need not be repeated on every run.
+  Precedence is flag, then file, then built-in default. A missing file is fine;
+  an unparseable or misspelled key fails the run rather than being ignored, so
+  a typo cannot quietly redirect queries.
+- `expiring` accepts several domains: `crt-query expiring a.example b.example`.
+  One statement per domain — the statement timeout is what rules out folding
+  them into a single query — so `--limit` applies per domain. Results merge
+  into one report sorted by expiry, with a certificate covering two of the
+  domains appearing once and carrying both matched identities. Repeated domains
+  are collapsed case-insensitively rather than spending a second query on the
+  same rows.
+- A progress line on stderr (`querying crt.sh:5432 for "example.com"…`) before
+  each statement, because the shared guest database is intermittently slow and
+  a query that takes several seconds otherwise looks like a hang. Suppressed
+  when stderr is not a terminal, so scheduled runs keep clean logs.
+
 ### Fixed
 
 - Table output: the crt.sh ID, Issuer CA ID, Serial, and both timestamp

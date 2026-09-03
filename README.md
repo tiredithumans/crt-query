@@ -16,7 +16,10 @@ Output is a table, JSON, or CSV.
 ## Table of contents
 
 - [Install](#install)
+- [Upgrade](#upgrade)
 - [Usage](#usage)
+- [Configuration](#configuration)
+- [Shell completions](#shell-completions)
 - [The search window](#the-search-window)
 - [Output](#output)
 - [Exit codes](#exit-codes)
@@ -29,75 +32,98 @@ Output is a table, JSON, or CSV.
 
 ## Install
 
-Prebuilt archives are on the [latest release](https://github.com/tiredithumans/crt-query/releases/latest)
-for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`
-and `x86_64-pc-windows-msvc`. Each comes with a `SHA256SUMS` file covering
-every archive in the release — always verify before installing.
+Every release ships prebuilt archives for `x86_64-unknown-linux-gnu`,
+`aarch64-apple-darwin`, `x86_64-apple-darwin` and `x86_64-pc-windows-msvc`,
+alongside a `SHA256SUMS` file covering all of them. Every route below that
+installs a prebuilt binary verifies that checksum first.
 
-### Linux
+### Linux and macOS
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh
+```
+
+The script detects your target triple, resolves the newest release — there is
+no version to substitute here or keep current — verifies the archive against
+that release's `SHA256SUMS`, installs to `/usr/local/bin`, and on macOS clears
+the Gatekeeper quarantine attribute that an unsigned binary arrives with.
+Re-run it to [upgrade](#upgrade).
+
+Piping a script into a shell is a decision, not a default. To read it first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+Options go after `sh -s --` when piping — a directory that needs no `sudo`, or
+a pinned release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \
+  | sh -s -- --dir "$HOME/.local/bin"
+
+curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \
+  | sh -s -- --version v0.1.0
+```
+
+### Homebrew (macOS and Linux)
+
+```sh
+brew install tiredithumans/tap/crt-query
+```
+
+`brew upgrade` then finds new versions on its own, and Homebrew strips the
+macOS quarantine attribute from what it downloads, so there is no `xattr` step
+on this path.
+
+### Windows
+
+In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 | iex
+```
+
+Installs to `%LOCALAPPDATA%\Programs\crt-query` and adds it to your user
+`PATH` — no admin rights needed. Open a new terminal for the updated `PATH` to
+take effect.
+
+To pass options, the script has to become a scriptblock first:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1))) -Dir C:\tools
+```
+
+`-Dir <path>` chooses the install directory, `-Version v0.1.0` pins a release,
+and `-NoPathUpdate` leaves your `PATH` alone.
+
+### Manual download
+
+Pick a release from the [releases page](https://github.com/tiredithumans/crt-query/releases),
+then — substituting the version and the target triple for your machine
+(`aarch64-apple-darwin` for Apple Silicon, `x86_64-apple-darwin` for Intel):
 
 ```sh
 VERSION=v0.1.0
 TARGET=x86_64-unknown-linux-gnu
 curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/crt-query-$VERSION-$TARGET.tar.gz"
 curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/SHA256SUMS"
-sha256sum --ignore-missing -c SHA256SUMS
+
+sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missing -c SHA256SUMS
+
 tar -xzf "crt-query-$VERSION-$TARGET.tar.gz"
 sudo install -m 0755 "crt-query-$VERSION-$TARGET/crt-query" /usr/local/bin/
 ```
 
-### macOS
-
-Pick the target for your chip: `aarch64-apple-darwin` for Apple Silicon (M-series),
-`x86_64-apple-darwin` for Intel.
-
-```sh
-VERSION=v0.1.0
-TARGET=aarch64-apple-darwin   # Intel: x86_64-apple-darwin
-curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/crt-query-$VERSION-$TARGET.tar.gz"
-curl -LO "https://github.com/tiredithumans/crt-query/releases/download/$VERSION/SHA256SUMS"
-shasum -a 256 --ignore-missing -c SHA256SUMS
-tar -xzf "crt-query-$VERSION-$TARGET.tar.gz"
-sudo install -m 0755 "crt-query-$VERSION-$TARGET/crt-query" /usr/local/bin/
-```
-
-The binaries are unsigned, so Gatekeeper quarantines them on first run. Clear
-the quarantine attribute once, after installing:
+On macOS the binaries are unsigned, so Gatekeeper quarantines them. Clear the
+attribute after installing — and again after every upgrade, because a fresh
+download arrives quarantined too:
 
 ```sh
 xattr -d com.apple.quarantine /usr/local/bin/crt-query
 ```
-
-### Windows
-
-Run in PowerShell:
-
-```powershell
-$Version = "v0.1.0"
-$Target  = "x86_64-pc-windows-msvc"
-Invoke-WebRequest -Uri "https://github.com/tiredithumans/crt-query/releases/download/$Version/crt-query-$Version-$Target.zip" -OutFile "crt-query.zip"
-Invoke-WebRequest -Uri "https://github.com/tiredithumans/crt-query/releases/download/$Version/SHA256SUMS" -OutFile "SHA256SUMS"
-
-$expected = ((Select-String -Path SHA256SUMS -Pattern ([regex]::Escape("crt-query-$Version-$Target.zip"))).Line -split '\s+')[0]
-$actual   = (Get-FileHash crt-query.zip -Algorithm SHA256).Hash.ToLower()
-if ($actual -ne $expected) { throw "checksum mismatch: expected $expected, got $actual" }
-
-Expand-Archive crt-query.zip -DestinationPath . -Force
-$InstallDir = "$env:LOCALAPPDATA\Programs\crt-query"
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Move-Item "crt-query-$Version-$Target\crt-query.exe" "$InstallDir\crt-query.exe" -Force
-Remove-Item "crt-query-$Version-$Target" -Recurse
-
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -notlike "*$InstallDir*") {
-    $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-}
-```
-
-Installs to `%LOCALAPPDATA%\Programs\crt-query` and adds it to your user
-`PATH` — no admin rights needed. Open a new terminal window for the updated
-`PATH` to take effect.
 
 ### From source
 
@@ -106,6 +132,46 @@ Any OS with Rust 1.98+ (see `rust-toolchain.toml`):
 ```sh
 cargo install --git https://github.com/tiredithumans/crt-query
 ```
+
+## Upgrade
+
+`crt-query check-update` reports whether a newer release exists:
+
+```console
+$ crt-query check-update
+crt-query 0.2.0 is available (running 0.1.0): https://github.com/tiredithumans/crt-query/releases/tag/v0.2.0
+```
+
+It is the only subcommand that contacts anything other than crt.sh, and only
+when you ask: nothing checks for updates in the background, on a timer, or as a
+side effect of a query. `--json` gives
+`{"current", "latest", "update_available", "release_url"}` for a scheduled
+check. The exit code is `0` either way — being out of date is a report, not a
+failure.
+
+How to actually upgrade depends on how you installed:
+
+| Installed with | Upgrade with |
+| --- | --- |
+| `install.sh` | Re-run it. It resolves the newest release, verifies `SHA256SUMS`, replaces the binary, and re-clears the macOS quarantine attribute. |
+| `install.ps1` | Re-run it. Same, and it clears the new download's mark-of-the-web. |
+| Homebrew | `brew update && brew upgrade crt-query` |
+| Manual download | Repeat the download steps for the new version, **including the checksum check**. |
+| From source | `cargo install --git https://github.com/tiredithumans/crt-query --force` |
+
+Two things that catch people out when upgrading by hand on macOS:
+
+- The quarantine attribute comes back with **every** download, not just the
+  first, so `xattr -d com.apple.quarantine /usr/local/bin/crt-query` is part of
+  each manual upgrade. `install.sh` and Homebrew do it for you.
+- `SHA256SUMS` covers one release. Verifying a new archive against the previous
+  release's file fails, and should — delete the stale one rather than adding
+  flags until it stops complaining.
+
+There is deliberately no `crt-query self-update`. A tool that downloads and
+executes replacement code hands a compromised release channel a free upgrade to
+code execution on every machine that runs it; re-running an installer that
+verifies what it fetches costs one line and does not.
 
 ## Usage
 
@@ -118,7 +184,18 @@ crt-query cert 984858191
 
 # Certificates expired or expiring within N days, sorted by expiry
 crt-query expiring example.com --within 30 --skip-expired
+
+# Several domains at once: one report, sorted by expiry across all of them
+crt-query expiring example.com example.org example.net --within 30
+
+# Is there a newer release? (the only subcommand that talks to GitHub)
+crt-query check-update
 ```
+
+`expiring` takes any number of domains. They are queried one at a time — the
+guest database's statement timeout is what rules out folding them into a single
+query — so `--limit` applies per domain, and a certificate covering two of them
+appears once, carrying both matched identities.
 
 Output is a table by default. `--json` emits JSON to stdout instead;
 `--csv <path>` additionally writes a CSV file. Both are global flags and work
@@ -126,11 +203,66 @@ with every subcommand:
 
 ```sh
 crt-query search example.com --json | jq '.[].id'
-crt-query expiring example.com --within 90 --csv report.csv
+crt-query expiring example.com example.org --within 90 --csv report.csv
 ```
 
 Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
-`--db-url postgresql://...`.
+`--db-url postgresql://...`. Repeating them on every run is what the
+[config file](#configuration) is for.
+
+## Configuration
+
+Connection settings can live in a config file instead:
+
+- Linux and macOS: `$XDG_CONFIG_HOME/crt-query/config.toml`, falling back to
+  `~/.config/crt-query/config.toml`
+- Windows: `%APPDATA%\crt-query\config.toml`
+
+```toml
+# Every key is optional; anything omitted keeps its built-in default.
+host = "crt.sh"
+port = 5432
+dbname = "certwatch"
+user = "guest"
+
+# Or set the connection in one go. A db_url overrides the four keys above,
+# exactly as --db-url overrides the individual flags.
+# db_url = "postgresql://guest@crt.sh:5432/certwatch"
+```
+
+Precedence, highest first: command-line flag, config file, built-in default.
+
+A missing file is not an error — it just means every setting comes from flags
+and defaults. A file that exists but does not parse *is* an error: an unknown
+or misspelled key fails the run instead of being ignored, so a typo cannot
+quietly leave you querying somewhere you did not intend.
+
+Nothing else is configurable there. Output format, limits and windows stay on
+the command line, where the run that produced a report also records how.
+
+## Shell completions
+
+`crt-query completions <shell>` writes a completion script to stdout for
+`bash`, `zsh`, `fish`, `powershell` or `elvish`. Where it belongs depends on
+your setup; the usual answers:
+
+```sh
+# zsh — any directory on your $fpath
+crt-query completions zsh > ~/.zfunc/_crt-query
+
+# bash
+crt-query completions bash > /usr/local/etc/bash_completion.d/crt-query
+
+# fish
+crt-query completions fish > ~/.config/fish/completions/crt-query.fish
+```
+
+```powershell
+# PowerShell — add to your profile
+crt-query completions powershell | Out-String | Invoke-Expression
+```
+
+Homebrew installs the bash, zsh and fish scripts for you.
 
 ## The search window
 
@@ -167,6 +299,11 @@ anything close to renewal. Widen `--since-expired` to look further back.
   for one expiring within the next 24 hours.
 - Table width follows the terminal, or falls back to 120 columns when stdout is
   a pipe. Override with `--width <cols>`.
+- While a query is in flight, `querying crt.sh:5432 for "example.com"…` goes to
+  stderr, so a slow answer from the shared database is distinguishable from a
+  hang — and `expiring` over several domains shows how far along it is. It is
+  suppressed when stderr is not a terminal, so scheduled runs keep clean logs,
+  and it is on stderr so it never lands in a piped table or JSON document.
 - Piping into `head` or quitting `less` early ends output cleanly rather than
   reporting a broken pipe.
 
@@ -177,6 +314,9 @@ anything close to renewal. Widen `--since-expired` to look further back.
 | 0 | Completed; results emitted, even if there were none |
 | 1 | The run failed |
 | 2 | `cert` — no certificate with that crt.sh ID |
+
+`check-update` exits `0` whether or not you are behind; read `update_available`
+from its `--json` output to branch on it.
 
 ## Deduplication
 
@@ -220,9 +360,12 @@ target/release/crt-query --help
 `just --list` shows every recipe. The gates CI runs:
 
 ```sh
-just verify        # fmt-check · lint · test · msrv — all offline
+just verify        # fmt-check · lint · test · msrv · lint-scripts — all offline
 just verify-full   # adds cargo-audit + cargo-deny (needs network)
 ```
+
+`lint-scripts` covers `install.sh` and `install.ps1`; it needs `shellcheck` and
+`pwsh` on PATH.
 
 Every test is offline and never contacts crt.sh — it is a shared public service
 running on donated infrastructure, and a test suite pointed at it would be both
