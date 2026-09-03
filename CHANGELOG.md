@@ -11,6 +11,8 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-03
+
 ### Added
 
 - `install.sh` and `install.ps1`: one-line installers for Linux/macOS and
@@ -24,7 +26,13 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 - Homebrew formula under `packaging/homebrew/`, so `brew upgrade` can carry the
   macOS/Linux cohort forward. It is generated from a release's `SHA256SUMS` by
   `just homebrew-formula`, which keeps its checksums from drifting away from
-  the archives they name.
+  the archives they name. The generator only emits the completions call for a
+  release that actually has the `completions` subcommand: Homebrew builds those
+  scripts by *running* the installed binary, so calling it against an older
+  release aborts `brew install` outright rather than degrading — and no gate in
+  this repo catches that, because none of them runs a released binary. It also
+  leaves the `version` out of the formula, which Homebrew scans from the URLs
+  and `brew audit --strict` rejects as a duplicate.
 - `crt-query check-update` — reports whether a newer release exists, and exits
   `0` either way. Opt-in on purpose: it is the only subcommand that contacts
   anything other than crt.sh, and nothing checks in the background. `--json`
@@ -122,5 +130,6 @@ Initial release.
   checksum. `cargo-audit`, `cargo-deny` and CodeQL run on every PR and weekly.
 - Dual-licensed MIT OR Apache-2.0. Requires Rust 1.98+.
 
-[Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tiredithumans/crt-query/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tiredithumans/crt-query/releases/tag/v0.1.0

@@ -12,7 +12,8 @@
 class CrtQuery < Formula
   desc "Query crt.sh certificate-transparency data from its public PostgreSQL database"
   homepage "https://github.com/tiredithumans/crt-query"
-  version "0.1.0"
+  # No `version` stanza: Homebrew scans it out of the URLs below, and
+  # declaring it as well is a `brew audit --strict` failure.
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
@@ -35,9 +36,9 @@ class CrtQuery < Formula
 
   def install
     bin.install "crt-query"
-    # `crt-query completions <shell>` takes the shell as a bare argument,
-    # which is this helper's default parameter form.
-    generate_completions_from_executable(bin/"crt-query", "completions")
+    # No completions here: `crt-query completions` arrived in v0.2.0,
+    # and Homebrew generates them by running the installed binary, so calling
+    # it against v0.1.0 would abort the install.
   end
 
   test do
