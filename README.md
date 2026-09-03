@@ -172,7 +172,7 @@ anything close to renewal.
 
 | | |
 | --- | --- |
-| Timestamps | UTC everywhere. JSON carries an explicit `Z`; table columns are labelled `(UTC)` |
+| Timestamps | UTC everywhere. JSON and CSV carry an explicit offset; table columns are labelled `(UTC)` and truncate to the minute |
 | `--json` | Always valid JSON, including `[]` for an empty result and `null` for a missing `cert` ID |
 | `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. A run that fails before emitting leaves the previous report untouched rather than an empty one |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
@@ -185,8 +185,14 @@ they cannot be squeezed to a character per line. An explicit `--width` is an
 instruction rather than a hint, so it overrides both and is honoured exactly.
 
 Multi-valued columns (matched identities, SANs) reach CSV as one row per value
-rather than joined into a field, so the file stays round-trippable. While a query
-is in flight, `querying crt.sh:5432 for "example.com"…` goes to stderr —
+rather than joined into a field, so the file stays round-trippable. CSV is a
+machine format rather than a picture of the table: an empty field means NULL
+(the table's `-` is display only), timestamps are full RFC 3339 instants with
+seconds, and `days_left` is therefore a genuine integer column. A field that
+would begin `=`, `+`, `@`, tab or carriage return is prefixed with `'` so a
+spreadsheet treats it as text — certificate subjects come from a public log and
+are chosen by whoever got the certificate issued. Negative numbers are never
+prefixed. While a query is in flight, `querying crt.sh:5432 for "example.com"…` goes to stderr —
 suppressed when stderr is not a terminal, so scheduled runs keep clean logs.
 Piping into `head`, or quitting `less` early, ends output cleanly.
 

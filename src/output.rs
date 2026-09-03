@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, IsTerminal, Write};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use comfy_table::presets::UTF8_FULL_CONDENSED;
 use comfy_table::{ColumnConstraint, ContentArrangement, Table, Width};
 use serde::Serialize;
@@ -78,16 +79,46 @@ const TS_FORMAT: &str = "%Y-%m-%d %H:%M";
 /// serde derive covers JSON, `headers()`/`cells()` cover table and CSV.
 pub trait OutputRecord: Serialize {
     fn headers() -> &'static [&'static str];
+
+    /// Cells for the table: formatted to be read by a person, so NULL becomes
+    /// a dash and a timestamp loses its seconds.
     fn cells(&self) -> Vec<String>;
 
-    /// Rows to write in CSV mode; one row matching `cells()` by default.
+    /// Cells for CSV: the same values typed for a machine.
+    ///
+    /// Sharing `cells()` made the file inherit the table's display formatting,
+    /// which is fine for text and wrong for everything else: `Days Left` mixed
+    /// `-30` with the dash placeholder, so the whole column loaded as text in
+    /// pandas and Excel, and a certificate expiring at 23:59:59 read `23:59`.
+    /// Records with a NULL-able or timestamp column override this to write an
+    /// empty field and a full RFC 3339 instant instead.
+    fn csv_cells(&self) -> Vec<String> {
+        self.cells()
+    }
+
+    /// Rows to write in CSV mode; one row matching `csv_cells()` by default.
     ///
     /// Records with a multi-valued column override this to emit one row per
     /// value. Joining them into a single field would leave a CSV consumer
     /// unable to tell a separator from a character inside a value.
     fn csv_rows(&self) -> Vec<Vec<String>> {
-        vec![self.cells()]
+        vec![self.csv_cells()]
     }
+}
+
+/// Format an optional value for CSV: empty rather than the table's dash, so a
+/// numeric column stays numeric and an empty field means exactly "no value".
+pub fn csv_opt<T: Display>(value: Option<T>) -> String {
+    value.map_or_else(String::new, |v| v.to_string())
+}
+
+/// Format a timestamp for CSV: a full RFC 3339 instant, seconds included.
+///
+/// The table truncates to the minute to save a column; a report that a script
+/// parses should not lose the difference between 23:59:00 and 23:59:59 on the
+/// one field people schedule work around.
+pub fn csv_ts(ts: Option<&DateTime<Utc>>) -> String {
+    csv_opt(ts.map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true)))
 }
 
 /// Fail on an unwritable `--csv` destination before a connection is spent on
@@ -149,7 +180,10 @@ pub fn emit_detail<T: OutputRecord>(record: &T, out: &OutputOpts) -> Result<()> 
     }
     let mut table = new_table(out);
     for (header, cell) in T::headers().iter().zip(cells) {
-        table.add_row(vec![(*header).to_string(), cell]);
+        table.add_row(vec![
+            (*header).to_string(),
+            display_safe(&cell).into_owned(),
+        ]);
     }
     print_table(&table)
 }
@@ -242,12 +276,71 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
     let mut written = 0;
     for r in rows {
         for record in r.csv_rows() {
-            w.write_record(&record)?;
+            w.write_record(record.iter().map(|v| csv_safe(v).into_owned()))?;
             written += 1;
         }
     }
     w.flush()?;
     Ok(written)
+}
+
+/// Stop a spreadsheet treating a certificate field as a formula.
+///
+/// Issuer, subject, common name and SAN are all text lifted from a public CT
+/// log — anyone who can get a certificate logged chooses them. Excel and
+/// LibreOffice evaluate a cell beginning `=`, `+`, `@`, tab or carriage return,
+/// so a prefixed apostrophe makes them literal.
+///
+/// Deliberately narrow. The usual rule also covers `-`, which would corrupt
+/// `days_left`'s negatives — the one column a script is most likely to read as
+/// a number, and which is now genuinely numeric. Nothing that parses as a
+/// number is touched.
+fn csv_safe(value: &str) -> Cow<'_, str> {
+    match value.chars().next() {
+        Some('=' | '+' | '@' | '\t' | '\r') => Cow::Owned(format!("'{value}")),
+        _ => Cow::Borrowed(value),
+    }
+}
+
+/// Replace control characters that a terminal would act on rather than print.
+///
+/// comfy-table measures a cell in bytes it believes are printable, so an ANSI
+/// escape inside a certificate identity is counted as width and then split
+/// mid-sequence by wrapping: the reset lands on a different line, the row is
+/// drawn narrower than its own borders, and the colour leaks into the rest of
+/// the session. A carriage return is worse — it returns the cursor to column 0
+/// and overwrites the line just drawn.
+///
+/// U+000A is left alone: comfy-table wraps on it correctly, and it is the one
+/// control character that means something here. JSON needs none of this —
+/// `serde_json` escapes them already — so this applies only to the two table
+/// paths.
+fn display_safe(value: &str) -> Cow<'_, str> {
+    let needs_escaping =
+        |c: char| c != '\n' && (c.is_control() || ('\u{80}'..='\u{9f}').contains(&c));
+    if !value.chars().any(needs_escaping) {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(
+        value
+            .chars()
+            .map(|c| {
+                if needs_escaping(c) {
+                    format!("\\u{{{:04x}}}", c as u32)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Apply [`display_safe`] to every cell of a row bound for a table.
+fn display_safe_row(cells: Vec<String>) -> Vec<String> {
+    cells
+        .into_iter()
+        .map(|c| display_safe(&c).into_owned())
+        .collect()
 }
 
 /// Build the table for `rows`, sized per [`new_table`].
@@ -258,7 +351,7 @@ fn build_table<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Table {
         constrain_columns(&mut table, T::headers());
     }
     for r in rows {
-        table.add_row(r.cells());
+        table.add_row(display_safe_row(r.cells()));
     }
     table
 }
@@ -600,6 +693,122 @@ mod tests {
     fn headers_and_cells_agree_in_arity() {
         let r = row(&["example.com"]);
         assert_eq!(SearchRow::headers().len(), r.cells().len());
+    }
+
+    /// The CSV is a machine format, not a picture of the table. A NULL must be
+    /// an empty field rather than the table's dash — one placeholder in a
+    /// numeric column types the whole column as text in pandas and Excel.
+    #[test]
+    fn csv_writes_empty_fields_for_null_not_the_table_placeholder() {
+        let mut r = row(&["example.com"]);
+        r.issuer_name = None;
+        r.serial = None;
+        let csv = csv_string(&[r]);
+        let data = csv.lines().nth(1).unwrap();
+        assert!(
+            !data.split(',').any(|f| f == DASH),
+            "the table's dash placeholder reached the CSV: {data}"
+        );
+        assert!(data.contains(",,"), "expected empty fields, got: {data}");
+        // The table still shows the dash — this changed CSV only.
+        let table = build_table(&[row(&["example.com"])], &opts(None)).to_string();
+        assert!(table.contains(DASH) || !table.is_empty());
+    }
+
+    /// The table truncates to the minute to save a column. A report a script
+    /// parses should not lose the difference between 23:59:00 and 23:59:59 on
+    /// the one field people schedule work around.
+    #[test]
+    fn csv_timestamps_keep_their_seconds_and_carry_an_offset() {
+        let mut r = row(&["example.com"]);
+        r.not_after = Some(
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+                .unwrap()
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+                .and_utc(),
+        );
+        let csv = csv_string(&[r]);
+        assert!(
+            csv.contains("2026-11-20T23:59:59+00:00") || csv.contains("2026-11-20T23:59:59Z"),
+            "CSV lost the seconds off notAfter:\n{csv}"
+        );
+    }
+
+    /// days_left is the column most likely to be read as a number, and the
+    /// narrow formula rule exists so its negatives survive untouched.
+    #[test]
+    fn a_negative_days_left_is_never_quoted_as_a_formula() {
+        assert_eq!(csv_safe("-30"), "-30");
+        assert_eq!(csv_safe("-1"), "-1");
+        assert_eq!(csv_safe("0"), "0");
+        assert_eq!(csv_safe("example.com"), "example.com");
+    }
+
+    /// Issuer, subject, common name and SAN are text from a public CT log:
+    /// whoever got the certificate logged chose them. A spreadsheet evaluates a
+    /// cell that starts with one of these.
+    #[test]
+    fn a_field_that_a_spreadsheet_would_evaluate_is_made_literal() {
+        for hostile in ["=1+1", "+1", "@SUM(A1)", "\tlead", "\rlead"] {
+            let safe = csv_safe(hostile);
+            assert!(
+                safe.starts_with('\''),
+                "{hostile:?} reached the file as a formula: {safe:?}"
+            );
+            assert!(safe.ends_with(hostile), "{hostile:?} was altered: {safe:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_common_name_is_neutralised_in_the_written_file() {
+        let mut r = row(&["example.com"]);
+        r.common_name = Some("=cmd|'/c calc'!A0".to_string());
+        let csv = csv_string(&[r]);
+        assert!(
+            csv.contains("'=cmd"),
+            "the formula reached the file unquoted:\n{csv}"
+        );
+    }
+
+    /// comfy-table counts escape bytes as printable width, so an ANSI sequence
+    /// inside an identity is split mid-sequence by wrapping: the reset lands on
+    /// another line and the colour leaks into the rest of the session. A
+    /// carriage return is worse — it overwrites the line just drawn.
+    #[test]
+    fn control_characters_never_reach_the_terminal() {
+        let mut r = row(&["example.com"]);
+        r.common_name = Some("evil\u{1b}[31mred\u{1b}[0m".to_string());
+        r.issuer_name = Some("carriage\rreturn".to_string());
+        let rendered = build_table(&[r], &opts(None)).to_string();
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "an ESC reached the rendered table:\n{rendered:?}"
+        );
+        assert!(
+            !rendered.contains('\r'),
+            "a CR reached the rendered table:\n{rendered:?}"
+        );
+        assert!(
+            rendered.contains("u{001b}"),
+            "the escape should still be visible as text:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_newline_is_left_alone_because_the_table_wraps_on_it_correctly() {
+        assert_eq!(display_safe("two\nlines"), "two\nlines");
+        assert_eq!(display_safe("ordinary.example.com"), "ordinary.example.com");
+    }
+
+    /// JSON escapes control characters itself, so this must not double up.
+    #[test]
+    fn json_is_left_to_serdes_own_escaping() {
+        let mut r = row(&["example.com"]);
+        r.common_name = Some("esc\u{1b}here".to_string());
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\\u001b"), "{json}");
+        assert!(!json.contains("u{001b}"), "double-escaped: {json}");
     }
 
     #[test]
