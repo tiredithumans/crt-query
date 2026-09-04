@@ -43,6 +43,10 @@ Every prebuilt route resolves the newest release, verifies the archive against
 that release's `SHA256SUMS`, and on macOS clears the Gatekeeper quarantine an
 unsigned binary arrives with. **Re-run the same command to upgrade.**
 
+The prebuilt Linux binaries are glibc builds and need **glibc 2.34 or newer** —
+RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later. On
+an older distribution, or on a musl system such as Alpine, build from source.
+
 <details>
 <summary>Script options, and installing by hand</summary>
 
@@ -76,7 +80,9 @@ options, the script has to become a scriptblock first:
 
 **Manual download.** Releases ship archives for `x86_64-unknown-linux-gnu`,
 `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
-`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them:
+`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them. Both Linux
+archives are glibc builds requiring **glibc 2.34 or newer**; there is no musl
+archive, so Alpine and other musl systems build from source:
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu        # Apple Silicon: aarch64-apple-darwin

@@ -16,6 +16,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The oldest glibc a published Linux binary has to load on: RHEL/Rocky 9 and
+  # Amazon Linux 2023 (2.34), Ubuntu 22.04 (2.35), Debian 12 (2.36). The two
+  # Linux rows below are pinned to the runner that produces this floor, and the
+  # `glibc floor` step in each Linux build fails the release if it ever rises.
+  # README.md quotes this number; keep the two in step.
+  GLIBC_FLOOR: GLIBC_2.34
 
 jobs:
   # Refuse to build anything if the tag and the manifest disagree. Catching it
@@ -58,13 +64,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both Linux rows pin an explicit 22.04 runner rather than taking
+          # `ubuntu-latest`. A binary inherits the glibc floor of the machine
+          # that linked it, so `latest` silently raises it every time GitHub
+          # moves the alias — which is how v0.4.0 shipped binaries that could
+          # not start on Debian 12, RHEL 9 or Ubuntu 22.04 (see GLIBC_FLOOR).
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           # Native ARM64 runner, so no cross-compilation toolchain is needed.
           # install.sh computes this target on every ARM64 Linux host, and
           # before this existed it resolved to an archive no release shipped.
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
@@ -84,6 +95,35 @@ jobs:
 
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
+
+      # Nothing else in this repo ever runs a released Linux binary, so the one
+      # property that decides whether it starts at all had no gate: v0.4.0
+      # shipped both Linux archives requiring a NON-weak GLIBC_2.39 verneed
+      # (from pidfd_spawnp/pidfd_getpid, which std's process-spawn path
+      # references and check-update reaches through `Command::new("curl")`).
+      # ld.so treats a missing non-weak version as fatal, so the binary died
+      # before main on every distribution below 2.39 — and install.sh had
+      # already overwritten the working copy by the time it found out.
+      #
+      # Assert the floor rather than the runner label: pinning the image is
+      # what holds it today, but this is what says so out loud, and it fails
+      # the release instead of the user's install.
+      - name: glibc floor
+        if: contains(matrix.target, 'linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/crt-query"
+          required=$(readelf -V "$bin" | grep -oE 'GLIBC_2\.[0-9]+' | sort -u -t. -k2 -n)
+          echo "$required"
+          highest=$(printf '%s\n' "$required" | tail -1)
+          worst=$(printf '%s\n%s\n' "$highest" "$GLIBC_FLOOR" | sort -t. -k2 -n | tail -1)
+          if [ "$worst" != "$GLIBC_FLOOR" ]; then
+            echo "::error::$bin requires $highest, above the supported floor $GLIBC_FLOOR."
+            echo "::error::A runner image bump is the usual cause; see the GLIBC_FLOOR comment."
+            exit 1
+          fi
+          echo "floor holds: highest required is $highest, at or below $GLIBC_FLOOR"
 
       # One archive per target, named so a human can tell at a glance which
       # binary they downloaded: crt-query-v1.2.3-<target>.<ext>
@@ -149,9 +189,11 @@ jobs:
       # SHA256SUMS proves the archives agree with each other; it is served from
       # the same release, so it says nothing about where they came from. An
       # attestation is signed by the workflow run itself, which is the one link
-      # a downloader cannot otherwise verify — and self-update replaces the
-      # running binary with what this release publishes, so that link is worth
-      # having. Verify with:
+      # a downloader cannot otherwise verify — and the install scripts replace
+      # the running binary after checking it against a SHA256SUMS fetched from
+      # that same release, which is exactly the trust the sentence above says
+      # proves nothing. So that link is worth having. (There is deliberately no
+      # self-update; see src/update.rs and README.md.) Verify with:
       #   gh attestation verify <archive> --repo tiredithumans/crt-query
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
