@@ -115,21 +115,40 @@ gh release edit vX.Y.Z --draft=false --latest
 Never `gh release create`: the workflow already made the draft, and a second release would bypass
 the assembled assets and checksums.
 
-## 9. Regenerate the Homebrew formula
+## 9. Homebrew formula — automated, but confirm it ran
 
-`generate.sh` copies every checksum out of the release's own `SHA256SUMS`, fetched over the public
-download URL — which serves nothing for a draft. So this runs **after** publishing, never before:
+Publishing fires `release: published`, which runs the `tap` job in `release.yml`. That job
+regenerates the formula from the published `SHA256SUMS`, verifies it, and pushes it to
+`tiredithumans/homebrew-tap` as `Formula/crt-query.rb`. Nothing to do by hand — but it is the step
+that reaches `brew install` users, so check it actually ran:
 
 ```sh
-just homebrew-formula        # defaults to the latest release
+gh run list --workflow=release.yml --limit 3       # expect an "Update Homebrew tap" run on publish
+gh api repos/tiredithumans/homebrew-tap/contents/Formula/crt-query.rb -q .content \
+  | base64 -d | grep -m1 'url "'                   # should name the version just published
 ```
 
-Then copy `packaging/homebrew/crt-query.rb` into the tap repository as `Formula/crt-query.rb`. Until
-that lands, `brew install` still serves the previous version.
+It needs the `TAP_TOKEN` secret (a fine-grained PAT with Contents: read and write on the tap). If
+that is missing the job fails loudly on its first step and the tap is left untouched — the release
+itself is already published and unaffected.
+
+To re-sync without cutting a release — after fixing a token, say:
+
+```sh
+gh workflow run release.yml -f tap_only=true       # skips the build; syncs from the latest release
+```
+
+The local `just homebrew-formula` still exists as a fallback and for inspecting the generated file.
+It writes `packaging/homebrew/crt-query.rb`; copying that into the tap by hand is only necessary if
+the automation is broken.
+
+Why it hangs off publish rather than the tag push: `generate.sh` copies every checksum out of the
+release's own `SHA256SUMS`, fetched over the public download URL, which serves nothing for a draft.
 
 Homebrew runs the installed binary at install time (`generate_completions_from_executable`) and again
 in `test do`, so the formula must only call subcommands that exist in the release it points at —
-never one that only exists on `main`.
+never one that only exists on `main`. The `tap` job now enforces this by downloading the published
+Linux archive and making exactly those calls before it pushes anything.
 
 ## Re-cut pattern (broken draft, not yet published)
 

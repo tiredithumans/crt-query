@@ -4,12 +4,25 @@ name: Release
 # target, assembles SHA256SUMS, and publishes a DRAFT release. A human reviews
 # the draft and publishes it — that final step is what reaches users.
 #
+# Publishing then fires `release: published`, which runs the `tap` job at the
+# bottom to sync the Homebrew formula. Two separate triggers on purpose: the
+# formula is generated from SHA256SUMS fetched over the PUBLIC download URL,
+# which serves nothing for a draft. A draft release fires no `release` event at
+# all, so the draft job cannot trigger the tap job.
+#
 # Every `uses:` is pinned to a full commit SHA (see the note in ci.yml).
 
 on:
   push:
     tags: ["v*.*.*"]
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tap_only:
+        description: "Skip the build; only re-sync the Homebrew tap from the latest published release"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,6 +41,16 @@ jobs:
   # here costs seconds; catching it after publish means a yanked release.
   guard:
     name: Guard
+    # The release-published and tap-only runs do no building; they start at the
+    # `tap` job. Skipping this skips `build` and `draft` with it, via `needs`.
+    #
+    # Compared as a string against 'true' rather than written `!inputs.tap_only`:
+    # the `inputs` context is only populated on a manually triggered run, and on
+    # the tag push that actually cuts releases `github.event.inputs` is null,
+    # which compares unequal here and lets the build proceed. The string form
+    # also sidesteps the expression-language trap that makes the literal 'false'
+    # truthy — under `!`, an unticked checkbox would skip the whole release.
+    if: github.event_name != 'release' && github.event.inputs.tap_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -223,3 +246,219 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: artifacts/*
           fail_on_unmatched_files: true
+
+  # Publishing a release does not by itself change what `brew install` serves:
+  # the formula lives in a separate tap repository, and copying it across was a
+  # manual step at the end of the release checklist. It was missed three times
+  # running — v0.4.1, v0.5.0 and v0.5.1 all shipped while the tap sat on
+  # v0.4.0 — so it is automated here rather than written down again.
+  #
+  # Runs on publish, never on the tag push: generate.sh fetches SHA256SUMS over
+  # the public download URL, and a draft serves nothing there.
+  tap:
+    name: Update Homebrew tap
+    # A pre-release fires `published` too — `released` is the type that skips
+    # them, and a pre-release published from a draft fires `published` either
+    # way. The tap has no channels: one Formula/crt-query.rb is what every
+    # `brew upgrade` follows, so a soft-launched version would land on everyone.
+    #
+    # Every other install path already ignores pre-releases for free, by going
+    # through /releases/latest — install.sh:149, generate.sh:22 with no tag, and
+    # check-update (src/update.rs:26,132, which says so outright). This is the
+    # one path that has to check the flag itself.
+    #
+    # Parenthesised because `&&` binds tighter than `||`: bare, the clause would
+    # attach to the tap_only branch and leave the release path unguarded.
+    if: >-
+      (github.event_name == 'release' && !github.event.release.prerelease)
+      || github.event.inputs.tap_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Nothing here writes to THIS repository; the tap is reached with its own
+    # token below, because GITHUB_TOKEN is scoped to this repo alone.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fail with the fix rather than with a 404 from the tap checkout further
+      # down, which is what a missing secret otherwise looks like.
+      - name: Require the tap token
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::TAP_TOKEN is unset. Create a fine-grained PAT with Contents: read and write on tiredithumans/homebrew-tap, then add it to this repository as a secret named TAP_TOKEN."
+            exit 1
+          fi
+
+      # A manual re-sync passes no tag, and generate.sh then resolves
+      # /releases/latest — which is what a re-sync is asking for anyway.
+      - name: Regenerate the formula from the published release
+        id: gen
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          ./packaging/homebrew/generate.sh ${TAG:+"$TAG"}
+          # Read the tag back out of the generated file rather than trusting the
+          # event, so every assertion below is about what the formula says.
+          #
+          # `|| true` sits outside the substitution deliberately. grep exits 1
+          # when it matches nothing, pipefail hands that status to the
+          # assignment, and `set -e` would then kill the step here — before the
+          # message explaining why. That made the branch below unreachable: the
+          # job died on a bare exit 1 with no annotation, on a release that is
+          # already public.
+          FORMULA_TAG=$(grep -m1 -oE 'releases/download/[^/"]+/' \
+            packaging/homebrew/crt-query.rb | cut -d/ -f3) || true
+          echo "formula points at ${FORMULA_TAG:-<nothing>}"
+          if [ -z "$FORMULA_TAG" ]; then
+            echo "::error::could not read a version out of the generated formula"
+            exit 1
+          fi
+          # Matched loosely above, rejected precisely here, so the failure can
+          # name what it found. The tap serves stable releases only.
+          if ! printf '%s' "$FORMULA_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::formula points at $FORMULA_TAG, which is not a vX.Y.Z release; the tap serves stable releases only."
+            exit 1
+          fi
+          if [ -n "$TAG" ] && [ "$FORMULA_TAG" != "$TAG" ]; then
+            echo "::error::formula points at $FORMULA_TAG but this release is $TAG"
+            exit 1
+          fi
+          echo "tag=$FORMULA_TAG" >> "$GITHUB_OUTPUT"
+
+      # generate.sh copies the checksums out of SHA256SUMS, so this reads the
+      # same file back independently: a suffix-matching slip in its sum_for /
+      # archive_for that paired a hash with the wrong archive would survive
+      # generation and fail at `brew install`, which is the worst place to
+      # find out.
+      - name: Formula checksums match the published SHA256SUMS
+        env:
+          TAG: ${{ steps.gen.outputs.tag }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location -o SHA256SUMS \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/SHA256SUMS"
+          url=""
+          checked=0
+          while IFS= read -r line; do
+            case "$line" in
+              *'url "http'*)
+                url=${line#*url \"}; url=${url%\"*} ;;
+              *'sha256 "'*)
+                [ -n "$url" ] || continue
+                sha=${line#*sha256 \"}; sha=${sha%\"*}
+                name=${url##*/}
+                want=$(awk -v n="$name" '{ f=$2; sub(/^\*?(\.\/)?/, "", f) } f == n { print $1 }' SHA256SUMS)
+                if [ -z "$want" ]; then
+                  echo "::error::$name is not in the published SHA256SUMS"; exit 1
+                fi
+                if [ "$want" != "$sha" ]; then
+                  echo "::error::$name: formula says $sha, the release says $want"; exit 1
+                fi
+                echo "ok  $name"
+                checked=$((checked + 1))
+                url="" ;;
+            esac
+          done < packaging/homebrew/crt-query.rb
+          # Four url/sha256 pairs: two macOS, two Linux. Windows publishes an
+          # archive but has no place in a formula. A parse that silently found
+          # none would otherwise pass this step by checking nothing.
+          if [ "$checked" -ne 4 ]; then
+            echo "::error::checked $checked url/sha256 pairs, expected 4"; exit 1
+          fi
+
+      # The property no other gate in this repo covers, and the one that breaks
+      # installs outright: Homebrew RUNS the binary it installs — once through
+      # generate_completions_from_executable at install time, and again in the
+      # `test do` block. A formula naming a subcommand the released binary does
+      # not carry aborts `brew install`. generate.sh says exactly this in its
+      # MIN_COMPLETIONS_VERSION comment; this is the check that enforces it.
+      - name: The released binary answers every call the formula makes
+        env:
+          TAG: ${{ steps.gen.outputs.tag }}
+        run: |
+          set -euo pipefail
+          url=$(grep -oE 'https://[^"]+x86_64-unknown-linux-gnu\.tar\.gz' \
+            packaging/homebrew/crt-query.rb)
+          curl --fail --silent --show-error --location -o linux.tar.gz "$url"
+          # Checked against the SHA256SUMS the previous step already fetched and
+          # matched, so this runs the archive the formula points at, not merely
+          # one with the same name.
+          want=$(awk -v n="${url##*/}" '{ f=$2; sub(/^\*?(\.\/)?/, "", f) } f == n { print $1 }' SHA256SUMS)
+          echo "$want  linux.tar.gz" | sha256sum -c -
+          mkdir -p unpacked && tar xzf linux.tar.gz -C unpacked --strip-components=1
+          bin=unpacked/crt-query
+          # `test do`: the version Homebrew scans out of the URL, and the string
+          # the help assertion matches.
+          "$bin" --version
+          "$bin" --version | grep -qF "${TAG#v}"
+          "$bin" --help | grep -qF 'certificate-transparency'
+          # Only when the formula actually calls it: generate.sh omits the
+          # completions block for releases older than `crt-query completions`.
+          if grep -q 'generate_completions_from_executable' packaging/homebrew/crt-query.rb; then
+            for shell in bash zsh fish; do
+              "$bin" completions "$shell" > /dev/null
+            done
+            echo "completions ok for bash, zsh and fish"
+          else
+            echo "formula declares no completions block; nothing to exercise"
+          fi
+
+      # Everything above checks what the formula POINTS AT. This checks the
+      # formula itself parses: generate.sh builds it by shell interpolation into
+      # a heredoc, so a stray quote in an interpolated value yields a file that
+      # is wrong in a way no checksum notices. `brew audit --strict --online` is
+      # the real gate and needs the formula inside a tapped tap, so it stays
+      # manual (see packaging/homebrew/README.md); a syntax check is the part
+      # that can run here, and it catches the failure mode generation can cause.
+      - name: The formula is syntactically valid Ruby
+        run: ruby -c packaging/homebrew/crt-query.rb
+
+      # The archive users are about to be pointed at was built by this repo's
+      # release run, not merely uploaded to it.
+      - name: Provenance of the archive the formula points at
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify linux.tar.gz --repo "$GITHUB_REPOSITORY"
+
+      # persist-credentials stays on here, unlike everywhere else in this repo:
+      # this is the one checkout that has to push.
+      - name: Check out the tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tiredithumans/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: Copy the formula across
+        env:
+          TAG: ${{ steps.gen.outputs.tag }}
+        run: |
+          set -euo pipefail
+          install -D packaging/homebrew/crt-query.rb tap/Formula/crt-query.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Staged first, then compared against the index rather than the
+          # worktree. `git diff --quiet` reports a brand-new file as unchanged,
+          # because an untracked path has nothing to diff against — so a tap
+          # that does not carry the formula yet would report "nothing to push"
+          # and silently skip, which is the exact failure this job exists to
+          # end. Comparing the index sees the addition.
+          git add Formula/crt-query.rb
+          # A re-run of an already-synced release is a no-op, not an empty
+          # commit — `git commit` would otherwise fail the job the second time.
+          if git diff --cached --quiet -- Formula/crt-query.rb; then
+            echo "tap already serves $TAG; nothing to push"
+            exit 0
+          fi
+          git commit -m "chore: update crt-query to $TAG" -m \
+            "Generated by tiredithumans/crt-query release.yml from the published $TAG SHA256SUMS. Checksums cross-checked against it, and the released Linux binary was run for every call the formula makes at install and test time."
+          git push
+          echo "tap now serves $TAG"
