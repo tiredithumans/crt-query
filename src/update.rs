@@ -33,13 +33,42 @@ const TIMEOUT_SECS: &str = "10";
 
 const USER_AGENT: &str = concat!("crt-query/", env!("CARGO_PKG_VERSION"));
 
+/// The install route for the platform this binary was built for.
+///
+/// One route, not all of them. A Windows build used to print the `install.sh`
+/// line and nothing else: a shell pipeline the user does not have a `sh` for,
+/// naming a script that refuses to run on Windows anyway and could not install
+/// the binary they are holding. Listing every platform instead would put two
+/// lines that do not apply in front of the one that does, on the message whose
+/// whole job is to be actionable.
+///
+/// Windows on ARM is covered by the same script: it installs the x86-64 build,
+/// which Windows runs under emulation.
+#[cfg(windows)]
+const INSTALL_ROUTE: &str = "\
+Windows: irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 | iex";
+
+#[cfg(not(windows))]
+const INSTALL_ROUTE: &str = "\
+Linux/macOS: curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh";
+
 /// What to do about a newer release. Printed to stderr so the one-line
 /// report on stdout stays the only thing a script has to parse.
-const UPGRADE_HINT: &str = "\
-Upgrade: re-run the install script — it resolves the latest release and \
-verifies its SHA256SUMS.\n  \
-Linux/macOS: curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh\n  \
-From source: cargo install --locked --git https://github.com/tiredithumans/crt-query --force";
+///
+/// A function rather than a `const` because [`INSTALL_ROUTE`] varies by target
+/// and `concat!` takes literals only. Writing the surrounding prose out twice
+/// under `cfg` would be the cheaper trick and the worse one — two copies of a
+/// sentence that has to stay in step is exactly the shape every stale claim in
+/// this repo has taken.
+fn upgrade_hint() -> String {
+    format!(
+        "Upgrade: re-run the install script — it resolves the latest release and \
+         verifies its SHA256SUMS.\n  \
+         {INSTALL_ROUTE}\n  \
+         From source: cargo install --locked --git \
+         https://github.com/tiredithumans/crt-query --force"
+    )
+}
 
 /// The fields used out of GitHub's release object; serde ignores the rest.
 #[derive(Deserialize)]
@@ -171,7 +200,7 @@ pub fn run_check_update(out: &OutputOpts) -> Result<()> {
     let status = check()?;
     output::emit_update_status(&status, out)?;
     if status.update_available {
-        eprintln!("{UPGRADE_HINT}");
+        eprintln!("{}", upgrade_hint());
     }
     Ok(())
 }
@@ -236,14 +265,36 @@ mod tests {
 
     #[test]
     fn the_upgrade_hint_names_a_verifying_path() {
-        assert!(UPGRADE_HINT.contains("install.sh"));
-        assert!(UPGRADE_HINT.contains("SHA256SUMS"));
+        let hint = upgrade_hint();
+        assert!(hint.contains("SHA256SUMS"));
         // `cargo install` re-resolves versions unless told not to, so without
         // this the from-source route builds a dependency set no gate has seen
         // — while every justfile recipe and release.yml pass --locked.
         assert!(
-            UPGRADE_HINT.contains("cargo install --locked"),
-            "the from-source hint must pin the lockfile:\n{UPGRADE_HINT}"
+            hint.contains("cargo install --locked"),
+            "the from-source hint must pin the lockfile:\n{hint}"
+        );
+    }
+
+    /// The hint has to name a route that can install the binary printing it.
+    /// A Windows build used to advertise `install.sh | sh` and nothing else,
+    /// which is neither a command that host has nor a script that would install
+    /// it. CI runs the suite on windows-latest, so both arms are exercised.
+    #[test]
+    fn the_upgrade_hint_names_a_route_for_the_platform_it_was_built_for() {
+        let hint = upgrade_hint();
+        let (wanted, wrong) = if cfg!(windows) {
+            ("install.ps1", "install.sh")
+        } else {
+            ("install.sh", "install.ps1")
+        };
+        assert!(
+            hint.contains(wanted),
+            "this build's own install route ({wanted}) is missing:\n{hint}"
+        );
+        assert!(
+            !hint.contains(wrong),
+            "the hint offers {wrong}, which cannot install this binary:\n{hint}"
         );
     }
 }
