@@ -72,6 +72,39 @@ fn a_malformed_cert_argument_is_a_usage_error_not_a_missing_certificate() {
     }
 }
 
+/// `crt-query search "$DOMAIN"` with `$DOMAIN` unset used to spend a
+/// connection on the shared guest database and report "No certificates
+/// found" — a result people act on — for a term that was never there. It is a
+/// usage error, and the absence of "connection attempt" in stderr is the
+/// assertion that it is decided before the network is touched.
+#[test]
+fn a_blank_term_is_a_usage_error_and_never_reaches_the_database() {
+    for subcommand in ["search", "expiring"] {
+        for blank in ["", "   "] {
+            let out = run(&[
+                subcommand,
+                "example.com",
+                blank,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1",
+            ]);
+            let err = stderr(&out);
+            assert_eq!(
+                code(&out),
+                CLAP_USAGE_ERROR,
+                "`{subcommand} {blank:?}` exited {}:\n{err}",
+                code(&out)
+            );
+            assert!(
+                !err.contains("connection attempt"),
+                "a blank term was only rejected after a connection was attempted:\n{err}"
+            );
+        }
+    }
+}
+
 #[test]
 fn completions_are_written_through_the_normal_stdout_path() {
     let out = run(&["completions", "bash"]);

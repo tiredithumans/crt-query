@@ -13,6 +13,14 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Fixed
 
+- **An empty or whitespace-only search term is a usage error, not a query.**
+  `crt-query search "$DOMAIN"` with `$DOMAIN` unset used to spend a connection
+  on the shared guest database — `plainto_tsquery` of nothing matches no row —
+  and then report `No certificates found`, which is a result people act on.
+  `search` and `expiring` now refuse a blank term at parse time with exit 2,
+  the same code a malformed `cert` ID gets, so a shell slip never reads as an
+  empty certificate inventory. Whitespace inside a term is passed through
+  as given.
 - **A `--csv` write that fails part-way no longer destroys the previous
   report.** The file was truncated before the first row was written, so a full
   disk or a write error left a partial report where the last run's had been,

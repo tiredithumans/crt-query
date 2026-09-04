@@ -77,7 +77,7 @@ pub enum Commands {
         /// Domains or identities to search for (% and _ act as wildcards).
         /// Several may be given; --limit applies per term, and results are
         /// merged (and deduplicated) across all of them
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., value_parser = non_blank_term)]
         query: Vec<String>,
 
         /// Only consider certificates still valid within this many days of
@@ -126,7 +126,7 @@ pub enum Commands {
     Expiring {
         /// Domains to check; --limit applies per domain, and results are
         /// merged (and deduplicated) across all of them
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., value_parser = non_blank_term)]
         domain: Vec<String>,
 
         /// Look-ahead window in days
@@ -215,6 +215,27 @@ impl Commands {
     }
 }
 
+/// A `search` term or `expiring` domain, rejected at parse time when it is
+/// empty or only whitespace.
+///
+/// clap accepts an empty positional, and an empty term still costs a statement
+/// against the shared guest database: `plainto_tsquery` of nothing is a query
+/// that matches no row, so the run spent a connection to report "No
+/// certificates found" for a term that was never there. That is almost always
+/// an unset shell variable — `crt-query search "$DOMAIN"` — and "no
+/// certificates" is a result people act on, so the same reasoning that keeps
+/// `EXIT_NOT_FOUND` off clap's 2 applies: a slip must read as a usage error.
+///
+/// Whitespace inside a term is left alone; only a term with nothing else in
+/// it is refused.
+fn non_blank_term(term: &str) -> Result<String, String> {
+    if term.trim().is_empty() {
+        Err("a term cannot be empty or only whitespace".to_string())
+    } else {
+        Ok(term.to_string())
+    }
+}
+
 /// Write a completion script for `shell` to `out`.
 ///
 /// The generated script is derived from the same [`Cli`] definition clap
@@ -288,6 +309,46 @@ mod tests {
     #[test]
     fn search_needs_at_least_one_term() {
         assert!(Cli::try_parse_from(["crt-query", "search"]).is_err());
+    }
+
+    /// An unset `$DOMAIN` used to reach the database as an empty term, spend
+    /// a connection, and come back as "No certificates found" — a result
+    /// people act on. It is a usage error, and it is one for both subcommands
+    /// and anywhere in the list, not only the first position.
+    #[test]
+    fn a_blank_term_is_a_usage_error_before_anything_is_queried() {
+        for subcommand in ["search", "expiring"] {
+            for blank in ["", " ", "\t", " \n "] {
+                for args in [
+                    vec!["crt-query", subcommand, blank],
+                    vec!["crt-query", subcommand, "a.example", blank],
+                ] {
+                    let Err(err) = Cli::try_parse_from(&args) else {
+                        panic!("accepted {args:?}");
+                    };
+                    assert_eq!(
+                        err.kind(),
+                        clap::error::ErrorKind::ValueValidation,
+                        "{args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Only a term with nothing else in it is refused: whitespace around or
+    /// inside a value is the caller's to keep.
+    #[test]
+    fn a_term_with_whitespace_in_it_is_passed_through_as_given() {
+        let cli = Cli::try_parse_from(["crt-query", "search", " example.com ", "O=Example, Inc."])
+            .unwrap();
+        let Commands::Search { query, .. } = cli.command else {
+            panic!("expected the search subcommand");
+        };
+        assert_eq!(
+            query,
+            vec![" example.com ".to_string(), "O=Example, Inc.".to_string()]
+        );
     }
 
     #[test]
