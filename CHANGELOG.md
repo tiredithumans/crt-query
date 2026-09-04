@@ -66,6 +66,23 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 - An unparseable `db_url` taken from the config file reported `invalid
   --db-url`, naming a flag the caller never typed and no file to go and edit.
   It now names the config file and its path.
+- **A `--csv` destination that is a symlink is no longer destroyed by the
+  writability check.** `exists()` follows a symlink and `remove_file` does not,
+  so for a link whose target had rotated away the check created the *target*
+  and then deleted the *link* — losing a file the user made, and leaving behind
+  precisely the empty report the check exists to prevent. This ran before the
+  query, so successful runs broke the usual `latest.csv -> 2026-09-03.csv`
+  rotation too, not just failed ones.
+- **Bidi control characters in certificate fields no longer reorder a rendered
+  table row.** The escape filter covered only the `Cc` control class, so
+  U+202A-U+202E, U+2066-U+2069, U+061C and the directional marks reached the
+  table verbatim; comfy-table never terminates them, so one override inside an
+  identity renders the rest of the row reversed and the cell displays a
+  hostname it does not contain. Those fields are chosen by whoever gets a
+  certificate logged. JSON is unaffected and deliberately left alone.
+- `cert --json <missing-id>` piped to a reader that goes away no longer reports
+  success: the broken-pipe path exited 0 from inside the writer, discarding the
+  exit code 3 the run had already decided on.
 
 ### Changed
 
