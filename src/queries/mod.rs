@@ -8,8 +8,9 @@ use std::collections::btree_map::Entry;
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use tokio_postgres::Row;
-use tokio_postgres::types::FromSql;
+use tokio_postgres::types::{FromSql, ToSql, Type};
 
+use crate::db::Db;
 use crate::queries::search::SearchRow;
 
 /// Projection and index-driven `WHERE` clause shared by `search` and
@@ -86,6 +87,37 @@ impl RawRow {
                 .context("server returned a NULL clock reading")?,
         })
     }
+}
+
+/// Run an identity statement once per term and collect every row it returns.
+///
+/// One statement per term, in sequence, for the reasons CONTRIBUTING.md
+/// spells out: the tsquery predicate has to stay index-driven to survive the
+/// guest database's statement timeout, so the terms cannot be folded into one
+/// `ANY` predicate; `--limit` is therefore per term, so a busy one cannot
+/// crowd the rest out of the window; and this tool holds exactly one
+/// connection to a database with a connection limit, so the terms queue
+/// rather than fanning out.
+///
+/// `$1` is always the term. `extra` binds `$2` onwards and is the same for
+/// every term — `search` and `expiring` differ only there.
+pub async fn fetch_by_term(
+    db: &Db,
+    terms: &[String],
+    sql: &str,
+    extra: &[(&(dyn ToSql + Sync), Type)],
+) -> Result<Vec<RawRow>> {
+    let mut raw = Vec::new();
+    for term in terms {
+        let mut params: Vec<(&(dyn ToSql + Sync), Type)> = Vec::with_capacity(extra.len() + 1);
+        params.push((term, Type::TEXT));
+        params.extend(extra.iter().map(|(value, ty)| (*value, ty.clone())));
+        let rows = db.query(&format!("\"{term}\""), sql, &params).await?;
+        for row in &rows {
+            raw.push(RawRow::from_pg(row)?);
+        }
+    }
+    Ok(raw)
 }
 
 /// Collapse raw identity rows into one row per certificate.
@@ -203,15 +235,7 @@ mod tests {
             "IDENTITY_QUERY lost its ESCAPE clause:\n{IDENTITY_QUERY}"
         );
     }
-    use chrono::NaiveDate;
-
-    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-    }
+    use crate::testutil::utc;
 
     struct Raw {
         id: i64,

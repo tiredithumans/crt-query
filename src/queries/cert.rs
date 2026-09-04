@@ -4,7 +4,7 @@ use serde::Serialize;
 use tokio_postgres::types::Type;
 
 use crate::db::Db;
-use crate::output::{OutputRecord, csv_opt, csv_ts, fmt_opt, fmt_ts};
+use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
 use crate::queries::{column, timestamp};
 
 /// Column index of the multi-valued SAN field within `cells()`.
@@ -86,17 +86,7 @@ impl OutputRecord for CertDetail {
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
-        if self.sans.is_empty() {
-            return vec![self.csv_cells()];
-        }
-        self.sans
-            .iter()
-            .map(|san| {
-                let mut cells = self.csv_cells();
-                cells[SANS_COL] = san.clone();
-                cells
-            })
-            .collect()
+        expand_column(self.csv_cells(), SANS_COL, &self.sans)
     }
 }
 

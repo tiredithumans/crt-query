@@ -3,6 +3,8 @@ mod config;
 mod db;
 mod output;
 mod queries;
+#[cfg(test)]
+mod testutil;
 mod update;
 
 use anyhow::Result;
@@ -13,7 +15,10 @@ use crate::db::Db;
 use crate::queries::cert::CertDetail;
 
 /// Completed; results were emitted, even if there were none.
-const EXIT_OK: i32 = 0;
+///
+/// `pub(crate)` because `output.rs` reports it when a reader goes away
+/// mid-write; this file still owns the contract.
+pub(crate) const EXIT_OK: i32 = 0;
 /// The run failed.
 const EXIT_ERROR: i32 = 1;
 /// The requested certificate ID does not exist. Distinct from EXIT_ERROR so a

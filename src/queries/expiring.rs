@@ -8,7 +8,7 @@ use tokio_postgres::types::Type;
 use crate::db::Db;
 use crate::output::{OutputRecord, csv_opt, fmt_opt};
 use crate::queries::search::SearchRow;
-use crate::queries::{IDENTITY_QUERY, RawRow, to_rows};
+use crate::queries::{IDENTITY_QUERY, RawRow, fetch_by_term, to_rows};
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
@@ -115,15 +115,7 @@ impl OutputRecord for ExpiringRow {
 
 /// Check one or more domains and merge the results into a single report.
 ///
-/// One statement per domain, run in sequence. Folding the domains into a
-/// single `IN`/`ANY` predicate would take the query off the full-text index
-/// that keeps it inside the guest database's statement timeout, and `--limit`
-/// is per domain for the same reason: a shared limit would let one busy
-/// domain crowd the others out of the window entirely.
-///
-/// Sequential, not concurrent: the guest database has a connection limit and
-/// this tool holds exactly one connection, so the domains queue behind each
-/// other rather than opening a connection each.
+/// One statement per domain, in sequence — see [`fetch_by_term`] for why.
 pub async fn run_expiring(
     db: &Db,
     domains: &[String],
@@ -132,24 +124,17 @@ pub async fn run_expiring(
     limit: i64,
     dedupe: bool,
 ) -> Result<Vec<ExpiringRow>> {
-    let mut raw: Vec<RawRow> = Vec::new();
-    for domain in domains {
-        let rows = db
-            .query(
-                &format!("\"{domain}\""),
-                EXPIRING_SQL.as_str(),
-                &[
-                    (&domain, Type::TEXT),
-                    (&within, Type::INT4),
-                    (&since_expired, Type::INT4),
-                    (&limit, Type::INT8),
-                ],
-            )
-            .await?;
-        for row in &rows {
-            raw.push(RawRow::from_pg(row)?);
-        }
-    }
+    let raw = fetch_by_term(
+        db,
+        domains,
+        EXPIRING_SQL.as_str(),
+        &[
+            (&within, Type::INT4),
+            (&since_expired, Type::INT4),
+            (&limit, Type::INT8),
+        ],
+    )
+    .await?;
     Ok(assemble_expiring(raw, dedupe))
 }
 

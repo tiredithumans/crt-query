@@ -6,8 +6,8 @@ use serde::Serialize;
 use tokio_postgres::types::Type;
 
 use crate::db::Db;
-use crate::output::{OutputRecord, csv_opt, csv_ts, fmt_opt, fmt_ts};
-use crate::queries::{IDENTITY_QUERY, RawRow, to_rows};
+use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
+use crate::queries::{IDENTITY_QUERY, RawRow, fetch_by_term, to_rows};
 
 /// Column index of the multi-valued identity field within `cells()`.
 const IDENTITIES_COL: usize = 3;
@@ -120,27 +120,13 @@ impl OutputRecord for SearchRow {
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
-        if self.matched_identities.is_empty() {
-            return vec![self.csv_cells()];
-        }
-        self.matched_identities
-            .iter()
-            .map(|identity| {
-                let mut cells = self.csv_cells();
-                cells[IDENTITIES_COL] = identity.clone();
-                cells
-            })
-            .collect()
+        expand_column(self.csv_cells(), IDENTITIES_COL, &self.matched_identities)
     }
 }
 
 /// Search one or more terms and merge the results into a single list.
 ///
-/// One statement per term, run in sequence, for the same reasons as
-/// [`crate::queries::expiring::run_expiring`]: the tsquery predicate has to
-/// stay index-driven to survive the statement timeout, `--limit` is therefore
-/// per term so a busy one cannot crowd out the rest, and the tool holds a
-/// single connection to a database with a connection limit.
+/// One statement per term, in sequence — see [`fetch_by_term`] for why.
 pub async fn run_search(
     db: &Db,
     queries: &[String],
@@ -149,24 +135,17 @@ pub async fn run_search(
     limit: i64,
     dedupe: bool,
 ) -> Result<Vec<SearchRow>> {
-    let mut raw: Vec<RawRow> = Vec::new();
-    for query in queries {
-        let rows = db
-            .query(
-                &format!("\"{query}\""),
-                SEARCH_SQL.as_str(),
-                &[
-                    (&query, Type::TEXT),
-                    (&valid_since_days, Type::INT4),
-                    (&skip_expired, Type::BOOL),
-                    (&limit, Type::INT8),
-                ],
-            )
-            .await?;
-        for row in &rows {
-            raw.push(RawRow::from_pg(row)?);
-        }
-    }
+    let raw = fetch_by_term(
+        db,
+        queries,
+        SEARCH_SQL.as_str(),
+        &[
+            (&valid_since_days, Type::INT4),
+            (&skip_expired, Type::BOOL),
+            (&limit, Type::INT8),
+        ],
+    )
+    .await?;
     Ok(assemble_search(raw, dedupe))
 }
 
@@ -210,15 +189,7 @@ mod tests {
         let rows: Vec<SearchRow> = Vec::new();
         assert_eq!(serde_json::to_string(&rows).unwrap(), "[]");
     }
-    use chrono::NaiveDate;
-
-    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-    }
+    use crate::testutil::utc;
 
     fn row(not_after: Option<DateTime<Utc>>) -> SearchRow {
         SearchRow {
