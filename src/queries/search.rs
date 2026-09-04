@@ -182,7 +182,11 @@ pub async fn run_search(
 /// appears once, carrying both matched identities.
 fn assemble_search(raw: Vec<RawRow>, dedupe: bool) -> Vec<SearchRow> {
     let mut out = to_rows(raw, dedupe);
-    out.sort_by_key(|r| std::cmp::Reverse(r.not_before));
+    // A certificate whose notBefore crt.sh could not parse has no place in a
+    // newest-first order, so it goes last. `None` sorts before `Some`, which
+    // `Reverse` alone would put at the head of the list, ahead of every
+    // certificate with a real date.
+    out.sort_by_key(|r| (r.not_before.is_none(), std::cmp::Reverse(r.not_before)));
     out
 }
 
@@ -259,6 +263,26 @@ mod tests {
         );
         let order: Vec<i64> = rows.iter().map(|r| r.id).collect();
         assert_eq!(order, vec![2, 3, 1], "search must present newest first");
+    }
+
+    /// `None` orders before `Some`, so under a plain `Reverse` a certificate
+    /// with no parseable notBefore led the list, ahead of every certificate
+    /// with a real date. Unknown is not newest; it goes last.
+    #[test]
+    fn a_row_without_a_not_before_sorts_after_every_dated_row() {
+        let rows = assemble_search(
+            vec![
+                RawRow {
+                    not_before: None,
+                    ..raw_row(1, utc(2026, 1, 1))
+                },
+                raw_row(2, utc(2026, 1, 1)),
+                raw_row(3, utc(2026, 6, 1)),
+            ],
+            true,
+        );
+        let order: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(order, vec![3, 2, 1], "an undated row must come last");
     }
 
     #[test]

@@ -175,7 +175,11 @@ fn assemble_expiring(raw: Vec<RawRow>, dedupe: bool) -> Vec<ExpiringRow> {
         .into_iter()
         .map(|r| ExpiringRow::new(r, now))
         .collect();
-    out.sort_by_key(|r| r.cert.not_after);
+    // Soonest first. A row with no parseable notAfter — reachable only with
+    // `--no-dedupe` quirks or a future predicate change, since the SQL window
+    // excludes a NULL — is not "soonest"; `None` sorts before `Some`, so it
+    // has to be sent to the end explicitly.
+    out.sort_by_key(|r| (r.cert.not_after.is_none(), r.cert.not_after));
     out
 }
 
@@ -275,6 +279,27 @@ mod tests {
         );
         let order: Vec<i64> = rows.iter().map(|r| r.cert.id).collect();
         assert_eq!(order, vec![2, 3, 1]);
+    }
+
+    /// `None` orders before `Some`, so a row with no notAfter used to head a
+    /// soonest-first report, above the certificate actually about to expire.
+    #[test]
+    fn a_row_without_a_not_after_sorts_after_every_dated_row() {
+        let n = now();
+        let rows = assemble_expiring(
+            vec![
+                RawRow {
+                    not_after: None,
+                    ..raw(1, n, n)
+                },
+                raw(2, n + Duration::days(30), n),
+                raw(3, n + Duration::days(3), n),
+            ],
+            true,
+        );
+        let order: Vec<i64> = rows.iter().map(|r| r.cert.id).collect();
+        assert_eq!(order, vec![3, 2, 1], "an undated row must come last");
+        assert_eq!(rows[2].status, "-");
     }
 
     /// `--json` is a machine contract: `days_left` and `status` sit beside the

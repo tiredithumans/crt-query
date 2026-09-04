@@ -126,6 +126,11 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Changed
 
+- A certificate whose validity dates crt.sh could not parse now sorts to the
+  end of `search` (newest first) and `expiring` (soonest first) instead of
+  the top. `None` orders before `Some`, so an undated row led both lists,
+  ahead of every certificate with a real date. Rare — the `expiring` window
+  predicate already excludes a NULL notAfter — but wrong where it happened.
 - Every documented `cargo install --git` route now passes `--locked`, in the
   README, both install scripts and the hint `check-update` prints. Without it
   `cargo install` re-resolves versions and ignores the lockfile, so the
