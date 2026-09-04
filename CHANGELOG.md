@@ -11,6 +11,27 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Changed
+
+- **A connection retry that then succeeds no longer reports itself.** A run
+  against a busy crt.sh printed `connection attempt 1/3 to crt.sh:5432 failed:
+  db error: ERROR: no more connections allowed (max_client_conn); retrying...`
+  and then went on to work perfectly — an error message for a run that had not
+  failed, naming a condition of the shared guest database rather than anything
+  the caller did or could fix. The attempts are silent now. If none of them
+  connects, the one error that is printed names the host and every distinct
+  cause behind it, so nothing that used to be on screen is lost — it is just no
+  longer shown to people whose runs succeeded.
+- **The retry budget buys more chances and less waiting.** The delay was a flat
+  two seconds over three attempts, which is tuned for nothing in particular:
+  pgbouncer refuses a client slot instantly and frees one again in well under a
+  second. Five attempts now back off from 250ms to 2s, with jitter so that
+  scheduled `expiring --csv` runs firing on the same cron minute do not all
+  retry in lockstep. The same wall time that used to buy two extra attempts
+  buys four. The whole connect phase is bounded as well, so a host that accepts
+  the socket and never answers now gives up sooner than it did before — which
+  matters more than it used to, because that wait is silent.
+
 ## [0.4.1] - 2026-09-04
 
 ### Fixed

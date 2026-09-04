@@ -346,6 +346,14 @@ sorts server-side; sorting and dedup happen client-side over at most `--limit`
 rows. Dedup is best-effort within that window — a precert/leaf pair straddling
 the limit boundary may both appear.
 
+A connection is retried up to five times, backing off from 250ms to 2s with a
+little jitter, and the whole connect phase is bounded so an unreachable host
+fails promptly rather than hanging. **A failed attempt is not reported unless
+every attempt fails** — being refused a client slot and getting one on the
+retry is the shared database working as designed, not something to read an
+error about. When no attempt connects, the single error names the host and
+every distinct cause behind it.
+
 **Wildcards.** `%` and `_` in a search term act as SQL wildcards in the identity
 match, mirroring the crt.sh website's behaviour.
 
