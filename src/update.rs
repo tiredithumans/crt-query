@@ -33,38 +33,61 @@ const TIMEOUT_SECS: &str = "10";
 
 const USER_AGENT: &str = concat!("crt-query/", env!("CARGO_PKG_VERSION"));
 
-/// The install route for the platform this binary was built for.
+/// The prebuilt install routes available on the platform this binary was built
+/// for, ordered as the README's install table orders them.
 ///
-/// One route, not all of them. A Windows build used to print the `install.sh`
-/// line and nothing else: a shell pipeline the user does not have a `sh` for,
-/// naming a script that refuses to run on Windows anyway and could not install
-/// the binary they are holding. Listing every platform instead would put two
-/// lines that do not apply in front of the one that does, on the message whose
-/// whole job is to be actionable.
+/// Only this platform's. A Windows build used to print the `install.sh` line
+/// and nothing else: a shell pipeline the user has no `sh` for, naming a script
+/// that refuses to run on Windows anyway and could not install the binary they
+/// are holding. Listing every platform instead would put lines that do not
+/// apply in front of the one that does, on a message whose whole job is to be
+/// actionable.
 ///
-/// Windows on ARM is covered by the same script: it installs the x86-64 build,
-/// which Windows runs under emulation.
+/// Homebrew is listed first where it runs — macOS and Linux both — because a
+/// Homebrew install is upgraded with `brew upgrade`, and re-running
+/// `install.sh` would instead drop a second, unmanaged copy in
+/// `/usr/local/bin` for Homebrew's own to shadow or be shadowed by. It does not
+/// appear on Windows, where Homebrew does not run.
+///
+/// Windows on ARM needs no separate entry: `install.ps1` installs the x86-64
+/// build, which Windows runs under emulation.
+///
+/// Labels are padded so every command starts in the same column as the
+/// `From source:` line below, which is the only thing making a three-line block
+/// scannable.
 #[cfg(windows)]
-const INSTALL_ROUTE: &str = "\
-Windows: irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 | iex";
+const INSTALL_ROUTES: &[&str] = &[
+    "Windows:     irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 | iex",
+];
 
 #[cfg(not(windows))]
-const INSTALL_ROUTE: &str = "\
-Linux/macOS: curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh";
+const INSTALL_ROUTES: &[&str] = &[
+    "Homebrew:    brew upgrade crt-query",
+    "Linux/macOS: curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh",
+];
 
 /// What to do about a newer release. Printed to stderr so the one-line
 /// report on stdout stays the only thing a script has to parse.
 ///
-/// A function rather than a `const` because [`INSTALL_ROUTE`] varies by target
+/// A function rather than a `const` because [`INSTALL_ROUTES`] varies by target
 /// and `concat!` takes literals only. Writing the surrounding prose out twice
 /// under `cfg` would be the cheaper trick and the worse one — two copies of a
 /// sentence that has to stay in step is exactly the shape every stale claim in
 /// this repo has taken.
+///
+/// "re-run whatever you installed with", not "re-run the install script": with
+/// Homebrew on the list the older wording pointed a `brew` user at the one
+/// route that would go wrong for them. The verification claim is scoped to the
+/// prebuilt routes — Homebrew checks the digest the formula carries, which
+/// `just homebrew-formula` copies out of the release's `SHA256SUMS`, and both
+/// scripts check that file directly. Building from source does none of this,
+/// which is why it sits outside the sentence.
 fn upgrade_hint() -> String {
+    let routes = INSTALL_ROUTES.join("\n  ");
     format!(
-        "Upgrade: re-run the install script — it resolves the latest release and \
-         verifies its SHA256SUMS.\n  \
-         {INSTALL_ROUTE}\n  \
+        "Upgrade: re-run whatever you installed with — every prebuilt route checks \
+         the download against a checksum from the release's SHA256SUMS.\n  \
+         {routes}\n  \
          From source: cargo install --locked --git \
          https://github.com/tiredithumans/crt-query --force"
     )
@@ -274,6 +297,51 @@ mod tests {
             hint.contains("cargo install --locked"),
             "the from-source hint must pin the lockfile:\n{hint}"
         );
+    }
+
+    /// A Homebrew install is upgraded with `brew upgrade`. Re-running
+    /// `install.sh` instead drops a second, unmanaged copy in /usr/local/bin
+    /// for Homebrew's own to shadow or be shadowed by — so the hint has to
+    /// offer it where it runs, and must not on Windows, where it does not.
+    #[test]
+    fn homebrew_is_offered_exactly_where_homebrew_runs() {
+        let hint = upgrade_hint();
+        if cfg!(windows) {
+            assert!(
+                !hint.contains("brew"),
+                "Homebrew does not run on Windows:\n{hint}"
+            );
+        } else {
+            assert!(
+                hint.contains("brew upgrade crt-query"),
+                "a Homebrew install has no upgrade route in this hint:\n{hint}"
+            );
+        }
+    }
+
+    /// Every command starts in the same column, `From source:` included. A
+    /// three-line block is only scannable if the labels are padded to match,
+    /// and nothing else would notice if one stopped lining up.
+    #[test]
+    fn every_route_puts_its_command_in_the_same_column() {
+        let hint = upgrade_hint();
+        let columns: Vec<(usize, &str)> = hint
+            .lines()
+            .filter(|line| line.starts_with("  "))
+            .map(|line| {
+                let colon = line.find(':').expect("each route reads `Label: command`");
+                let rest = &line[colon + 1..];
+                (colon + 1 + (rest.len() - rest.trim_start().len()), line)
+            })
+            .collect();
+        assert!(columns.len() >= 2, "expected several routes:\n{hint}");
+        let (first, _) = columns[0];
+        for (column, line) in &columns {
+            assert_eq!(
+                *column, first,
+                "this route's command does not line up with the others:\n{line}"
+            );
+        }
     }
 
     /// The hint has to name a route that can install the binary printing it.

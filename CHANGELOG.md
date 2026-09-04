@@ -73,12 +73,16 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   precisely the empty report the check exists to prevent. This ran before the
   query, so successful runs broke the usual `latest.csv -> 2026-09-03.csv`
   rotation too, not just failed ones.
-- **`check-update` told Windows users to run a command they do not have.** The
-  upgrade hint printed when a newer release exists named only `install.sh`,
-  piped into `sh` — not a command a Windows host has, and a script that refuses
-  to run there anyway and could not install the binary printing the message. It
-  now names the install route for the platform the binary was built for, so a
-  Windows build points at `install.ps1` and everything else is unchanged.
+- **`check-update`'s upgrade hint named routes that could not upgrade you.** It
+  listed only `install.sh` piped into `sh` — not a command a Windows host has,
+  and a script that refuses to run there anyway and could not have installed
+  the binary printing the message. It now offers the routes that exist on the
+  platform the binary was built for, so a Windows build points at `install.ps1`.
+  Homebrew is listed too, where it runs: a `brew` install is upgraded with
+  `brew upgrade`, and following the old advice would have dropped a second,
+  unmanaged copy in `/usr/local/bin` for Homebrew's own to shadow. The opening
+  line now reads "re-run whatever you installed with" rather than "re-run the
+  install script", which was the wrong instruction for exactly that user.
 - **A certificate field beginning `-` no longer reaches a spreadsheet as a
   formula.** The formula-neutralising rule covered `=`, `+`, `@`, tab and
   carriage return but skipped `-`, because `-` also leads every negative
