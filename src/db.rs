@@ -487,6 +487,50 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
     Err(last_err.expect("at least one attempt")).context(context)
 }
 
+/// A connection that has not been dialled yet.
+///
+/// [`connect`] is deliberate about spending a client slot on the shared guest
+/// database, and the cache makes that judgement sharper: a run whose every term
+/// is already cached has no reason to dial at all. Holding the resolved
+/// settings and connecting on first real need is what lets that run finish
+/// without touching crt.sh.
+///
+/// This is the same reasoning `main.rs` already applies by resolving the
+/// connection inside the subcommand arms, so `completions` and `check-update`
+/// never open one. A fully-cached query is that case.
+///
+/// `&mut` rather than interior mutability: everything here runs in sequence on
+/// a current-thread runtime, so the borrow checker is the whole synchronisation
+/// story and `tokio`'s `sync` feature stays out of the build.
+pub struct Source {
+    conn: Conn,
+    db: Option<Db>,
+}
+
+impl Source {
+    pub fn new(conn: Conn) -> Self {
+        Self { conn, db: None }
+    }
+
+    /// The connection, dialled on first call and reused after that.
+    ///
+    /// A failed dial is not remembered: the error is returned and the next call
+    /// tries again. Retry policy belongs to [`connect`], which already spends a
+    /// bounded budget on it, and caching a failure here would silently shorten
+    /// that budget for the terms still to come.
+    pub async fn db(&mut self) -> Result<&Db> {
+        if self.db.is_none() {
+            self.db = Some(connect(&self.conn).await?);
+        }
+        Ok(self.db.as_ref().expect("just connected"))
+    }
+
+    /// Host and port for user-facing messages, without dialling anything.
+    pub fn target(&self) -> Result<String> {
+        Ok(target(&build_config(&self.conn)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

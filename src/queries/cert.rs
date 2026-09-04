@@ -1,9 +1,10 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_postgres::types::Type;
 
-use crate::db::Db;
+use crate::cache::{Cache, Key};
+use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
 use crate::queries::{column, timestamp};
 
@@ -25,7 +26,7 @@ SELECT c.id, c.issuer_ca_id, ca.name AS issuer_name,
   LEFT JOIN ca ON ca.id = c.issuer_ca_id
  WHERE c.id = $1";
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CertDetail {
     pub id: i64,
     pub issuer_ca_id: Option<i32>,
@@ -90,14 +91,33 @@ impl OutputRecord for CertDetail {
     }
 }
 
-pub async fn run_cert(db: &Db, id: i64) -> Result<Option<CertDetail>> {
-    let rows = db
+/// Look one certificate up by its crt.sh ID.
+///
+/// Cached under a much longer TTL than `search` and `expiring`: a certificate
+/// at a given crt.sh ID is immutable, so the short TTL that exists to bound
+/// validity-window drift buys nothing here. A miss — no such ID — is cached
+/// too, so a typo'd ID in a loop is not re-asked every time.
+pub async fn run_cert(source: &mut Source, cache: &Cache, id: i64) -> Result<Option<CertDetail>> {
+    let cache = cache.for_certs();
+    let key = Key {
+        target: source.target()?,
+        sql: CERT_SQL.to_string(),
+        term: id.to_string(),
+        params: Vec::new(),
+    };
+    if let Some((hit, _)) = cache.get::<Option<CertDetail>>(&key) {
+        return Ok(hit);
+    }
+    let rows = source
+        .db()
+        .await?
         .query(&format!("crt.sh ID {id}"), CERT_SQL, &[(&id, Type::INT8)])
         .await?;
     let Some(row) = rows.first() else {
+        cache.put(&key, &None::<CertDetail>);
         return Ok(None);
     };
-    Ok(Some(CertDetail {
+    let detail = Some(CertDetail {
         id: column(row, "id")?,
         issuer_ca_id: column(row, "issuer_ca_id")?,
         issuer_name: column(row, "issuer_name")?,
@@ -108,7 +128,9 @@ pub async fn run_cert(db: &Db, id: i64) -> Result<Option<CertDetail>> {
         not_after: timestamp(row, "not_after")?,
         sha256_fingerprint: column(row, "sha256_fingerprint")?,
         sans: column(row, "sans")?,
-    }))
+    });
+    cache.put(&key, &detail);
+    Ok(detail)
 }
 
 /// The exact statement this module sends, for the golden-file test in

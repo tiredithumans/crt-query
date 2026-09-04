@@ -11,6 +11,32 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- **Results are cached locally, and a cached query never opens a connection.**
+  crt.sh refuses connections and times queries out under load, and until now
+  every repeat of a question spent another client slot on it to get the same
+  answer back. Entries live in `$XDG_CACHE_HOME/crt-query` (`~/.cache/crt-query`
+  when that is unset, `%LOCALAPPDATA%\crt-query\cache` on Windows), keyed per
+  term so a multi-term run can serve some terms locally and ask for the rest.
+  `search` and `expiring` results last an hour; a `cert` lookup lasts 30 days,
+  because a certificate at a given crt.sh ID cannot change.
+
+  The connection is now opened on first need rather than up front, which is what
+  lets a fully cached run finish without touching crt.sh at all — the same
+  reasoning that already kept `completions` and `check-update` from opening one.
+
+  Validity windows are evaluated by the server at query time, so a cached
+  `search` or `expiring` result carries the window as it stood when it was
+  written. That is what bounds the lifetime to an hour, and what `--refresh` is
+  for.
+
+- `--no-cache` to bypass the cache in both directions, and `--refresh` to ignore
+  what is stored and re-query, then cache the fresh answer. The two conflict.
+
+- `crt-query cache path` and `crt-query cache clear`, plus `cache` and
+  `cache_ttl_secs` config-file keys.
+
 ### Changed
 
 - **A connection retry that then succeeds no longer reports itself.** A run

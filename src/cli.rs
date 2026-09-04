@@ -18,6 +18,9 @@ pub struct Cli {
     #[command(flatten)]
     pub out: OutputOpts,
 
+    #[command(flatten)]
+    pub cache: CacheOpts,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -68,6 +71,24 @@ pub struct OutputOpts {
         value_parser = clap::value_parser!(u16).range(40..=1000),
     )]
     pub width: Option<u16>,
+}
+
+/// Cache flags.
+///
+/// Results are cached locally so that repeating a query does not spend another
+/// client slot on a shared public database. See `cache::Cache` for what is
+/// stored and how stale it is allowed to get.
+#[derive(Args)]
+pub struct CacheOpts {
+    /// Neither read nor write the local result cache
+    #[arg(long, global = true, conflicts_with = "refresh")]
+    pub no_cache: bool,
+
+    /// Ignore any cached result and re-query, then cache the fresh answer.
+    /// Validity windows are evaluated by the server at query time, so a cached
+    /// result carries the window as it stood when it was written
+    #[arg(long, global = true)]
+    pub refresh: bool,
 }
 
 #[derive(Subcommand)]
@@ -167,6 +188,12 @@ pub enum Commands {
         no_dedupe: bool,
     },
 
+    /// Inspect or clear the local result cache
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+
     /// Report whether a newer release is available. Opt-in by design: no
     /// other subcommand makes a network call to GitHub
     CheckUpdate,
@@ -177,6 +204,15 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+/// What `crt-query cache` should do.
+#[derive(Subcommand, Clone, Copy)]
+pub enum CacheAction {
+    /// Print where cached results are stored
+    Path,
+    /// Delete every cached result
+    Clear,
 }
 
 impl Commands {
