@@ -332,3 +332,81 @@ fn a_closed_reader_ends_completions_cleanly_rather_than_panicking() {
         "a reader that went away should end the run cleanly, not kill it"
     );
 }
+
+/// `cache path` must report the directory the environment actually names, and
+/// `cache clear` must operate on that same one.
+///
+/// Setting the variable on the child rather than this process: `set_var` is
+/// `unsafe` under edition 2024, and a subprocess is the honest way to test an
+/// environment-driven path anyway.
+#[cfg(not(windows))]
+#[test]
+fn the_cache_lives_where_the_environment_says_and_clears_from_there() {
+    let home = std::env::temp_dir().join(format!("crt-query-xdg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("create scratch XDG_CACHE_HOME");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+        .args(["cache", "path"])
+        .env("XDG_CACHE_HOME", &home)
+        .output()
+        .expect("failed to run the crt-query binary");
+    assert_eq!(code(&out), 0, "cache path exited {}", code(&out));
+    let reported = stdout(&out).trim().to_string();
+    assert_eq!(reported, home.join("crt-query").to_string_lossy());
+
+    // Clearing a cache that was never written is not an error.
+    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+        .args(["cache", "clear"])
+        .env("XDG_CACHE_HOME", &home)
+        .output()
+        .expect("failed to run the crt-query binary");
+    assert_eq!(code(&out), 0, "cache clear exited {}", code(&out));
+    assert!(
+        stderr(&out).contains("Cleared 0"),
+        "expected a count, got: {}",
+        stderr(&out)
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A relative `$XDG_CACHE_HOME` must not be resolved against the working
+/// directory — see `cache::cache_root`. The run still has to succeed, because a
+/// cache that cannot find a home is a missing optimisation, not a failure.
+#[cfg(not(windows))]
+#[test]
+fn a_relative_cache_home_yields_no_cache_rather_than_a_local_one() {
+    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+        .args(["cache", "path"])
+        .env("XDG_CACHE_HOME", "relative/path")
+        .env_remove("HOME")
+        .output()
+        .expect("failed to run the crt-query binary");
+    assert_eq!(code(&out), 0, "cache path exited {}", code(&out));
+    assert!(
+        stdout(&out).trim().is_empty(),
+        "a relative cache home must name no directory, got: {}",
+        stdout(&out)
+    );
+    assert!(
+        stderr(&out).contains("No cache directory"),
+        "expected the reason on stderr, got: {}",
+        stderr(&out)
+    );
+}
+
+/// `--no-cache` and `--refresh` contradict each other: one says never touch the
+/// cache, the other says rewrite it. Catching that in clap keeps the precedence
+/// question from ever reaching `build_cache`.
+#[test]
+fn no_cache_and_refresh_cannot_be_combined() {
+    let out = run(&["--no-cache", "--refresh", "search", "example.com"]);
+    assert_eq!(
+        code(&out),
+        CLAP_USAGE_ERROR,
+        "expected a usage error, got {}: {}",
+        code(&out),
+        stderr(&out)
+    );
+}

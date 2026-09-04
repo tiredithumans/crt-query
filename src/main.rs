@@ -1,3 +1,4 @@
+mod cache;
 mod cli;
 mod config;
 mod db;
@@ -7,11 +8,14 @@ mod queries;
 mod testutil;
 mod update;
 
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::cli::{Cli, Commands};
-use crate::db::Db;
+use crate::cache::Cache;
+use crate::cli::{CacheAction, Cli, Commands};
+use crate::db::Source;
 use crate::queries::cert::CertDetail;
 
 /// Completed; results were emitted, even if there were none.
@@ -66,9 +70,10 @@ async fn run() -> Result<i32> {
         } => {
             let terms = Commands::unique_terms(query);
             let lookback = Commands::search_lookback(*valid_since, *all_history);
-            let db = open_db(&cli).await?;
+            let (mut source, cache) = open_source(&cli)?;
             let rows = queries::search::run_search(
-                &db,
+                &mut source,
+                &cache,
                 &terms,
                 lookback,
                 *skip_expired,
@@ -94,8 +99,8 @@ async fn run() -> Result<i32> {
             output::emit(&rows, &cli.out)?;
         }
         Commands::Cert { id } => {
-            let db = open_db(&cli).await?;
-            match queries::cert::run_cert(&db, *id).await? {
+            let (mut source, cache) = open_source(&cli)?;
+            match queries::cert::run_cert(&mut source, &cache, *id).await? {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
                     eprintln!("No certificate with crt.sh ID {id}.");
@@ -114,9 +119,15 @@ async fn run() -> Result<i32> {
         } => {
             let domains = Commands::unique_terms(domain);
             let lookback = Commands::expiring_lookback(*since_expired, *skip_expired);
-            let db = open_db(&cli).await?;
+            let (mut source, cache) = open_source(&cli)?;
             let rows = queries::expiring::run_expiring(
-                &db, &domains, *within, lookback, *limit, !no_dedupe,
+                &mut source,
+                &cache,
+                &domains,
+                *within,
+                lookback,
+                *limit,
+                !no_dedupe,
             )
             .await?;
             if rows.is_empty() {
@@ -136,7 +147,8 @@ async fn run() -> Result<i32> {
             }
             output::emit(&rows, &cli.out)?;
         }
-        // Neither of the following needs the database.
+        // None of the following needs the database.
+        Commands::Cache { action } => run_cache(*action)?,
         Commands::CheckUpdate => update::run_check_update(&cli.out)?,
         Commands::Completions { shell } => {
             // Rendered to memory first, then written through the same stdout
@@ -153,14 +165,71 @@ async fn run() -> Result<i32> {
 }
 
 /// Resolve the connection settings — CLI flags over config file over built-in
-/// defaults — and connect.
+/// defaults — and the cache that fronts them.
 ///
 /// Called from inside the subcommand arms rather than once up front, so that
 /// `completions` and `check-update` neither read the config file nor open a
 /// connection to a shared public service they have no use for.
-async fn open_db(cli: &Cli) -> Result<Db> {
+///
+/// Nothing is dialled here. [`Source`] connects on its first real need, so a
+/// run whose every term is already cached finishes without touching crt.sh —
+/// which is the whole point of having a cache in front of a service that
+/// regularly refuses connections.
+fn open_source(cli: &Cli) -> Result<(Source, Cache)> {
     let file = config::load()?;
-    db::connect(&config::resolve(&cli.conn, &file)).await
+    let cache = build_cache(&cli.cache, &file);
+    Ok((Source::new(config::resolve(&cli.conn, &file)), cache))
+}
+
+/// Fold the cache flags and config file into a cache.
+///
+/// Same precedence as everything else here — flag, then file, then default —
+/// which means `--refresh` re-enables a cache the file turned off. That is the
+/// point of the flag: it asks for a fresh answer to be stored, and honouring
+/// `cache = false` over it would make it a slower synonym for `--no-cache`.
+fn build_cache(opts: &cli::CacheOpts, file: &config::FileConfig) -> Cache {
+    let mode = if opts.no_cache {
+        cache::Mode::Disabled
+    } else if opts.refresh {
+        cache::Mode::Refresh
+    } else if file.cache == Some(false) {
+        cache::Mode::Disabled
+    } else {
+        cache::Mode::Enabled
+    };
+    let ttl = file
+        .cache_ttl_secs
+        .map_or(cache::DEFAULT_TTL, std::time::Duration::from_secs);
+    Cache::new(mode, ttl)
+}
+
+/// `crt-query cache path` / `crt-query cache clear`.
+///
+/// Built with the cache forced on, so `--no-cache` earlier in the command line
+/// cannot leave `cache clear` silently clearing nothing.
+fn run_cache(action: CacheAction) -> Result<()> {
+    let file = config::load()?;
+    let ttl = file
+        .cache_ttl_secs
+        .map_or(cache::DEFAULT_TTL, std::time::Duration::from_secs);
+    let cache = Cache::new(cache::Mode::Enabled, ttl);
+    let Some(dir) = cache.dir().map(Path::to_path_buf) else {
+        // No absolute cache directory in this environment, so there is nowhere
+        // for entries to be — see `cache::cache_root` for why relative is
+        // refused rather than resolved.
+        eprintln!("No cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path.");
+        return Ok(());
+    };
+    match action {
+        CacheAction::Path => println!("{}", dir.display()),
+        CacheAction::Clear => {
+            let removed = cache
+                .clear()
+                .with_context(|| format!("clearing the cache in {}", dir.display()))?;
+            eprintln!("Cleared {removed} cached result(s) from {}.", dir.display());
+        }
+    }
+    Ok(())
 }
 
 /// How to name the requested terms in an empty-result message.
@@ -225,5 +294,72 @@ mod tests {
         let domains = ["a.example".to_string(), "b.example".to_string()];
         assert_eq!(quoted(&domains), "\"a.example\", \"b.example\"");
         assert_eq!(limit_note(&domains), "in the first --limit rows per domain");
+    }
+
+    fn cache_opts(no_cache: bool, refresh: bool) -> cli::CacheOpts {
+        cli::CacheOpts { no_cache, refresh }
+    }
+
+    fn file_with_cache(cache: Option<bool>) -> config::FileConfig {
+        config::FileConfig {
+            cache,
+            ..config::FileConfig::default()
+        }
+    }
+
+    /// Flag over file over default, the same precedence the connection uses.
+    #[test]
+    fn cache_flags_beat_the_config_file() {
+        use crate::cache::Mode;
+        for (no_cache, refresh, file, want, why) in [
+            (false, false, None, Mode::Enabled, "the default is on"),
+            (true, false, None, Mode::Disabled, "--no-cache turns it off"),
+            (false, true, None, Mode::Refresh, "--refresh rewrites"),
+            (
+                false,
+                false,
+                Some(false),
+                Mode::Disabled,
+                "the file can turn it off",
+            ),
+            (
+                false,
+                false,
+                Some(true),
+                Mode::Enabled,
+                "the file can leave it on",
+            ),
+            (
+                true,
+                false,
+                Some(true),
+                Mode::Disabled,
+                "--no-cache beats the file",
+            ),
+            // Otherwise --refresh would be a slower --no-cache: it asks for a
+            // fresh answer to be *stored*.
+            (
+                false,
+                true,
+                Some(false),
+                Mode::Refresh,
+                "--refresh beats the file",
+            ),
+        ] {
+            let got = build_cache(&cache_opts(no_cache, refresh), &file_with_cache(file)).mode();
+            assert_eq!(got, want, "{why}");
+        }
+    }
+
+    #[test]
+    fn a_configured_lifetime_is_read_in_seconds() {
+        let file = config::FileConfig {
+            cache_ttl_secs: Some(90),
+            ..config::FileConfig::default()
+        };
+        let cache = build_cache(&cache_opts(false, false), &file);
+        assert_eq!(cache.ttl(), std::time::Duration::from_secs(90));
+        let default = build_cache(&cache_opts(false, false), &config::FileConfig::default());
+        assert_eq!(default.ttl(), cache::DEFAULT_TTL);
     }
 }

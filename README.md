@@ -293,8 +293,53 @@ missing file is fine. A file that exists but does not parse is an error — an
 unknown or misspelled key fails the run rather than being ignored, so a typo
 cannot quietly leave you querying somewhere you did not intend.
 
-Only the connection is configurable. Output format, limits and windows stay on
-the command line, where the run that produced a report also records how.
+The connection and the cache are configurable. Output format, limits and windows
+stay on the command line, where the run that produced a report also records how.
+
+## Caching
+
+Results are cached on disk, so asking the same question twice only asks crt.sh
+once. crt.sh is a free service on donated infrastructure that refuses
+connections and times queries out under load; not re-asking it is the cheapest
+way to be a good citizen of it. A cached query is also the one kind that
+survives an outage, because it never opens a connection at all.
+
+| | |
+|---|---|
+| Where | `$XDG_CACHE_HOME/crt-query`, else `~/.cache/crt-query` (`%LOCALAPPDATA%\crt-query\cache` on Windows) |
+| Lifetime | one hour for `search` and `expiring`; 30 days for `cert` |
+| Inspect | `crt-query cache path` |
+| Empty it | `crt-query cache clear` |
+
+```bash
+crt-query search example.com              # asks crt.sh
+crt-query search example.com              # served locally, no connection
+crt-query search example.com --refresh    # re-asks, then re-caches
+crt-query search example.com --no-cache   # ignores the cache entirely
+```
+
+`cert` gets the long lifetime because a certificate at a given crt.sh ID cannot
+change. `search` and `expiring` get the short one because their validity windows
+— `--valid-since`, `--within`, `--since-expired` — are evaluated by the server
+when the query runs, so **a cached result carries the window as it stood when it
+was written**. The drift is bounded by the lifetime above and stays well inside
+the day granularity those flags work in, but `--refresh` is there when you need
+the window recomputed now.
+
+Configure it alongside the connection:
+
+```toml
+# Turn it off entirely, or change how long a search stays usable.
+cache = true
+cache_ttl_secs = 3600
+```
+
+`--no-cache` overrides the file, and neither affects `cache clear`. Nothing in
+the cache can fail a run: a corrupt, stale or unreadable entry is a miss, and an
+unwritable cache directory is a skipped write.
+
+The directory is created owner-only where the platform has a notion of it. The
+certificates in it are public, but the list of names you searched for is not.
 
 ## Staying current
 

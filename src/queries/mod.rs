@@ -7,10 +7,12 @@ use std::collections::btree_map::Entry;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
-use crate::db::Db;
+use crate::cache::{Cache, Key};
+use crate::db::Source;
 use crate::queries::search::SearchRow;
 
 /// Projection and index-driven `WHERE` clause shared by `search` and
@@ -59,6 +61,11 @@ pub fn timestamp(row: &Row, name: &str) -> Result<Option<DateTime<Utc>>> {
 }
 
 /// One identity-match row as returned by the search/expiring SQL.
+///
+/// Serializable because [`crate::cache`] persists these verbatim. That makes
+/// the field set an on-disk format: adding, removing or renaming one changes
+/// what old entries mean, so it comes with a `FORMAT_VERSION` bump.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RawRow {
     pub id: i64,
     pub issuer_ca_id: Option<i32>,
@@ -102,20 +109,45 @@ impl RawRow {
 /// `$1` is always the term. `extra` binds `$2` onwards and is the same for
 /// every term — `search` and `expiring` differ only there.
 pub async fn fetch_by_term(
-    db: &Db,
+    source: &mut Source,
+    cache: &Cache,
     terms: &[String],
     sql: &str,
     extra: &[(&(dyn ToSql + Sync), Type)],
 ) -> Result<Vec<RawRow>> {
+    // The bind parameters past `$1` are identical for every term, so they are
+    // rendered once and shared by every key built below.
+    let params_key: Vec<String> = extra.iter().map(|(v, _)| format!("{v:?}")).collect();
+    let target = source.target()?;
+
     let mut raw = Vec::new();
     for term in terms {
+        let key = Key {
+            target: target.clone(),
+            sql: sql.to_string(),
+            term: term.clone(),
+            params: params_key.clone(),
+        };
+        if let Some(hit) = cache.get_rows(&key) {
+            raw.extend(hit);
+            continue;
+        }
         let mut params: Vec<(&(dyn ToSql + Sync), Type)> = Vec::with_capacity(extra.len() + 1);
         params.push((term, Type::TEXT));
         params.extend(extra.iter().map(|(value, ty)| (*value, ty.clone())));
-        let rows = db.query(&format!("\"{term}\""), sql, &params).await?;
+        // The first miss is what dials: a run whose terms all hit never gets
+        // here, and so never spends a client slot on the guest database.
+        let rows = source
+            .db()
+            .await?
+            .query(&format!("\"{term}\""), sql, &params)
+            .await?;
+        let mut fetched = Vec::with_capacity(rows.len());
         for row in &rows {
-            raw.push(RawRow::from_pg(row)?);
+            fetched.push(RawRow::from_pg(row)?);
         }
+        cache.put(&key, &fetched);
+        raw.extend(fetched);
     }
     Ok(raw)
 }
@@ -180,6 +212,103 @@ pub fn to_rows(raw: Vec<RawRow>, dedupe: bool) -> Vec<SearchRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::Mode;
+    use crate::config::{Conn, DEFAULT_DBNAME};
+
+    /// A source pointing somewhere nothing is listening. Any attempt to dial
+    /// fails fast and locally, which is what makes "did it dial?" testable
+    /// offline — the same address `tests/cli.rs` uses for the connect path.
+    fn unreachable_source() -> Source {
+        Source::new(Conn {
+            host: "127.0.0.1".into(),
+            port: 1,
+            dbname: DEFAULT_DBNAME.into(),
+            user: "guest".into(),
+            db_url: None,
+        })
+    }
+
+    fn cached_row(term: &str) -> RawRow {
+        RawRow {
+            id: 1,
+            issuer_ca_id: Some(1),
+            issuer_name: Some("Example CA".into()),
+            matched_identity: term.into(),
+            common_name: Some(term.into()),
+            serial: Some("00".into()),
+            not_before: Some(utc(2026, 1, 1)),
+            not_after: Some(utc(2026, 12, 31)),
+            server_now: chrono::Utc::now(),
+        }
+    }
+
+    /// The point of the whole cache: a run whose every term is already cached
+    /// must finish without opening a connection.
+    ///
+    /// Proven by pointing the source at a closed port. If `fetch_by_term`
+    /// dialled at all it would fail, so a successful call carrying the cached
+    /// rows is the assertion — and it needs no network to make it.
+    #[tokio::test]
+    async fn a_fully_cached_run_never_dials() {
+        let dir =
+            std::env::temp_dir().join(format!("crt-query-cache-nodial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::at(dir.clone(), Mode::Enabled, crate::cache::DEFAULT_TTL);
+
+        let sql = "SELECT 1";
+        let terms = vec!["a.example".to_string(), "b.example".to_string()];
+        let mut source = unreachable_source();
+        let target = source.target().unwrap();
+        for term in &terms {
+            cache.put(
+                &Key {
+                    target: target.clone(),
+                    sql: sql.to_string(),
+                    term: term.clone(),
+                    params: vec!["365".to_string()],
+                },
+                &vec![cached_row(term)],
+            );
+        }
+
+        let limit: i32 = 365;
+        let rows = fetch_by_term(&mut source, &cache, &terms, sql, &[(&limit, Type::INT4)])
+            .await
+            .expect("a fully cached run must not need a connection");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].matched_identity, "a.example");
+        assert_eq!(rows[1].matched_identity, "b.example");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The counterpart: a term that is *not* cached still has to dial, so a
+    /// partial cache cannot silently answer with a short result set.
+    #[tokio::test]
+    async fn an_uncached_term_still_reaches_for_a_connection() {
+        let dir = std::env::temp_dir().join(format!("crt-query-cache-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::at(dir.clone(), Mode::Enabled, crate::cache::DEFAULT_TTL);
+
+        let limit: i32 = 365;
+        let mut source = unreachable_source();
+        let err = fetch_by_term(
+            &mut source,
+            &cache,
+            &["uncached.example".to_string()],
+            "SELECT 1",
+            &[(&limit, Type::INT4)],
+        )
+        .await
+        .expect_err("a miss must not be reported as an empty result");
+        assert!(
+            format!("{err:#}").contains("127.0.0.1:1"),
+            "the failure should name the target it could not reach, got: {err:#}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Snapshots of the three statements this tool sends.
     ///

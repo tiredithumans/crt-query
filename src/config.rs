@@ -23,6 +23,12 @@ pub struct FileConfig {
     pub dbname: Option<String>,
     pub user: Option<String>,
     pub db_url: Option<String>,
+    /// Whether to use the local result cache at all. `--no-cache` still wins.
+    pub cache: Option<bool>,
+    /// How long a cached `search`/`expiring` result stays usable, in seconds.
+    /// `cert` lookups keep their own much longer lifetime — the record they
+    /// cache cannot change.
+    pub cache_ttl_secs: Option<u64>,
 }
 
 /// Where a resolved `db_url` came from.
@@ -236,10 +242,8 @@ mod tests {
     fn file(host: Option<&str>, db_url: Option<&str>) -> FileConfig {
         FileConfig {
             host: host.map(str::to_string),
-            port: None,
-            dbname: None,
-            user: None,
             db_url: db_url.map(str::to_string),
+            ..FileConfig::default()
         }
     }
 

@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio_postgres::types::Type;
 
-use crate::db::Db;
+use crate::cache::Cache;
+use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
 use crate::queries::{IDENTITY_QUERY, RawRow, fetch_by_term, to_rows};
 
@@ -128,7 +129,8 @@ impl OutputRecord for SearchRow {
 ///
 /// One statement per term, in sequence — see [`fetch_by_term`] for why.
 pub async fn run_search(
-    db: &Db,
+    source: &mut Source,
+    cache: &Cache,
     queries: &[String],
     valid_since_days: i32,
     skip_expired: bool,
@@ -136,7 +138,8 @@ pub async fn run_search(
     dedupe: bool,
 ) -> Result<Vec<SearchRow>> {
     let raw = fetch_by_term(
-        db,
+        source,
+        cache,
         queries,
         SEARCH_SQL.as_str(),
         &[
@@ -180,6 +183,79 @@ pub(crate) fn sql() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::{Cache, Key, Mode};
+    use crate::config::{Conn, DEFAULT_DBNAME};
+
+    /// The whole feature, through the function `main` actually calls.
+    ///
+    /// `a_fully_cached_run_never_dials` proves the mechanism inside
+    /// `fetch_by_term`; this proves `run_search` builds the same key on the way
+    /// in that it wrote on the way out — with the real `SEARCH_SQL` and the
+    /// real bind parameters, so a change to either shows up here rather than as
+    /// a cache that silently never hits.
+    ///
+    /// The source points at a closed port, so a connection attempt would fail
+    /// the test. Offline, and nothing leaves the machine.
+    #[tokio::test]
+    async fn a_cached_search_is_served_without_a_connection() {
+        let dir =
+            std::env::temp_dir().join(format!("crt-query-cache-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::at(dir.clone(), Mode::Enabled, crate::cache::DEFAULT_TTL);
+
+        let mut source = Source::new(Conn {
+            host: "127.0.0.1".into(),
+            port: 1,
+            dbname: DEFAULT_DBNAME.into(),
+            user: "guest".into(),
+            db_url: None,
+        });
+
+        // The parameters `run_search` binds below, rendered exactly as
+        // `fetch_by_term` renders them.
+        let (valid_since, skip_expired, limit) = (365i32, false, 100i64);
+        cache.put(
+            &Key {
+                target: source.target().unwrap(),
+                sql: sql().to_string(),
+                term: "example.com".to_string(),
+                params: vec![
+                    format!("{valid_since:?}"),
+                    format!("{skip_expired:?}"),
+                    format!("{limit:?}"),
+                ],
+            },
+            &vec![RawRow {
+                id: 42,
+                issuer_ca_id: Some(7),
+                issuer_name: Some("Example CA".into()),
+                matched_identity: "example.com".into(),
+                common_name: Some("example.com".into()),
+                serial: Some("0a".into()),
+                not_before: Some(utc(2026, 1, 1)),
+                not_after: Some(utc(2026, 12, 31)),
+                server_now: Utc::now(),
+            }],
+        );
+
+        let rows = run_search(
+            &mut source,
+            &cache,
+            &["example.com".to_string()],
+            valid_since,
+            skip_expired,
+            limit,
+            true,
+        )
+        .await
+        .expect("a cached search must not need a connection");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 42);
+        assert_eq!(rows[0].matched_identities, vec!["example.com".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// README: "--json … including `[]` for an empty result". Serialising an
     /// empty Vec is what makes that true, and a future switch to an object

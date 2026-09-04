@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio_postgres::types::Type;
 
-use crate::db::Db;
+use crate::cache::Cache;
+use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, fmt_opt};
 use crate::queries::search::SearchRow;
 use crate::queries::{IDENTITY_QUERY, RawRow, fetch_by_term, to_rows};
@@ -117,7 +118,8 @@ impl OutputRecord for ExpiringRow {
 ///
 /// One statement per domain, in sequence — see [`fetch_by_term`] for why.
 pub async fn run_expiring(
-    db: &Db,
+    source: &mut Source,
+    cache: &Cache,
     domains: &[String],
     within: i32,
     since_expired: i32,
@@ -125,7 +127,8 @@ pub async fn run_expiring(
     dedupe: bool,
 ) -> Result<Vec<ExpiringRow>> {
     let raw = fetch_by_term(
-        db,
+        source,
+        cache,
         domains,
         EXPIRING_SQL.as_str(),
         &[
