@@ -185,7 +185,7 @@ anything close to renewal.
 | Timestamps | UTC everywhere. JSON and CSV carry an explicit offset; table columns are labelled `(UTC)` and truncate to the minute |
 | `--json` | Always valid JSON, including `[]` for an empty result and `null` for a missing `cert` ID |
 | `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. A run that fails before emitting leaves the previous report untouched rather than an empty one. `check-update` writes a one-row file; `completions` writes none |
-| CT-log text | Certificate fields are chosen by whoever got the certificate logged, so both the table and the CSV neutralise them: a cell a spreadsheet would evaluate as a formula is prefixed with `'`, and bidirectional overrides are written as `\u{202e}` rather than silently reordering the row. Values that parse as numbers — `days_left` included — are never touched |
+| CT-log text | Certificate fields are chosen by whoever got the certificate logged, so both the table and the CSV neutralise them: a cell a spreadsheet would evaluate as a formula is prefixed with `'`, and bidirectional overrides are written as `\u{202e}` rather than silently reordering the row. A leading `-` is quoted only when the rest of the field does not parse as a number, so a negative `days_left` is never touched |
 | `completions` | Emits a shell script rather than a record, so it ignores both `--json` and `--csv` and never creates the CSV destination |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
 | Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |

@@ -318,10 +318,10 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
 /// `-` is in that set, and it is the character a payload opens with precisely
 /// to slip past a filter covering only `=`/`+`/`@`. It also leads every
 /// negative `days_left`, the one column a script is most likely to read as a
-/// number. The invariant to hold is the one this function has always claimed —
-/// *nothing that parses as a number is touched* — so test that directly rather
-/// than approximate it by dropping `-` from the set: `-30` is left alone while
-/// `-2+3+cmd|' /C calc'!A0` is neutralised.
+/// number. The invariant that matters is narrower than dropping `-` from the
+/// set: *a `-`-led field that parses as a number is left alone*. Test that
+/// directly: `-30` is left alone while `-2+3+cmd|' /C calc'!A0` is
+/// neutralised.
 ///
 /// The exemption is for `-` alone, not for every leader that happens to parse.
 /// `id`, `issuer_ca_id` and `days_left` are the only numeric columns and none
@@ -352,8 +352,9 @@ fn csv_safe(value: &str) -> Cow<'_, str> {
 ///
 /// Narrower than [`display_safe`] on purpose: this runs over a machine format,
 /// so it neutralises only the characters that reorder a rendered cell and
-/// leaves the rest — control characters included — to the CSV writer's own
-/// quoting, which round-trips them correctly.
+/// leaves the rest — control characters included — to the CSV writer, which
+/// quotes a field holding a comma, quote or line break and writes every other
+/// byte raw. Both forms round-trip through a CSV reader.
 fn bidi_safe(value: &str) -> Cow<'_, str> {
     if !value.chars().any(is_bidi_control) {
         return Cow::Borrowed(value);
@@ -881,8 +882,9 @@ mod tests {
         assert_eq!(csv_safe("-1"), "-1");
         assert_eq!(csv_safe("0"), "0");
         assert_eq!(csv_safe("example.com"), "example.com");
-        // Not just integers: the exemption is "parses as a number", so a
-        // future numeric column cannot be corrupted either.
+        // Not just integers: the exemption is "`-` leading something that
+        // parses as a number", so a future signed decimal column cannot be
+        // corrupted either.
         assert_eq!(csv_safe("-1.5"), "-1.5");
         assert_eq!(csv_safe("-0"), "-0");
     }
