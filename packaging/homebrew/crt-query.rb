@@ -18,19 +18,23 @@ class CrtQuery < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/tiredithumans/crt-query/releases/download/v0.2.0/crt-query-v0.2.0-aarch64-apple-darwin.tar.gz"
-      sha256 "194de5f7e536d7b181374f48f3a1026c0065b049dc64f128d40f3f607bee7b46"
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.4.0/crt-query-v0.4.0-aarch64-apple-darwin.tar.gz"
+      sha256 "51d7f7c66fc71000b179acb8659a5cac37d0a343a23175490647237e318558f7"
     end
     on_intel do
-      url "https://github.com/tiredithumans/crt-query/releases/download/v0.2.0/crt-query-v0.2.0-x86_64-apple-darwin.tar.gz"
-      sha256 "7b6d4192357c02dece3f04eca1d79cf12ac98e1df24ab6530539d3dd41dd5513"
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.4.0/crt-query-v0.4.0-x86_64-apple-darwin.tar.gz"
+      sha256 "adbf3daac8399502df66d7f63e13a410d7da6ca11da5279da70e8611d004ed04"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/tiredithumans/crt-query/releases/download/v0.2.0/crt-query-v0.2.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "45047feca1e0dea24cd9c8f5b2898990b26463017da2d7b74ae01044bd8bb71b"
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.4.0/crt-query-v0.4.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "07fef60dbec6c0e4ad38af6afe24388d2c4c944ff4189fab2ed3a1ebe68c930b"
+    end
+    on_arm do
+      url "https://github.com/tiredithumans/crt-query/releases/download/v0.4.0/crt-query-v0.4.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "6e5c41bdf0a60651ac35bff1ea9bafc4af5f5fd385594ccbf32f628ceb5eaeac"
     end
   end
 
