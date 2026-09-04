@@ -11,6 +11,32 @@ Three questions from the command line: what certificates exist for a name, what
 is inside one certificate, and what is about to expire. Output is a table, JSON,
 or CSV.
 
+**What certificates exist for a name.** One row per certificate, newest first,
+with every identity the search matched:
+
+```console
+$ crt-query search example.com --skip-expired --limit 10
+┌─────────────┬──────────────┬────────────────────┬────────────────────┬──────────────────┬────────────────────────────────────┬──────────────────┬──────────────────┐
+│ crt.sh ID   ┆ Issuer CA ID ┆ Issuer             ┆ Matched Identities ┆ Common Name      ┆ Serial                             ┆ Not Before (UTC) ┆ Not After (UTC)  │
+╞═════════════╪══════════════╪════════════════════╪════════════════════╪══════════════════╪════════════════════════════════════╪══════════════════╪══════════════════╡
+│ 22648245559 ┆ 204411       ┆ C=GB, O=Sectigo    ┆ example.com,       ┆ example.com      ┆ 0f8f7abde735d78baa0bd4053f39021c   ┆ 2025-11-21 00:00 ┆ 2026-11-21 23:59 │
+│             ┆              ┆ Limited,           ┆ www.example.com    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ CN=Sectigo Public  ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ Server             ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ Authentication CA  ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ OV R36             ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│ 22625564176 ┆ 204411       ┆ C=GB, O=Sectigo    ┆ example.com        ┆ example.com      ┆ 009de10580fa26441939f38af4afb1cb40 ┆ 2025-11-20 00:00 ┆ 2026-11-20 23:59 │
+│             ┆              ┆ Limited,           ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ CN=Sectigo Public  ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ Server             ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ Authentication CA  ┆                    ┆                  ┆                                    ┆                  ┆                  │
+│             ┆              ┆ OV R36             ┆                    ┆                  ┆                                    ┆                  ┆                  │
+└─────────────┴──────────────┴────────────────────┴────────────────────┴──────────────────┴────────────────────────────────────┴──────────────────┴──────────────────┘
+```
+
+**What is inside one certificate.** Everything crt.sh holds for one ID, SANs
+included:
+
 ```console
 $ crt-query cert 22625564176
 ┌─────────────────────┬────────────────────────────────────────────────────────────────┐
@@ -28,6 +54,41 @@ $ crt-query cert 22625564176
 │                     ┆ dd                                                             │
 │ SANs                ┆ example.com; example.edu; example.net; example.org             │
 └─────────────────────┴────────────────────────────────────────────────────────────────┘
+```
+
+**What is about to expire.** Soonest first, with anything that already expired
+in the last 30 days kept in view:
+
+```console
+$ crt-query expiring example.com --within 60
+┌─────────────┬──────────────┬────────────────────┬────────────────────┬──────────────────┬──────────────────────────────────┬──────────────────┬──────────────────┬───────────┬────────────────┐
+│ crt.sh ID   ┆ Issuer CA ID ┆ Issuer             ┆ Matched Identities ┆ Common Name      ┆ Serial                           ┆ Not Before (UTC) ┆ Not After (UTC)  ┆ Days Left ┆ Status         │
+╞═════════════╪══════════════╪════════════════════╪════════════════════╪══════════════════╪══════════════════════════════════╪══════════════════╪══════════════════╪═══════════╪════════════════╡
+│ 26786991078 ┆ 413864       ┆ C=US, O=SSL        ┆ *.example.com,     ┆ example.com      ┆ 27fd65644d90aa4763b6cfb53d6dcca3 ┆ 2026-05-31 21:39 ┆ 2026-08-29 21:41 ┆ -6        ┆ EXPIRED        │
+│             ┆              ┆ Corporation,       ┆ example.com        ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ CN=Cloudflare TLS  ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ Issuing RSA CA 3   ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│ 26786991824 ┆ 413868       ┆ C=US, O=SSL        ┆ *.example.com,     ┆ example.com      ┆ 1aa73fea257be3334b9a29552e6f878e ┆ 2026-05-31 21:39 ┆ 2026-08-29 21:41 ┆ -6        ┆ EXPIRED        │
+│             ┆              ┆ Corporation,       ┆ example.com        ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ CN=Cloudflare TLS  ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ Issuing ECC CA 3   ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│ 28361593297 ┆ 413864       ┆ C=US, O=SSL        ┆ *.example.com,     ┆ example.com      ┆ 49c9a73c64f9bda07dd9d469432b505f ┆ 2026-07-29 21:52 ┆ 2026-10-27 22:00 ┆ 53        ┆ EXPIRES IN 53d │
+│             ┆              ┆ Corporation,       ┆ example.com        ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ CN=Cloudflare TLS  ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ Issuing RSA CA 3   ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│ 28361594355 ┆ 413868       ┆ C=US, O=SSL        ┆ *.example.com,     ┆ example.com      ┆ 33f0f429d5622a91a1c3d5b6729e11e5 ┆ 2026-07-29 21:52 ┆ 2026-10-27 22:00 ┆ 53        ┆ EXPIRES IN 53d │
+│             ┆              ┆ Corporation,       ┆ example.com        ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ CN=Cloudflare TLS  ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ Issuing ECC CA 3   ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│ 28361938121 ┆ 413864       ┆ C=US, O=SSL        ┆ *.example.com,     ┆ example.com      ┆ 62546d11b12882adbce18f65f9372286 ┆ 2026-07-29 22:09 ┆ 2026-10-27 22:17 ┆ 53        ┆ EXPIRES IN 53d │
+│             ┆              ┆ Corporation,       ┆ example.com        ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ CN=Cloudflare TLS  ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ Issuing RSA CA 3   ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│ 28361964045 ┆ 413868       ┆ C=US, O=SSL        ┆ *.example.com,     ┆ example.com      ┆ 0624d0ab311558780b7d5213b9631831 ┆ 2026-07-29 22:10 ┆ 2026-10-27 22:17 ┆ 53        ┆ EXPIRES IN 53d │
+│             ┆              ┆ Corporation,       ┆ example.com        ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ CN=Cloudflare TLS  ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+│             ┆              ┆ Issuing ECC CA 3   ┆                    ┆                  ┆                                  ┆                  ┆                  ┆           ┆                │
+└─────────────┴──────────────┴────────────────────┴────────────────────┴──────────────────┴──────────────────────────────────┴──────────────────┴──────────────────┴───────────┴────────────────┘
 ```
 
 ## Install
