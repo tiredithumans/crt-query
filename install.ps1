@@ -8,8 +8,8 @@
     against that release's SHA256SUMS, installs the binary, and puts its
     directory on your user PATH. No admin rights needed.
 
-    Re-run it to upgrade: it replaces the installed binary and clears the
-    mark-of-the-web on the new download.
+    Re-run it to upgrade: the new binary is staged beside the installed one,
+    cleared of the mark-of-the-web and shown to run before it replaces it.
 
 .PARAMETER Dir
     Install directory. Defaults to %LOCALAPPDATA%\Programs\crt-query.
@@ -80,8 +80,8 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("crt-query-install-" + [Guid
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 
 # The inner try/finally clears the scratch directory; the outer try/catch
-# turns a failure into a plain message, because PowerShell's default rendering
-# of a multi-line exception is close to unreadable.
+# flattens a failure into a single-line terminating error, because PowerShell's
+# default rendering of a multi-line exception is close to unreadable.
 try {
   try {
     $sumsPath = Join-Path $tmp 'SHA256SUMS'
@@ -157,25 +157,54 @@ Build from source instead:
 
     # --- Install -----------------------------------------------------------
 
-    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+    # Capture .FullName. New-Item's output was piped to Out-Null, so a relative
+    # -Dir reached the PATH write below verbatim -- and a relative entry in
+    # HKCU\Environment\Path is resolved by every future process against its own
+    # working directory, which survives reboots. It also normalises a trailing
+    # separator, so `-Dir C:\tools\` no longer appends a second C:\tools.
+    $Dir = (New-Item -ItemType Directory -Path $Dir -Force).FullName
     $dest = Join-Path $Dir 'crt-query.exe'
-    Copy-Item -Path $exe -Destination $dest -Force
 
-    # Everything downloaded from the internet carries a mark-of-the-web, which
-    # SmartScreen acts on. Clearing it is also what makes a re-run work as an
-    # upgrade: the mark comes back with each new download.
-    Unblock-File -Path $dest -ErrorAction SilentlyContinue
+    # Stage, verify, then swap -- the same shape as install.sh. Copying over
+    # $dest first and checking afterwards means a binary that cannot run here
+    # has already replaced a working one, with $tmp cleared by the finally below
+    # and nothing left to restore.
+    $staged = Join-Path $Dir (".crt-query.new." + [Guid]::NewGuid().ToString('N') + ".exe")
+    try {
+        Copy-Item -Path $exe -Destination $staged -Force
 
-    # Capture first, slice after. Piping into `Select-Object -First 1` stops the
-    # pipeline as soon as it has its one line, and a short-circuited native
-    # command never sets $LASTEXITCODE -- which is a terminating error under the
-    # StrictMode above, so the check meant to confirm a good install was the
-    # thing that failed it.
-    $versionOutput = & $dest --version 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
-        throw "installed $dest but it would not run"
+        # Everything downloaded from the internet carries a mark-of-the-web,
+        # which SmartScreen acts on. Clear it before the check rather than
+        # after: the mark can block execution, and would then fail the very
+        # check meant to prove the download is good. Clearing it is also what
+        # makes a re-run work as an upgrade -- the mark comes back each time.
+        Unblock-File -Path $staged -ErrorAction SilentlyContinue
+
+        # Capture first, slice after. Piping into `Select-Object -First 1` stops
+        # the pipeline as soon as it has its one line, and a short-circuited
+        # native command never sets $LASTEXITCODE -- which is a terminating
+        # error under the StrictMode above, so the check meant to confirm a good
+        # install was the thing that failed it.
+        #
+        # stderr goes to a file rather than $null so the loader's own words
+        # reach the message. Not 2>&1: under $ErrorActionPreference = 'Stop' a
+        # native command's stderr becomes error records that terminate here.
+        $errPath = Join-Path $tmp 'runerr.txt'
+        $versionOutput = & $staged --version 2>$errPath
+        if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
+            $why = if (Test-Path -Path $errPath) {
+                Get-Content -Path $errPath -TotalCount 1
+            } else { $null }
+            if (-not $why) { $why = 'no output' }
+            throw "the downloaded crt-query.exe does not run on this system, so nothing was changed: $why"
+        }
+        $installed = @($versionOutput)[0]
+
+        Move-Item -Path $staged -Destination $dest -Force
+        $staged = $null
+    } finally {
+        if ($staged) { Remove-Item -Path $staged -Force -ErrorAction SilentlyContinue }
     }
-    $installed = @($versionOutput)[0]
     Write-Host "Installed $installed to $dest"
 
     # --- PATH --------------------------------------------------------------
@@ -215,6 +244,17 @@ Build from source instead:
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
   }
 } catch {
-    [Console]::Error.WriteLine("crt-query installer: error: " + $_.Exception.Message)
-    exit 1
+    # `throw` a flat string, never `exit`. Both documented invocations run this
+    # script inside the caller's own session -- `irm ... | iex` and the
+    # scriptblock form in .EXAMPLE -- where a top-level `exit` unwinds the host
+    # itself, closing the window or killing an interactive shell. The success
+    # path has no `exit`, so the asymmetry pointed the wrong way: a clean
+    # install left the console alive and the one outcome the user most needs to
+    # read, the checksum mismatch above, was the one that took it away.
+    #
+    # Re-throwing the caught exception object would restore the unreadable
+    # multi-line rendering this catch exists to avoid, so the message is
+    # flattened into a single string. That still terminates with exit code 1
+    # under `pwsh -File`, and returns an interactive host to its prompt.
+    throw "crt-query installer: error: " + $_.Exception.Message
 }

@@ -7,9 +7,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh
 #
-# Re-run it to upgrade: it overwrites the installed binary in place and, on
-# macOS, clears the Gatekeeper quarantine attribute again — a fresh download
-# arrives quarantined every time, not just on the first install.
+# Re-run it to upgrade: the new binary is staged beside the installed one and
+# only replaces it once it has been shown to run.
 #
 # Options. When piping, pass them after `sh -s --`:
 #
@@ -109,7 +108,19 @@ fi
 
 os=$(uname -s)
 case "$os" in
-    Linux) os_part="unknown-linux-gnu" ;;
+    Linux)
+        # Compute the honest triple. Hardcoding gnu makes a musl host match the
+        # glibc archive and walk straight past the "no build for $target"
+        # refusal below — installing a binary whose PT_INTERP does not exist,
+        # so execve returns ENOENT and the shell reports "not found" for a file
+        # that is plainly there in ls -l. Naming the target musl instead lets
+        # that refusal do its job and list what the release really ships.
+        if ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; then
+            os_part="unknown-linux-musl"
+        else
+            os_part="unknown-linux-gnu"
+        fi
+        ;;
     Darwin) os_part="apple-darwin" ;;
     MINGW* | MSYS* | CYGWIN*)
         die "this script is for Linux and macOS; on Windows use install.ps1"
@@ -139,7 +150,17 @@ else
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# Set before the install step stages into $dir, so an interrupt between staging
+# and the swap does not leave a dotfile behind next to the real binary.
+staged=""
+as_root=""
+cleanup() {
+    rm -rf "$tmp"
+    if [ -n "$staged" ]; then
+        $as_root rm -f "$staged" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
 
 fetch() {
     curl --fail --silent --show-error --location --retry 2 --output "$2" "$1" ||
@@ -194,7 +215,12 @@ awk -v name="$archive" '
     entry == name { print }
 ' "$tmp/SHA256SUMS" > "$tmp/expected"
 [ -s "$tmp/expected" ] || die "no SHA256SUMS entry for $archive"
-(cd "$tmp" && $checksum --check --status expected) ||
+# `-c` with output redirected, not `--check --status`: BusyBox's sha256sum takes
+# only short options, so the long form exits non-zero on a byte-perfect download
+# and this line then accuses the release channel of tampering. `-c -s` is not
+# the fix either — GNU coreutils rejects `-s`. `-c` plus a redirect is the one
+# spelling GNU coreutils, BusyBox and macOS shasum all accept.
+(cd "$tmp" && $checksum -c expected >/dev/null 2>&1) ||
     die "checksum mismatch for $archive — the download does not match the release's SHA256SUMS, so it was NOT installed"
 note "Checksum verified against the release's SHA256SUMS."
 
@@ -203,9 +229,8 @@ tar -xzf "$tmp/$archive" -C "$tmp"
 
 # --- Install ---------------------------------------------------------------
 
-# Elevate only when the destination genuinely needs it, and only for the two
-# commands that touch it.
-as_root=""
+# Elevate only when the destination genuinely needs it, and only for the
+# commands that touch it. `as_root` is initialised beside the cleanup trap.
 if [ ! -d "$dir" ]; then
     if mkdir -p "$dir" 2>/dev/null; then
         :
@@ -225,18 +250,44 @@ if [ ! -w "$dir" ]; then
     note "Installing to $dir (needs sudo)..."
 fi
 
-$as_root install -m 0755 "$tmp/$stem/$BIN" "$dir/$BIN" ||
+# Stage, verify, then swap. Installing first and checking afterwards means a
+# binary that cannot run here has already replaced a working one, with $tmp
+# cleared by the trap and nothing left to restore — which is what turned the
+# GLIBC_2.39 floor in v0.4.0 from "the new version will not start" into "the
+# version you had is gone too". Staging inside $dir rather than $tmp also keeps
+# the check honest: a noexec /tmp would otherwise fail a perfectly good binary,
+# and the final step is a rename within one directory rather than a copy.
+staged="$dir/.$BIN.new.$$"
+$as_root install -m 0755 "$tmp/$stem/$BIN" "$staged" ||
     die "could not install to $dir/$BIN"
 
-# The release binaries are unsigned, so macOS quarantines every download.
-# Clearing it here is what makes a re-run work as an upgrade: the attribute
-# comes back with each new archive.
+# Belt and braces, and before the check rather than after: Gatekeeper refuses
+# to execute a quarantined binary, so an attribute left in place would fail the
+# very check meant to prove the download is good. curl does not set
+# com.apple.quarantine — only downloaders that opt into LSFileQuarantineEnabled
+# do, which is browsers and Mail — so on this path there is normally nothing to
+# clear. It costs nothing and covers an archive that arrived another way.
 if [ "$os" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
-    $as_root xattr -d com.apple.quarantine "$dir/$BIN" 2>/dev/null || true
+    $as_root xattr -d com.apple.quarantine "$staged" 2>/dev/null || true
 fi
 
-installed=$("$dir/$BIN" --version 2>/dev/null || echo "")
-[ -n "$installed" ] || die "installed $dir/$BIN but it would not run"
+# Keep stderr. The loader's own words — "version `GLIBC_2.39' not found",
+# "cannot execute binary file" — name the problem; discarding them leaves the
+# user with "it would not run" and nowhere to go.
+if ! installed=$("$staged" --version 2>"$tmp/runerr"); then
+    why=$(head -n 1 "$tmp/runerr" 2>/dev/null || true)
+    $as_root rm -f "$staged"
+    staged=""
+    die "the downloaded $BIN does not run on this system, so nothing was changed: ${why:-no output}"
+fi
+if [ -z "$installed" ]; then
+    $as_root rm -f "$staged"
+    staged=""
+    die "the downloaded $BIN printed no version, so nothing was changed"
+fi
+
+$as_root mv -f "$staged" "$dir/$BIN" || die "could not install to $dir/$BIN"
+staged=""
 
 note "Installed $installed to $dir/$BIN"
 

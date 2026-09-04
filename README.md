@@ -40,8 +40,9 @@ $ crt-query cert 22625564176
 | From source | `cargo install --git https://github.com/tiredithumans/crt-query` |
 
 Every prebuilt route resolves the newest release, verifies the archive against
-that release's `SHA256SUMS`, and on macOS clears the Gatekeeper quarantine an
-unsigned binary arrives with. **Re-run the same command to upgrade.**
+that release's `SHA256SUMS`, and stages the new binary beside the installed one
+so it only replaces it once it has been shown to run. **Re-run the same command
+to upgrade.**
 
 The prebuilt Linux binaries are glibc builds and need **glibc 2.34 or newer** —
 RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later. On
@@ -107,12 +108,15 @@ attestation is what ties them to the run that built them:
 gh attestation verify "$ARCHIVE" --repo tiredithumans/crt-query
 ```
 
-Two things that catch people out doing this by hand on macOS:
+Two things that catch people out doing this by hand:
 
-- The binaries are unsigned, so Gatekeeper quarantines them — again on **every**
-  download, not just the first. Each manual upgrade needs
-  `xattr -d com.apple.quarantine /usr/local/bin/crt-query`. Homebrew and
-  `install.sh` do it for you.
+- Gatekeeper quarantine is set by the downloader, not by macOS in general: only
+  applications that opt into `LSFileQuarantineEnabled` — browsers, Mail,
+  AirDrop — mark what they fetch. `curl` does not, so an archive downloaded the
+  way described above carries no `com.apple.quarantine` and needs no `xattr`
+  step. If you fetched the archive with a browser instead, clear it with
+  `xattr -d com.apple.quarantine /usr/local/bin/crt-query`. Signing status has
+  no bearing on this either way.
 - `SHA256SUMS` covers one release. Verifying a new archive against the previous
   release's file fails, and should — delete the stale one rather than adding
   flags until it stops complaining.

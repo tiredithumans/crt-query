@@ -7,9 +7,7 @@ checksums cannot drift from the archives they point at.
 
 Homebrew is worth carrying because it gives the macOS/Linux cohort an upgrade
 path the release archives do not: `brew upgrade` finds new versions on its own,
-where a downloaded binary has to be replaced by hand. Homebrew also strips the
-quarantine attribute from what it downloads, so this install path skips the
-`xattr` step the README describes for a manual install.
+where a downloaded binary has to be replaced by hand.
 
 ## Publishing a new version
 
