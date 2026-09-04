@@ -11,6 +11,26 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The prebuilt Linux binaries could not start on most current distributions.**
+  Both Linux targets built on Ubuntu 24.04 runners, and a binary inherits the
+  glibc floor of the machine that linked it: std's process-spawn path — reached
+  by `check-update` through `Command::new("curl")` — references `pidfd_spawnp`
+  and `pidfd_getpid`, which are versioned symbols as of glibc 2.39, so the
+  linker stamped a non-weak `GLIBC_2.39` requirement into both v0.4.0 archives.
+  `ld.so` treats a missing non-weak version as fatal, so the binary died before
+  `main` on Debian 12, RHEL/Rocky 9, Ubuntu 22.04 and Amazon Linux 2023 — and on
+  Homebrew for Linux the failure aborted `brew install` itself, which runs the
+  binary to generate completions. The Linux rows now pin `ubuntu-22.04`
+  runners, which drops the floor to glibc 2.34, and a `glibc floor` step fails
+  the release if a future runner-image bump raises it again.
+
+### Changed
+
+- The README now states the glibc 2.34 floor for the prebuilt Linux archives,
+  in the install table and again under manual download.
+
 ## [0.4.0] - 2026-09-03
 
 ### Added
