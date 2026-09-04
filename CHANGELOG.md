@@ -84,9 +84,10 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   carriage return but skipped `-`, because `-` also leads every negative
   `days_left` and prefixing it would have typed that column as text. `-` is
   precisely the character a payload opens with to get past a filter covering
-  only the other three. The exemption is now the invariant that was actually
-  intended — a value that parses as a number is left alone — so `-30` still
-  reaches the file as `-30` while `-2+3+cmd|' /C calc'!A0` does not.
+  only the other three. A leading `-` is now quoted unless the whole field
+  parses as a number, so `-30` still reaches the file as `-30` while
+  `-2+3+cmd|' /C calc'!A0` does not. The other leaders are quoted
+  unconditionally, exactly as before.
 - **Bidi control characters are neutralised in `--csv` as well as the table.**
   A spreadsheet implements the Unicode bidirectional algorithm, so a CSV is
   exposed to the same display spoofing described below, and it is the artefact
