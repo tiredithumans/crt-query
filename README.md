@@ -151,7 +151,8 @@ crt-query expiring example.com example.org --within 90 --csv report.csv
 separately — the guest database's statement timeout rules out folding them into
 a single query — so `--limit` applies per name. The results merge into one
 report, and a certificate matching two of the names appears once, carrying both
-matched identities.
+matched identities. An empty or whitespace-only name — usually an unset shell
+variable — is a usage error (exit 2) rather than a query that finds nothing.
 
 Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
 `--db-url postgresql://…`. Set them once in a [config file](#configuration)
