@@ -94,7 +94,7 @@ async fn run() -> Result<i32> {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
                     eprintln!("No certificate with crt.sh ID {id}.");
-                    output::emit_missing::<CertDetail>(&cli.out)?;
+                    output::emit_missing::<CertDetail>(&cli.out, EXIT_NOT_FOUND)?;
                     return Ok(EXIT_NOT_FOUND);
                 }
             }

@@ -191,3 +191,69 @@ fn exit_code_documentation_is_present_for_the_case_this_suite_cannot_reach() {
          not-found contract is this line plus the constant in src/main.rs"
     );
 }
+
+/// `precheck_csv` creates the destination to prove it is writable, then removes
+/// it again so a run that fails leaves no empty report. `exists()` follows a
+/// symlink and `remove_file` does not, so for a dangling link it created the
+/// *target* and deleted the *link* — losing a file the user made and leaving
+/// behind exactly the empty report the check exists to prevent. The rotation
+/// pattern below is the ordinary way to meet this.
+#[test]
+#[cfg(unix)]
+fn a_dangling_report_symlink_survives_the_writability_check() {
+    let link = scratch("latest.csv");
+    let target = scratch("rotated-away.csv");
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&target);
+    std::os::unix::fs::symlink(&target, &link).expect("seed the rotation symlink");
+
+    let out = run(&[
+        "search",
+        "example.com",
+        "--csv",
+        link.to_str().unwrap(),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "1",
+    ]);
+    assert_eq!(code(&out), 1, "stderr was:\n{}", stderr(&out));
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "the writability check deleted the user's symlink at {}",
+        link.display()
+    );
+    assert!(
+        !target.exists(),
+        "left a {}-byte placeholder at {}, which is the empty report precheck_csv exists to prevent",
+        std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
+        target.display()
+    );
+}
+
+/// `completions` is routed through `on_stdout` precisely so a closed reader
+/// ends the run cleanly. `clap_complete::generate` panics on a write error, so
+/// the pre-fix shape exits 101; asserting only "exit 0 and stdout mentions
+/// crt-query" was true of that shape too, and so pinned nothing.
+///
+/// Dropping the child's stdout handle before waiting closes the pipe while the
+/// ~15KB script is still being written. `| head -1` does not reproduce it: head
+/// reads the whole script happily.
+#[test]
+fn a_closed_reader_ends_completions_cleanly_rather_than_panicking() {
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+        .args(["completions", "bash"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn crt-query");
+    drop(child.stdout.take().expect("stdout was piped"));
+    let status = child.wait().expect("wait for crt-query");
+    // 0 because the output was complete as far as anyone was listening. The
+    // point is what it is NOT: 101 from a panic, or a non-zero write error.
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a reader that went away should end the run cleanly, not kill it"
+    );
+}

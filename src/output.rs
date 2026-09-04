@@ -14,6 +14,11 @@ use crate::cli::OutputOpts;
 /// Placeholder for a NULL column.
 const DASH: &str = "-";
 
+/// Exit status for a run that emitted everything it had. Mirrors `EXIT_OK` in
+/// `main.rs`, which owns the exit-code contract; this is only what a reader
+/// going away mid-write should report.
+const EXIT_COMPLETED: i32 = 0;
+
 /// Table width used when stdout is not a terminal. `ContentArrangement::Dynamic`
 /// has nothing to measure against a pipe, so without this the table renders at
 /// its full natural width — often several hundred columns.
@@ -141,7 +146,16 @@ pub fn precheck_csv(out: &OutputOpts) -> Result<()> {
         // already-present file is untouched: that is the previous run's report
         // and outliving a later failure is exactly what it is for.
         if !existed {
-            let _ = std::fs::remove_file(path);
+            // Remove what was actually created, not the path that was named.
+            // `exists()` follows symlinks and `remove_file` does not, so for a
+            // symlink whose target was missing the open created the *target*
+            // and this unlinked the *link* — destroying a file the caller made
+            // while leaving behind precisely the empty report described above.
+            // The usual rotation pattern (`latest.csv -> 2026-09-03.csv`) hits
+            // it on every run once the target has rotated away, successful runs
+            // included, since this check runs before the query.
+            let created = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let _ = std::fs::remove_file(created);
         }
     }
     Ok(())
@@ -190,10 +204,18 @@ pub fn emit_detail<T: OutputRecord>(record: &T, out: &OutputOpts) -> Result<()> 
 
 /// Emit the "nothing found" shape for a single-record lookup, so `--json` and
 /// `--csv` hold their contracts on this exit path too.
-pub fn emit_missing<T: OutputRecord>(out: &OutputOpts) -> Result<()> {
+///
+/// `broken_pipe_exit` is the status the caller was about to return. Writing the
+/// `null` document into a reader that has gone away must not turn a decided
+/// exit 3 into success — see [`on_stdout_with`].
+pub fn emit_missing<T: OutputRecord>(out: &OutputOpts, broken_pipe_exit: i32) -> Result<()> {
     write_csv_if_requested::<T>(&[], out)?;
     if out.json {
-        return write_json(&serde_json::Value::Null);
+        return on_stdout_with(broken_pipe_exit, |w| {
+            serde_json::to_writer_pretty(&mut *w, &serde_json::Value::Null)
+                .map_err(io::Error::from)?;
+            writeln!(w)
+        });
     }
     Ok(())
 }
@@ -302,6 +324,44 @@ fn csv_safe(value: &str) -> Cow<'_, str> {
     }
 }
 
+/// Characters that reorder the text around them while occupying no width.
+///
+/// `char::is_control()` is Cc only, so these took the borrowed fast path and
+/// reached comfy-table verbatim — and comfy-table never appends a terminating
+/// PDF or PDI. Under the Unicode bidi algorithm, which ICU, VTE, iTerm2 3.5+,
+/// browsers and spreadsheets all implement, one U+202E inside a certificate
+/// identity renders the rest of the row reversed: the cell displays a hostname
+/// it does not contain and the row's closing border moves. Every column this
+/// reaches — Matched Identities, Common Name, Issuer, Subject, SANs — is text
+/// an attacker chooses and gets into a public CT log, the same threat model
+/// `csv_safe` above is written against.
+///
+/// Column alignment survives (these are zero-width) and the effect is bounded
+/// to one rendered line, so this is display spoofing rather than corruption.
+const BIDI_CONTROLS: &[char] = &[
+    '\u{061c}', // ARABIC LETTER MARK
+    '\u{200e}', // LEFT-TO-RIGHT MARK
+    '\u{200f}', // RIGHT-TO-LEFT MARK
+    '\u{202a}', // LEFT-TO-RIGHT EMBEDDING
+    '\u{202b}', // RIGHT-TO-LEFT EMBEDDING
+    '\u{202c}', // POP DIRECTIONAL FORMATTING
+    '\u{202d}', // LEFT-TO-RIGHT OVERRIDE
+    '\u{202e}', // RIGHT-TO-LEFT OVERRIDE
+    '\u{2066}', // LEFT-TO-RIGHT ISOLATE
+    '\u{2067}', // RIGHT-TO-LEFT ISOLATE
+    '\u{2068}', // FIRST STRONG ISOLATE
+    '\u{2069}', // POP DIRECTIONAL ISOLATE
+];
+
+/// Whether a character has to be rendered as an escape rather than emitted.
+///
+/// `is_control()` is Cc, which already subsumes the C1 range U+0080..=U+009F
+/// this used to re-test separately — an exhaustive scan over every Unicode
+/// scalar finds nothing satisfying that range without also being a control.
+fn needs_escaping(c: char) -> bool {
+    c != '\n' && (c.is_control() || BIDI_CONTROLS.contains(&c))
+}
+
 /// Replace control characters that a terminal would act on rather than print.
 ///
 /// comfy-table measures a cell in bytes it believes are printable, so an ANSI
@@ -312,12 +372,14 @@ fn csv_safe(value: &str) -> Cow<'_, str> {
 /// and overwrites the line just drawn.
 ///
 /// U+000A is left alone: comfy-table wraps on it correctly, and it is the one
-/// control character that means something here. JSON needs none of this —
-/// `serde_json` escapes them already — so this applies only to the two table
-/// paths.
+/// control character that means something here.
+///
+/// This applies only to the two table paths. `serde_json` escapes C0, `"` and
+/// `\` — not DEL or C1, which therefore survive `--json` raw, deliberately:
+/// JSON is a machine format whose consumer decodes escapes anyway, and running
+/// this function over it would emit Rust-syntax `\u{009b}` whose backslash
+/// serde would escape a second time, corrupting a documented contract.
 fn display_safe(value: &str) -> Cow<'_, str> {
-    let needs_escaping =
-        |c: char| c != '\n' && (c.is_control() || ('\u{80}'..='\u{9f}').contains(&c));
     if !value.chars().any(needs_escaping) {
         return Cow::Borrowed(value);
     }
@@ -408,6 +470,23 @@ fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
 /// error. Rust ignores SIGPIPE, so without this the write panics with
 /// "failed printing to stdout" and the process exits 101.
 fn on_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()> {
+    on_stdout_with(EXIT_COMPLETED, f)
+}
+
+/// [`on_stdout`], but exiting with `broken_pipe_exit` if the reader has gone.
+///
+/// Almost every caller wants 0: `crt-query search … | head` is a completed
+/// result whose consumer stopped reading, not a failure. The exception is the
+/// not-found path, which has already decided on exit 3 — hard-coding 0 here
+/// silently discarded that, so `cert --json <missing-id>` into a closed reader
+/// reported success for a certificate that does not exist.
+///
+/// A genuine write error still propagates and the run exits 1, which is right:
+/// the report was not delivered.
+fn on_stdout_with(
+    broken_pipe_exit: i32,
+    f: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> Result<()> {
     let stdout = io::stdout();
     // Buffered, because `StdoutLock` is a `LineWriter`: unbuffered it costs one
     // `write(2)` per line, which pretty-printed JSON emits by the hundred
@@ -415,7 +494,7 @@ fn on_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<()> {
     let mut w = BufWriter::new(stdout.lock());
     match f(&mut w).and_then(|()| w.flush()) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(broken_pipe_exit),
         Err(e) => Err(e).context("writing to stdout"),
     }
 }
@@ -793,6 +872,55 @@ mod tests {
             rendered.contains("u{001b}"),
             "the escape should still be visible as text:\n{rendered}"
         );
+    }
+
+    /// A certificate identity is chosen by whoever got the certificate logged.
+    /// A bidi override in one costs no display width, so it slipped through a
+    /// Cc-only filter and then reordered every character after it in the
+    /// rendered row — the cell shows a hostname it does not contain.
+    #[test]
+    fn bidi_overrides_never_reach_the_terminal() {
+        let mut r = row(&["\u{202e}moc.elpmaxe.live"]);
+        r.common_name = Some("safe\u{2066}spoofed".to_string());
+        r.issuer_name = Some("mark\u{200f}here".to_string());
+        let rendered = build_table(&[r], &opts(None)).to_string();
+        for (name, c) in [
+            ("RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
+            ("LEFT-TO-RIGHT ISOLATE", '\u{2066}'),
+            ("RIGHT-TO-LEFT MARK", '\u{200f}'),
+        ] {
+            assert!(
+                !rendered.contains(c),
+                "{name} reached the rendered table and can reorder the row:\n{rendered:?}"
+            );
+        }
+        assert!(
+            rendered.contains("u{202e}"),
+            "the override should still be visible as text:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn every_bidi_control_is_escaped() {
+        for c in BIDI_CONTROLS {
+            let value = format!("a{c}b");
+            assert_ne!(
+                display_safe(&value),
+                value,
+                "U+{:04X} passed through unescaped",
+                *c as u32
+            );
+        }
+    }
+
+    /// The C1 range this used to test separately is entirely inside `Cc`, so
+    /// the extra disjunct was dead code. If that ever stops being true the
+    /// range has to come back.
+    #[test]
+    fn the_c1_range_is_already_covered_by_is_control() {
+        for c in '\u{80}'..='\u{9f}' {
+            assert!(c.is_control(), "U+{:04X} is no longer Cc", c as u32);
+        }
     }
 
     #[test]
