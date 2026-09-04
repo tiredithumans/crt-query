@@ -307,22 +307,69 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
     Ok(written)
 }
 
-/// Stop a spreadsheet treating a certificate field as a formula.
+/// Stop a spreadsheet treating a certificate field as a formula, or rendering
+/// one in a direction it does not hold.
 ///
 /// Issuer, subject, common name and SAN are all text lifted from a public CT
 /// log — anyone who can get a certificate logged chooses them. Excel and
-/// LibreOffice evaluate a cell beginning `=`, `+`, `@`, tab or carriage return,
-/// so a prefixed apostrophe makes them literal.
+/// LibreOffice evaluate a cell beginning `=`, `+`, `-`, `@`, tab or carriage
+/// return, so a prefixed apostrophe makes them literal.
 ///
-/// Deliberately narrow. The usual rule also covers `-`, which would corrupt
-/// `days_left`'s negatives — the one column a script is most likely to read as
-/// a number, and which is now genuinely numeric. Nothing that parses as a
-/// number is touched.
+/// `-` is in that set, and it is the character a payload opens with precisely
+/// to slip past a filter covering only `=`/`+`/`@`. It also leads every
+/// negative `days_left`, the one column a script is most likely to read as a
+/// number. The invariant to hold is the one this function has always claimed —
+/// *nothing that parses as a number is touched* — so test that directly rather
+/// than approximate it by dropping `-` from the set: `-30` is left alone while
+/// `-2+3+cmd|' /C calc'!A0` is neutralised.
+///
+/// The exemption is for `-` alone, not for every leader that happens to parse.
+/// `id`, `issuer_ca_id` and `days_left` are the only numeric columns and none
+/// of them can emit a leading `+`, so a field arriving as `+1` is CT-log text
+/// rather than a number of ours, and stays quoted as it always has.
+///
+/// CSV gets [`bidi_safe`] as well. It is the machine format, but it is also the
+/// one people open in a spreadsheet — and a spreadsheet implements the Unicode
+/// bidirectional algorithm, so the display spoofing [`display_safe`] prevents
+/// in the table is reachable here too. Only the overrides are escaped, never
+/// letters: real Arabic or Hebrew in a subject DN reorders correctly from its
+/// own character properties and needs none of them.
 fn csv_safe(value: &str) -> Cow<'_, str> {
-    match value.chars().next() {
-        Some('=' | '+' | '@' | '\t' | '\r') => Cow::Owned(format!("'{value}")),
-        _ => Cow::Borrowed(value),
+    let value = bidi_safe(value);
+    let leads_a_formula = match value.chars().next() {
+        Some('-') => value.parse::<f64>().is_err(),
+        Some('=' | '+' | '@' | '\t' | '\r') => true,
+        _ => false,
+    };
+    if leads_a_formula {
+        Cow::Owned(format!("'{value}"))
+    } else {
+        value
     }
+}
+
+/// Render bidi overrides as visible text, leaving everything else alone.
+///
+/// Narrower than [`display_safe`] on purpose: this runs over a machine format,
+/// so it neutralises only the characters that reorder a rendered cell and
+/// leaves the rest — control characters included — to the CSV writer's own
+/// quoting, which round-trips them correctly.
+fn bidi_safe(value: &str) -> Cow<'_, str> {
+    if !value.chars().any(is_bidi_control) {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(
+        value
+            .chars()
+            .map(|c| {
+                if is_bidi_control(c) {
+                    escaped(c)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Characters that reorder the text around them while occupying no width.
@@ -360,7 +407,18 @@ const BIDI_CONTROLS: &[char] = &[
 /// this used to re-test separately — an exhaustive scan over every Unicode
 /// scalar finds nothing satisfying that range without also being a control.
 fn needs_escaping(c: char) -> bool {
-    c != '\n' && (c.is_control() || BIDI_CONTROLS.contains(&c))
+    c != '\n' && (c.is_control() || is_bidi_control(c))
+}
+
+/// Whether `c` is one of the [`BIDI_CONTROLS`].
+fn is_bidi_control(c: char) -> bool {
+    BIDI_CONTROLS.contains(&c)
+}
+
+/// How an escaped character is rendered, shared by both sanitisers so the
+/// table and the CSV spell the same character the same way.
+fn escaped(c: char) -> String {
+    format!("\\u{{{:04x}}}", c as u32)
 }
 
 /// Replace control characters that a terminal would act on rather than print.
@@ -389,7 +447,7 @@ fn display_safe(value: &str) -> Cow<'_, str> {
             .chars()
             .map(|c| {
                 if needs_escaping(c) {
-                    format!("\\u{{{:04x}}}", c as u32)
+                    escaped(c)
                 } else {
                     c.to_string()
                 }
@@ -816,13 +874,99 @@ mod tests {
     }
 
     /// days_left is the column most likely to be read as a number, and the
-    /// narrow formula rule exists so its negatives survive untouched.
+    /// numeric exemption exists so its negatives survive untouched.
     #[test]
     fn a_negative_days_left_is_never_quoted_as_a_formula() {
         assert_eq!(csv_safe("-30"), "-30");
         assert_eq!(csv_safe("-1"), "-1");
         assert_eq!(csv_safe("0"), "0");
         assert_eq!(csv_safe("example.com"), "example.com");
+        // Not just integers: the exemption is "parses as a number", so a
+        // future numeric column cannot be corrupted either.
+        assert_eq!(csv_safe("-1.5"), "-1.5");
+        assert_eq!(csv_safe("-0"), "-0");
+    }
+
+    /// A leading `-` is in the standard formula set and was the one leader this
+    /// rule skipped, because it also leads every negative days_left. Skipping
+    /// it wholesale left the gap open: `-` is exactly what a payload opens with
+    /// to get past a filter covering only `=`/`+`/`@`.
+    #[test]
+    fn a_hyphen_led_payload_is_quoted_while_a_negative_number_is_not() {
+        for hostile in ["-2+3+cmd|' /C calc'!A0", "-1+1", "-cmd|'/c calc'!A0", "-"] {
+            let safe = csv_safe(hostile);
+            assert!(
+                safe.starts_with('\''),
+                "{hostile:?} reached the file as a formula: {safe:?}"
+            );
+            assert!(safe.ends_with(hostile), "{hostile:?} was altered: {safe:?}");
+        }
+        for numeric in ["-30", "-1", "-1856", "-0.5"] {
+            assert_eq!(
+                csv_safe(numeric),
+                numeric,
+                "a genuine negative number must reach the file as a number"
+            );
+        }
+    }
+
+    /// The exemption is for `-` only. No numeric column this tool writes can
+    /// emit a leading `+`, so `+1` is CT-log text and stays quoted — the
+    /// behaviour that shipped, and worth keeping when widening the rule.
+    #[test]
+    fn the_numeric_exemption_does_not_leak_to_the_other_leaders() {
+        assert!(csv_safe("+1").starts_with('\''));
+        assert!(csv_safe("=1").starts_with('\''));
+    }
+
+    /// A spreadsheet implements the Unicode bidirectional algorithm, so the
+    /// display spoofing display_safe prevents in the table is reachable through
+    /// a CSV too — and the CSV is the artefact people forward to someone else.
+    #[test]
+    fn bidi_overrides_are_neutralised_in_the_csv_too() {
+        let safe = csv_safe("moc.elpmaxe\u{202e}live");
+        assert!(
+            !safe.contains('\u{202e}'),
+            "an override reached the CSV: {safe:?}"
+        );
+        assert!(safe.contains("u{202e}"), "{safe:?}");
+        for c in BIDI_CONTROLS {
+            let value = format!("a{c}b");
+            assert_ne!(
+                csv_safe(&value),
+                value,
+                "U+{:04X} passed through to the CSV",
+                *c as u32
+            );
+        }
+    }
+
+    /// The reason only the overrides are escaped, never letters: real
+    /// right-to-left text in a subject DN reorders correctly from its own
+    /// character properties, so neutralising the controls costs legitimate
+    /// certificate data nothing.
+    #[test]
+    fn genuine_right_to_left_text_is_left_intact() {
+        for legitimate in ["شركة المثال", "דוגמה", "example.com", "Ünïcödé Ltd"]
+        {
+            assert_eq!(
+                csv_safe(legitimate),
+                legitimate,
+                "legitimate text was altered"
+            );
+            assert_eq!(display_safe(legitimate), legitimate);
+        }
+    }
+
+    /// The CSV writer already quotes fields containing separators, quotes and
+    /// newlines, so bidi_safe deliberately leaves those alone rather than
+    /// escaping them and changing the value a consumer parses back out.
+    #[test]
+    fn bidi_safe_leaves_everything_else_to_the_csv_writer() {
+        assert_eq!(bidi_safe("a,b"), "a,b");
+        assert_eq!(bidi_safe("two\nlines"), "two\nlines");
+        assert_eq!(bidi_safe("quote\"inside"), "quote\"inside");
+        assert_eq!(bidi_safe("tab\there"), "tab\there");
     }
 
     /// Issuer, subject, common name and SAN are text from a public CT log:
