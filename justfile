@@ -1,8 +1,10 @@
 # crt-query task runner. `just` with no arguments lists every recipe.
 #
 # The point of this file is that CI and a contributor's laptop run the SAME
-# commands: every gate below is invoked verbatim by .github/workflows/ci.yml,
-# so `just verify` passing locally means the PR's required checks will pass.
+# commands: every recipe below that CI runs, it runs verbatim. The reverse does
+# not hold — `actionlint` and CodeQL's Analyze are required checks with no local
+# counterpart — so `just verify-full` passing is strong evidence rather than a
+# guarantee. See the note above `verify-full` for the current list.
 
 default:
     @just --list
@@ -46,7 +48,7 @@ check:
 
 # They are piped into a shell by people who have not read them, so they get a
 # gate like everything else.
-# Lint gate for install.sh and install.ps1.
+# Lint gate for install.sh, install.ps1 and packaging/homebrew/generate.sh.
 lint-scripts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -99,12 +101,21 @@ deny:
 verify: fmt-check lint test msrv lint-scripts build
     @echo ""
     @echo "verify OK — NOT run (needs network): audit, deny."
-    @echo "  just verify-full = full CI parity (adds the dependency gates)"
+    @echo "  just verify-full adds the dependency gates"
 
-# Full CI parity: the offline gates plus both dependency-policy scans.
+# Full CI parity for everything that can run locally: the offline gates plus
+# both dependency-policy scans.
+#
+# Two required checks have no local counterpart and are not covered here:
+# `actionlint`, which CI installs from a pinned tarball rather than a recipe,
+# and CodeQL's Analyze, which only runs on GitHub. `build-release` is a CI step
+# too — left out for the same reason `audit` and `deny` were until now, that it
+# costs minutes for a profile nothing else here exercises. Run it by hand when
+# touching the release profile.
 verify-full: fmt-check lint test msrv lint-scripts build audit deny
     @echo ""
-    @echo "verify-full OK — every required check should pass on the PR."
+    @echo "verify-full OK — the gates that can run locally all pass."
+    @echo "  CI additionally runs: actionlint, CodeQL Analyze, build-release."
 
 # --- Release helpers -------------------------------------------------------
 

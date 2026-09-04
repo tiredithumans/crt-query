@@ -8,7 +8,7 @@ changes is that they keep it small and focused.
 ```sh
 git clone https://github.com/tiredithumans/crt-query
 cd crt-query
-just verify        # fmt-check · lint · test · msrv · lint-scripts
+just verify        # fmt-check · lint · test · msrv · lint-scripts · build
 ```
 
 `rust-toolchain.toml` pins the toolchain, so rustup provisions the right Rust
@@ -16,7 +16,8 @@ version and components automatically on first build. [`just`](https://just.syste
 is the task runner — `just --list` shows everything available. You can run the
 underlying `cargo` commands directly, but the recipes are what CI runs.
 
-`lint-scripts` checks `install.sh` and `install.ps1`, so it needs
+`lint-scripts` checks `install.sh`, `install.ps1` and
+`packaging/homebrew/generate.sh`, so it needs
 [`shellcheck`](https://www.shellcheck.net) and
 [`pwsh`](https://aka.ms/powershell) on PATH (`brew install shellcheck
 powershell`, or the equivalent for your package manager). Both are preinstalled

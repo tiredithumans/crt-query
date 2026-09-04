@@ -37,7 +37,7 @@ $ crt-query cert 22625564176
 | macOS · Linux (x86-64 · ARM64) | `brew install tiredithumans/tap/crt-query` |
 | macOS · Linux | `curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \| sh` |
 | Windows (x86-64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
-| From source | `cargo install --git https://github.com/tiredithumans/crt-query` |
+| From source | `cargo install --locked --git https://github.com/tiredithumans/crt-query` |
 
 Every prebuilt route resolves the newest release, verifies the archive against
 that release's `SHA256SUMS`, and stages the new binary beside the installed one
@@ -184,7 +184,8 @@ anything close to renewal.
 | --- | --- |
 | Timestamps | UTC everywhere. JSON and CSV carry an explicit offset; table columns are labelled `(UTC)` and truncate to the minute |
 | `--json` | Always valid JSON, including `[]` for an empty result and `null` for a missing `cert` ID |
-| `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. A run that fails before emitting leaves the previous report untouched rather than an empty one |
+| `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. A run that fails before emitting leaves the previous report untouched rather than an empty one. `check-update` writes a one-row file; `completions` writes none |
+| `completions` | Emits a shell script rather than a record, so it ignores both `--json` and `--csv` and never creates the CSV destination |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
 | Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |
 | Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
@@ -238,11 +239,13 @@ the command line, where the run that produced a report also records how.
 either way — being out of date is a report, not a failure. It is the only
 subcommand that contacts anything other than crt.sh, and only when you ask;
 nothing checks in the background. It shells out to the system `curl`, so that
-has to be on `PATH` — the only path in this tool that runs an external program. `--json` gives `current`, `latest`,
+has to be on `PATH` — the only path in this tool that runs an external program.
+On Windows the search is Rust's, not `PATH` alone: it looks in the directory
+holding `crt-query.exe` before `System32` and before `PATH`. `--json` gives `current`, `latest`,
 `update_available` and `release_url` for a scheduled check.
 
 To upgrade, re-run whatever you installed with: `brew upgrade crt-query`,
-`install.sh`, `install.ps1`, or `cargo install --git … --force`.
+`install.sh`, `install.ps1`, or `cargo install --locked --git … --force`.
 
 There is deliberately no `crt-query self-update`. A tool that downloads and
 executes replacement code hands a compromised release channel a free upgrade to
@@ -268,7 +271,10 @@ identity. By default the tool groups rows by certificate and collapses
 precert/leaf pairs sharing `(issuer CA, serial)` — RFC 6962 requires both to
 carry the same serial — keeping the lowest crt.sh ID. A pair is only collapsed
 when its validity windows agree too, so a serial collision between genuinely
-different certificates keeps both. `--no-dedupe` shows the raw rows.
+different certificates keeps both — unless the colliding certificates happen to
+share a validity window as well, which the tool cannot tell apart from a real
+precert/leaf pair. Like the dedup itself, this is best-effort. `--no-dedupe`
+shows the raw rows.
 
 **It is a shared public service.** crt.sh enforces statement timeouts and
 connection limits, and is intermittently slow or unreachable. The tool retries
@@ -287,7 +293,7 @@ Requires Rust 1.98+ (pinned via `rust-toolchain.toml`) and
 
 ```sh
 just build-release   # binary lands in target/release/crt-query
-just verify          # fmt-check · lint · test · msrv · lint-scripts — offline
+just verify          # fmt-check · lint · test · msrv · lint-scripts · build — offline
 just verify-full     # adds cargo-audit + cargo-deny (needs network)
 ```
 

@@ -167,11 +167,23 @@ pub async fn run_search(
             raw.push(RawRow::from_pg(row)?);
         }
     }
-    // Dedup runs over the merged rows, so a certificate matching two of the
-    // terms appears once, carrying both matched identities.
+    Ok(assemble_search(raw, dedupe))
+}
+
+/// Turn the rows every statement returned into the finished, sorted list.
+///
+/// Split out of `run_search` for the same reason as
+/// [`crate::queries::expiring::assemble_expiring`]: everything above it needs a
+/// database and nothing here does, so the newest-first ordering — which is the
+/// whole reason the client-side sort exists — had no seam a test could reach.
+/// Deleting the sort compiled clean and left the suite green.
+///
+/// Dedup runs over the merged rows, so a certificate matching two of the terms
+/// appears once, carrying both matched identities.
+fn assemble_search(raw: Vec<RawRow>, dedupe: bool) -> Vec<SearchRow> {
     let mut out = to_rows(raw, dedupe);
     out.sort_by_key(|r| std::cmp::Reverse(r.not_before));
-    Ok(out)
+    out
 }
 
 /// The exact statement this module sends, for the golden-file test in
@@ -215,6 +227,38 @@ mod tests {
             not_before: Some(utc(2026, 1, 1)),
             not_after,
         }
+    }
+
+    fn raw_row(id: i64, not_before: DateTime<Utc>) -> RawRow {
+        RawRow {
+            id,
+            issuer_ca_id: Some(1),
+            issuer_name: None,
+            matched_identity: "example.com".to_string(),
+            common_name: None,
+            serial: Some(format!("{id:02x}")),
+            not_before: Some(not_before),
+            not_after: Some(utc(2027, 1, 1)),
+            server_now: utc(2026, 2, 1),
+        }
+    }
+
+    /// The newest-first order is the whole reason the client-side sort exists —
+    /// the statement carries no ORDER BY so LIMIT can terminate early. It lived
+    /// inside an async fn and so was unreachable offline: deleting it compiled
+    /// clean and passed.
+    #[test]
+    fn assembled_rows_are_ordered_newest_first() {
+        let rows = assemble_search(
+            vec![
+                raw_row(1, utc(2026, 1, 1)),
+                raw_row(2, utc(2026, 6, 1)),
+                raw_row(3, utc(2026, 3, 1)),
+            ],
+            true,
+        );
+        let order: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(order, vec![2, 3, 1], "search must present newest first");
     }
 
     #[test]

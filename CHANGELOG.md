@@ -86,8 +86,29 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Changed
 
+- Every documented `cargo install --git` route now passes `--locked`, in the
+  README, both install scripts and the hint `check-update` prints. Without it
+  `cargo install` re-resolves versions and ignores the lockfile, so the
+  from-source channel built a dependency set that `cargo audit`, `cargo deny`,
+  the MSRV gate and the test suite had never seen — while every justfile recipe
+  and the release workflow already passed it.
 - The README now states the glibc 2.34 floor for the prebuilt Linux archives,
   in the install table and again under manual download.
+- `SECURITY.md` and the README described `check-update`'s `curl` lookup as
+  resolving through `PATH`. On Windows it does not: Rust's standard library
+  searches the directory holding `crt-query.exe` before `System32` and before
+  `PATH`, so auditing `PATH` does not cover it. Documented rather than changed.
+- The dedup description promised that a serial collision between different
+  certificates always keeps both. It cannot: a collision that also shares a
+  validity window is indistinguishable from a real precertificate/leaf pair.
+  Described as best-effort, which is what the surrounding text already says of
+  dedup generally.
+- The `just verify` gate list disagreed with itself across the justfile, README,
+  CONTRIBUTING and the PR template, and the justfile claimed a CI parity it does
+  not have — `actionlint` and CodeQL have no local counterpart. All four now
+  agree, and the two CI-only checks are named.
+- The README output table now records that `completions` ignores `--json` and
+  `--csv`, and that `check-update` honours `--csv`.
 - The macOS Gatekeeper documentation was wrong: `curl` does not set
   `com.apple.quarantine` — only downloaders that opt into
   `LSFileQuarantineEnabled` do — so nothing on the documented install paths ever
@@ -136,7 +157,7 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   shell slip into a false "the certificate is gone" alert, the exact confusion
   the distinct code exists to prevent. A script keying on `2` for not-found
   needs updating; `0` and `1` are unchanged.
-- `check-update --csv` and its table now use display column headers
+- `check-update --csv` now uses display column headers
   (`Current`, `Latest`, `Update Available`, `Release URL`) like every other
   record type. The `--json` keys are unchanged.
 

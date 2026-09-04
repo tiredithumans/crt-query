@@ -243,6 +243,62 @@ mod tests {
         })
     }
 
+    /// Like [`pair`] but with an explicit issuer.
+    ///
+    /// The dedupe key is `(issuer_ca_id, serial)` and `is_same_cert_as`
+    /// compares only the validity window, so the issuer half is the only thing
+    /// keeping two certificates from different CAs that share a serial apart.
+    /// Every other fixture here hardcodes `Some(1)`, so nothing exercised it:
+    /// reducing the map to a serial-only key left the whole suite green.
+    fn pair_from(
+        issuer_ca_id: Option<i32>,
+        id: i64,
+        serial: &'static str,
+        identity: &'static str,
+    ) -> RawRow {
+        RawRow {
+            issuer_ca_id,
+            ..pair(id, serial, identity)
+        }
+    }
+
+    #[test]
+    fn a_serial_shared_across_two_issuers_stays_two_certificates() {
+        // X.509 serials are unique per issuer only, and IDENTITY_QUERY carries
+        // no issuer predicate, so one search genuinely returns rows from every
+        // CA. Merging these would drop a certificate and leave the survivor
+        // advertising an identity it does not carry.
+        let rows = to_rows(
+            vec![
+                pair_from(Some(1), 100, "0a", "one.example.com"),
+                pair_from(Some(2), 200, "0a", "two.example.com"),
+            ],
+            true,
+        );
+        assert_eq!(
+            rows.len(),
+            2,
+            "two CAs' certificates were collapsed onto one serial"
+        );
+        for row in &rows {
+            assert_eq!(row.matched_identities.len(), 1);
+        }
+    }
+
+    #[test]
+    fn an_unknown_issuer_does_not_collide_with_a_known_one() {
+        // The issuer half of the key is Option<i32>, and the LEFT JOIN on `ca`
+        // makes None reachable, so it needs its own case.
+        let rows = to_rows(
+            vec![
+                pair_from(None, 100, "0a", "one.example.com"),
+                pair_from(Some(1), 200, "0a", "two.example.com"),
+            ],
+            true,
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
     #[test]
     fn collapses_a_precert_leaf_pair_keeping_the_lowest_id() {
         // The precert and its leaf carry the same serial and validity window.

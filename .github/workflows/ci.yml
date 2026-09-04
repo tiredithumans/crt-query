@@ -107,7 +107,7 @@ jobs:
           tool: just
       # shellcheck and pwsh are both preinstalled on the ubuntu runner image,
       # so the recipe below is the same command a contributor runs locally.
-      - name: Lint install.sh and install.ps1
+      - name: Lint install.sh, install.ps1 and generate.sh
         run: just lint-scripts
 
   msrv:

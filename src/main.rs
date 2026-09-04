@@ -194,6 +194,14 @@ mod tests {
         ] {
             assert_ne!(code, CLAP_USAGE_ERROR, "{name} collides with clap's exit 2");
         }
+        // The value itself, not just its distinctness: tests/cli.rs asserts the
+        // README documents `3` but cannot see this constant (the crate is
+        // bin-only), and this test asserted only that the codes differ — so
+        // changing it to 4 left both green and the README wrong.
+        assert_eq!(
+            EXIT_NOT_FOUND, 3,
+            "README documents exit 3 for a missing certificate"
+        );
         let mut codes = [EXIT_OK, EXIT_ERROR, EXIT_NOT_FOUND];
         codes.sort_unstable();
         let distinct = codes.windows(2).all(|w| w[0] != w[1]);

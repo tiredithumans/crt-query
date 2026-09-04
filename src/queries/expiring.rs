@@ -392,6 +392,23 @@ mod tests {
         assert_eq!(row.cells().last().unwrap(), "-");
     }
 
+    /// `cells()` delegates its first eight values to SearchRow while
+    /// `headers()` retypes all eight by hand. The arity tests compare lengths
+    /// only, so a rename desynchronises the two tables silently — and it is not
+    /// cosmetic: `constrain_columns` matches on header TEXT, so one side also
+    /// loses its layout constraint, and `headers()` is the CSV header row, so
+    /// the two subcommands' machine output disagrees on a column name.
+    #[test]
+    fn expiring_extends_the_search_columns_rather_than_restating_them() {
+        assert!(
+            ExpiringRow::headers().starts_with(SearchRow::headers()),
+            "ExpiringRow::headers() no longer starts with SearchRow's, but \
+             cells() still delegates to it:\n  search:   {:?}\n  expiring: {:?}",
+            SearchRow::headers(),
+            ExpiringRow::headers()
+        );
+    }
+
     #[test]
     fn headers_and_cells_agree_in_arity() {
         assert_eq!(
