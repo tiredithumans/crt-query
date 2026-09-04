@@ -75,8 +75,10 @@ fn a_malformed_cert_argument_is_a_usage_error_not_a_missing_certificate() {
 /// `crt-query search "$DOMAIN"` with `$DOMAIN` unset used to spend a
 /// connection on the shared guest database and report "No certificates
 /// found" — a result people act on — for a term that was never there. It is a
-/// usage error, and the absence of "connection attempt" in stderr is the
-/// assertion that it is decided before the network is touched.
+/// usage error, and the absence of "could not connect" in stderr is the
+/// assertion that it is decided before the network is touched. (The sentinel
+/// used to be "connection attempt", which the connect path no longer prints:
+/// retries are silent now, so only the closing error names the host.)
 #[test]
 fn a_blank_term_is_a_usage_error_and_never_reaches_the_database() {
     for subcommand in ["search", "expiring"] {
@@ -98,7 +100,7 @@ fn a_blank_term_is_a_usage_error_and_never_reaches_the_database() {
                 code(&out)
             );
             assert!(
-                !err.contains("connection attempt"),
+                !err.contains("could not connect"),
                 "a blank term was only rejected after a connection was attempted:\n{err}"
             );
         }
@@ -133,8 +135,11 @@ fn completions_does_not_create_the_csv_destination() {
 
 /// The ordering that makes `--csv` safe to schedule: an unwritable destination
 /// is caught before a connection is spent on the shared guest database. The
-/// absence of "connection attempt" in stderr is the actual assertion — the
-/// error message alone would pass even if the check ran too late.
+/// absence of "could not connect" in stderr is the actual assertion — the
+/// error message alone would pass even if the check ran too late. That the
+/// string appears when the connect path *does* run is pinned below, by
+/// `a_spent_connect_reports_once_and_never_narrates_its_retries`; without it
+/// this assertion would hold for a string the binary never prints.
 #[test]
 fn an_unwritable_csv_destination_fails_before_any_connection_is_attempted() {
     let out = run(&[
@@ -154,8 +159,45 @@ fn an_unwritable_csv_destination_fails_before_any_connection_is_attempted() {
         "expected the CSV precheck error, got:\n{err}"
     );
     assert!(
-        !err.contains("connection attempt"),
+        !err.contains("could not connect"),
         "the CSV destination was checked only after a connection was attempted:\n{err}"
+    );
+}
+
+/// The positive control for the two sentinels above, and the pin on the quiet
+/// retries: a connect that never succeeds must say so exactly once, naming the
+/// host, and must not have narrated the attempts it made on the way there. A
+/// failed attempt used to print "connection attempt 1/3 to ... failed: db
+/// error: ERROR: no more connections allowed (max_client_conn); retrying...",
+/// which for the usual case — a later attempt connects — was an error message
+/// for a run that then worked fine.
+#[test]
+fn a_spent_connect_reports_once_and_never_narrates_its_retries() {
+    let out = run(&[
+        "search",
+        "example.com",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "1",
+    ]);
+    let err = stderr(&out);
+    assert_eq!(code(&out), 1, "stderr was:\n{err}");
+    assert!(
+        err.contains("could not connect to 127.0.0.1:1"),
+        "a spent connect did not name the host it could not reach:\n{err}"
+    );
+    for narration in ["retrying", "connection attempt", "attempt 1/"] {
+        assert!(
+            !err.contains(narration),
+            "a failed attempt was announced as it happened ({narration:?}):\n{err}"
+        );
+    }
+    // One report, not one per attempt.
+    assert_eq!(
+        err.matches("could not connect").count(),
+        1,
+        "the failure was reported more than once:\n{err}"
     );
 }
 

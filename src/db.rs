@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::io::IsTerminal;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio_postgres::config::Host;
@@ -11,8 +11,36 @@ use tokio_postgres::{Client, Config, NoTls, Row};
 
 use crate::config::Conn;
 
-const CONNECT_ATTEMPTS: u32 = 3;
-const RETRY_DELAY: Duration = Duration::from_secs(2);
+/// How many times a connection is dialled before the run gives up.
+///
+/// Five rather than three because the wait between them is now short: the
+/// failure this budget exists for is pgbouncer refusing a client slot
+/// (`max_client_conn`), which it does instantly and recovers from in well under
+/// a second. Under the old flat two-second delay the same wall time bought two
+/// extra chances; it now buys four.
+const CONNECT_ATTEMPTS: u32 = 5;
+
+/// The wait after the first failed attempt, doubling from there.
+const FIRST_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// Ceiling on a single wait, so the last attempts do not drift out to a
+/// timescale nobody is still watching the terminal for.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Ceiling on the whole connect phase — every attempt and every wait.
+///
+/// The attempt count alone does not bound the wall time: an attempt that stalls
+/// costs `CONNECT_TIMEOUT`, so five of them would be over a minute of silence
+/// before the error appears. Retrying stops once this is spent, which caps the
+/// phase at this plus the attempt already in flight — 45s.
+///
+/// That total is the number to keep an eye on rather than this constant. A
+/// failed attempt is no longer announced as it happens, so the whole phase is
+/// silent, and an unreachable crt.sh is indistinguishable from a hung terminal
+/// until it ends. It is deliberately under what the old three-attempt,
+/// two-second-delay schedule could spend (~49s): quiet has to buy a wait that
+/// is shorter than the one it replaced, not a longer one.
+const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// Ceiling on a single statement, handshake to last row.
 ///
@@ -220,8 +248,9 @@ fn chain(err: &tokio_postgres::Error) -> String {
 /// Retrying is for load and transport: the guest database drops connections
 /// when busy, and that is what `CONNECT_ATTEMPTS` exists for. A rejected
 /// password or a database that does not exist will be rejected the same way
-/// three times, so retrying only delays the error the caller has to read —
-/// with two misleading "retrying..." lines in front of it.
+/// five times, so retrying only spends the budget and delays the error the
+/// caller has to read. That delay is the whole cost now that the attempts are
+/// silent; it used to be the delay plus two misleading "retrying..." lines.
 fn worth_retrying(err: &tokio_postgres::Error) -> bool {
     worth_retrying_parts(err.code(), &err.to_string())
 }
@@ -242,11 +271,11 @@ fn worth_retrying_parts(code: Option<&SqlState>, rendered: &str) -> bool {
         // No SQLSTATE means the server never answered — usually load, which is
         // what the retries are for. But a connection setting that is wrong on
         // this side never reaches a server at all, and is decided identically
-        // three times: `postgresql:///certwatch` with no host, mismatched
+        // every time: `postgresql:///certwatch` with no host, mismatched
         // host/port lists, a missing password. tokio-postgres gives those no
         // code either, so the rendered text is the only thing separating them,
-        // and without this they burned the full retry budget behind two
-        // misleading "retrying..." lines — exactly what this function's doc
+        // and without this they burned the full retry budget on a verdict that
+        // was in from the first attempt — exactly what this function's doc
         // comment above says it exists to prevent.
         None => !is_client_config_error(rendered),
     }
@@ -262,7 +291,7 @@ fn is_client_config_error(rendered: &str) -> bool {
 /// Why the connect loop stopped, which is what decides the closing advice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ending {
-    /// Every attempt was spent.
+    /// The attempts ran out, or the wall-clock budget did.
     Exhausted,
     /// A deterministic failure; further attempts were pointless.
     Fatal,
@@ -276,26 +305,125 @@ enum Ending {
 /// against a host the caller chose themselves was answered with "the crt.sh
 /// guest database is shared and may be overloaded": advice they cannot act on,
 /// printed in front of the SQLSTATE that named the real problem.
-fn connect_advice(target: &str, host: &str, ending: Ending) -> String {
+///
+/// `attempts` is how many were actually made, not `CONNECT_ATTEMPTS`: the
+/// wall-clock budget can stop the loop early, and "after 5 attempts" would then
+/// be a count nobody made.
+fn connect_advice(target: &str, host: &str, ending: Ending, attempts: u32) -> String {
+    let plural = if attempts == 1 { "attempt" } else { "attempts" };
     match ending {
         Ending::Fatal => format!("could not connect to {target}"),
         Ending::Exhausted if host == crate::config::DEFAULT_HOST => format!(
-            "could not connect to {target} after {CONNECT_ATTEMPTS} attempts; the crt.sh \
+            "could not connect to {target} after {attempts} {plural}; the crt.sh \
              guest database is shared and may be overloaded — wait a moment and retry"
         ),
         Ending::Exhausted => {
-            format!("could not connect to {target} after {CONNECT_ATTEMPTS} attempts")
+            format!("could not connect to {target} after {attempts} {plural}")
         }
     }
 }
 
+/// Distinct earlier causes, or `None` when every attempt failed the same way.
+///
+/// The per-attempt lines this used to print are gone, so the closing error is
+/// the only place a swallowed cause can still surface. anyhow prints the last
+/// error as the source, so repeating that one would say the same thing twice —
+/// and five identical `max_client_conn` rejections, the ordinary case, have
+/// nothing to add. Attempts that failed *differently* are a different problem
+/// from attempts that failed identically, and this is the surviving record
+/// of it.
+fn earlier_causes(causes: &[String]) -> Option<String> {
+    let (last, earlier) = causes.split_last()?;
+    let mut distinct: Vec<&str> = Vec::new();
+    for cause in earlier {
+        if cause != last && !distinct.contains(&cause.as_str()) {
+            distinct.push(cause);
+        }
+    }
+    if distinct.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "earlier attempts also failed: {}",
+        distinct.join("; ")
+    ))
+}
+
+/// The wait after attempt `attempt`, before the next one.
+///
+/// Doubling from [`FIRST_RETRY_DELAY`] to [`MAX_RETRY_DELAY`]: 250ms, 500ms,
+/// 1s, 2s. The old flat two seconds was tuned for nothing in particular and was
+/// mostly dead time — pgbouncer refuses a client slot instantly and frees one
+/// again in well under a second, so the first retry is worth taking almost
+/// immediately.
+fn backoff(attempt: u32) -> Duration {
+    // The shift is clamped before it is applied: `1u32 << 32` panics in debug
+    // and wraps to 1 in release, and `attempt` is a loop counter bounded by a
+    // constant somebody may well raise.
+    let doublings = attempt.saturating_sub(1).min(16);
+    FIRST_RETRY_DELAY
+        .saturating_mul(1u32 << doublings)
+        .min(MAX_RETRY_DELAY)
+}
+
+/// Spread a delay out by up to a quarter, using the caller's `nanos`.
+///
+/// Only ever adds: the backoff above is a floor, not a target. The README
+/// advertises `expiring --csv` on a schedule, and cron fires every client on
+/// the same second — without this they would all come back on the same
+/// 250ms/500ms/1s grid, retrying into each other's contention.
+fn jittered(base: Duration, nanos: u32) -> Duration {
+    const NANOS_MAX: u64 = 999_999_999;
+    let step = u64::from(nanos).min(NANOS_MAX);
+    // `base` is capped at MAX_RETRY_DELAY, so a quarter of it is at most 5e8ns
+    // and the product below stays four orders of magnitude inside u64.
+    let quarter = (base.as_nanos() as u64) / 4;
+    base + Duration::from_nanos(quarter * step / NANOS_MAX)
+}
+
+/// A jitter source that costs no dependency: the sub-second part of the wall
+/// clock. `rand` would be a new crate in a tree audited on every PR, for four
+/// delays that need spreading rather than sampling.
+fn jitter_nanos() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.subsec_nanos())
+}
+
+/// Sleep before the next attempt, or report that there will not be one.
+///
+/// `false` means the budget is spent — either the attempts or the wall clock —
+/// so the caller stops rather than sleeping for a retry it will never make.
+async fn wait_before_retry(attempt: u32, started: Instant) -> bool {
+    if attempt >= CONNECT_ATTEMPTS {
+        return false;
+    }
+    let delay = jittered(backoff(attempt), jitter_nanos());
+    if started.elapsed() + delay >= CONNECT_BUDGET {
+        return false;
+    }
+    tokio::time::sleep(delay).await;
+    true
+}
+
+/// Dial the database, retrying transient failures.
+///
+/// A failed attempt is not announced as it happens. The failure this retries
+/// most often is the shared guest database refusing a client slot, which the
+/// next attempt usually gets — and narrating it made a run that then succeeded
+/// read like a broken tool. The causes are collected instead, and reported
+/// together if no attempt ever connects.
 pub async fn connect(conn: &Conn) -> Result<Db> {
     let config = build_config(conn)?;
     let target = target(&config);
     let host = host_of(&config);
+    let started = Instant::now();
+    let mut causes: Vec<String> = Vec::new();
     let mut last_err: Option<anyhow::Error> = None;
     let mut ending = Ending::Exhausted;
+    let mut made = 0;
     for attempt in 1..=CONNECT_ATTEMPTS {
+        made = attempt;
         // NoTls: the guest DB serves public read-only data with passwordless
         // auth. Switch to tokio-postgres-rustls if transport privacy is needed.
         //
@@ -314,14 +442,11 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
                      or the startup exchange did not complete)",
                     CONNECT_TIMEOUT.as_secs()
                 );
-                if attempt < CONNECT_ATTEMPTS {
-                    eprintln!(
-                        "connection attempt {attempt}/{CONNECT_ATTEMPTS} to {target} \
-                         failed: {stalled}; retrying..."
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
+                causes.push(stalled.to_string());
                 last_err = Some(stalled);
+                if !wait_before_retry(attempt, started).await {
+                    break;
+                }
                 continue;
             }
         };
@@ -342,23 +467,24 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
             }
             Err(e) => {
                 let retryable = worth_retrying(&e);
-                if attempt < CONNECT_ATTEMPTS && retryable {
-                    eprintln!(
-                        "connection attempt {attempt}/{CONNECT_ATTEMPTS} to {target} failed: {}; retrying...",
-                        chain(&e)
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-                let fatal = !retryable;
+                causes.push(chain(&e));
                 last_err = Some(anyhow::Error::new(e));
-                if fatal {
+                if !retryable {
                     ending = Ending::Fatal;
+                    break;
+                }
+                if !wait_before_retry(attempt, started).await {
                     break;
                 }
             }
         }
     }
-    Err(last_err.expect("at least one attempt")).context(connect_advice(&target, &host, ending))
+    let advice = connect_advice(&target, &host, ending, made);
+    let context = match earlier_causes(&causes) {
+        Some(earlier) => format!("{advice} ({earlier})"),
+        None => advice,
+    };
+    Err(last_err.expect("at least one attempt")).context(context)
 }
 
 #[cfg(test)]
@@ -409,8 +535,24 @@ mod tests {
             "QUERY_TIMEOUT {QUERY_TIMEOUT:?} would pre-empt the server's own timeout"
         );
         // And a connection attempt must not be able to outlast the whole
-        // retry budget it is one third of.
+        // retry budget it is one fifth of.
         assert!(CONNECT_TIMEOUT < QUERY_TIMEOUT);
+        // The connect phase, retries and waits included, plus the one attempt
+        // that can still be in flight when the budget runs out. If this could
+        // exceed the statement cap, a wedged connect would outlast the thing it
+        // exists to protect a scheduled run from.
+        let worst_case = CONNECT_BUDGET + CONNECT_TIMEOUT;
+        assert!(worst_case < QUERY_TIMEOUT);
+        // And it must stay under what the schedule this replaced could spend.
+        // Nothing is printed during the phase any more, so every second of it
+        // is silence a caller cannot tell from a hang — this is the one bound
+        // that got stricter when the per-attempt lines went away.
+        const PREVIOUS_WORST_CASE: Duration = Duration::from_secs(49);
+        assert!(
+            worst_case < PREVIOUS_WORST_CASE,
+            "a silent connect phase ({worst_case:?}) may not outlast the narrated \
+             one it replaced ({PREVIOUS_WORST_CASE:?})"
+        );
         // The per-address TCP bound sits under the whole-attempt bound. Note
         // this ordering alone does not bound an attempt: tokio-postgres applies
         // TCP_CONNECT_TIMEOUT once per resolved address, so CONNECT_TIMEOUT is
@@ -421,8 +563,8 @@ mod tests {
     #[test]
     fn a_rejected_credential_is_not_retried() {
         // Retrying is for load and transport. A password the server rejected
-        // will be rejected identically twice more, so retrying only buries the
-        // real error under two misleading "retrying..." lines.
+        // will be rejected identically four more times, so retrying only makes
+        // the caller wait out a verdict that was already in.
         //
         // This calls the decision function. The version that asserted
         // `INVALID_PASSWORD.code().starts_with("28")` pinned the PostgreSQL
@@ -475,8 +617,8 @@ mod tests {
     fn a_client_side_configuration_error_is_not_retried() {
         // No SQLSTATE, because no server ever saw these: a URL with no host,
         // mismatched host/port lists, a missing password. They fall in the
-        // same `code() == None` bucket as a dropped socket and used to burn
-        // the whole retry budget behind two misleading "retrying..." lines.
+        // same `code() == None` bucket as a dropped socket, and without this
+        // they would burn the whole retry budget on a settled verdict.
         // The rendered prefix is the only thing telling them apart — both
         // spellings verified against tokio-postgres 0.7.18.
         for rendered in ["invalid configuration", "invalid connection string"] {
@@ -540,20 +682,130 @@ mod tests {
 
     #[test]
     fn overload_advice_is_only_offered_where_it_could_be_true() {
-        let guest = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted);
+        let guest = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted, CONNECT_ATTEMPTS);
         assert!(guest.contains("guest database is shared"), "{guest}");
 
         // A host the caller pointed us at themselves. Telling them to wait out
         // load on crt.sh is advice about a service they are not talking to.
-        let own = connect_advice("db.internal:6432", "db.internal", Ending::Exhausted);
+        let own = connect_advice(
+            "db.internal:6432",
+            "db.internal",
+            Ending::Exhausted,
+            CONNECT_ATTEMPTS,
+        );
         assert!(!own.contains("guest database"), "{own}");
         assert!(own.contains("db.internal:6432"), "{own}");
 
         // A rejected password stopped after one attempt; it was never load,
         // and the SQLSTATE behind this context is what names the real problem.
-        let fatal = connect_advice("crt.sh:5432", "crt.sh", Ending::Fatal);
+        let fatal = connect_advice("crt.sh:5432", "crt.sh", Ending::Fatal, 1);
         assert!(!fatal.contains("overloaded"), "{fatal}");
         assert!(!fatal.contains("attempts"), "{fatal}");
+    }
+
+    #[test]
+    fn the_advice_counts_the_attempts_that_were_actually_made() {
+        // The wall-clock budget can stop the loop before the attempts run out,
+        // so this cannot go back to reading CONNECT_ATTEMPTS: it would report a
+        // count nobody made. Three stalled attempts is the realistic shape.
+        let short = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted, 3);
+        assert!(short.contains("after 3 attempts"), "{short}");
+        assert!(
+            !short.contains(&format!("after {CONNECT_ATTEMPTS} attempts")),
+            "reported the budget rather than the attempts made: {short}"
+        );
+        let one = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted, 1);
+        assert!(one.contains("after 1 attempt;"), "{one}");
+    }
+
+    #[test]
+    fn the_backoff_starts_short_stays_capped_and_never_goes_backwards() {
+        assert_eq!(backoff(1), FIRST_RETRY_DELAY);
+        let mut previous = Duration::ZERO;
+        for attempt in 1..=CONNECT_ATTEMPTS {
+            let delay = backoff(attempt);
+            assert!(delay >= previous, "backoff({attempt}) went backwards");
+            assert!(
+                delay <= MAX_RETRY_DELAY,
+                "backoff({attempt}) exceeds the cap"
+            );
+            previous = delay;
+        }
+        // The shift is clamped, not trusted: raising CONNECT_ATTEMPTS past 32
+        // would otherwise be a panic in debug and a wrapped delay in release.
+        assert_eq!(backoff(u32::MAX), MAX_RETRY_DELAY);
+        assert_eq!(backoff(0), FIRST_RETRY_DELAY);
+    }
+
+    #[test]
+    fn jitter_only_ever_adds_and_stays_inside_a_quarter() {
+        // A jitter that could subtract would retry sooner than the backoff
+        // says, which is the opposite of what it is for.
+        for base in [FIRST_RETRY_DELAY, MAX_RETRY_DELAY] {
+            for nanos in [0, 500_000_000, 999_999_999, u32::MAX] {
+                let delay = jittered(base, nanos);
+                assert!(
+                    delay >= base,
+                    "jittered({base:?}, {nanos}) shortened the wait"
+                );
+                assert!(
+                    delay <= base + base / 4,
+                    "jittered({base:?}, {nanos}) added more than a quarter"
+                );
+            }
+        }
+        assert_eq!(jittered(MAX_RETRY_DELAY, 0), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn the_whole_retry_schedule_fits_inside_the_wall_clock_budget() {
+        // Otherwise the budget, not the attempt count, would silently decide
+        // how many attempts a fast-failing host gets — and a busy crt.sh, which
+        // refuses instantly, is exactly that host.
+        let waited: Duration = (1..CONNECT_ATTEMPTS)
+            .map(|attempt| jittered(backoff(attempt), 999_999_999))
+            .sum();
+        assert!(
+            waited < CONNECT_BUDGET,
+            "the retry waits alone ({waited:?}) spend the {CONNECT_BUDGET:?} budget"
+        );
+    }
+
+    #[test]
+    fn identical_failures_are_reported_once() {
+        // The ordinary case: five max_client_conn rejections in a row. anyhow
+        // prints the last as the source, so there is nothing to add.
+        let same = "db error: ERROR: no more connections allowed (max_client_conn)".to_string();
+        assert_eq!(earlier_causes(&vec![same; 5]), None);
+        assert_eq!(earlier_causes(&[]), None);
+    }
+
+    #[test]
+    fn causes_that_differ_survive_the_silence() {
+        // Nothing prints an attempt as it fails any more, so a run that failed
+        // three different ways has only this to say so.
+        let causes = [
+            "no response from crt.sh:5432 within 15s".to_string(),
+            "db error: ERROR: no more connections allowed (max_client_conn)".to_string(),
+            "error connecting to server: Connection refused".to_string(),
+        ];
+        let earlier = earlier_causes(&causes).unwrap();
+        assert!(earlier.contains("no response"), "{earlier}");
+        assert!(earlier.contains("max_client_conn"), "{earlier}");
+        // The last cause is the error anyhow prints as the source; repeating it
+        // here would say the same thing twice in one line.
+        assert!(!earlier.contains("Connection refused"), "{earlier}");
+
+        // And a cause seen twice is still listed once.
+        let repeated = [
+            "stalled".to_string(),
+            "stalled".to_string(),
+            "refused".to_string(),
+        ];
+        assert_eq!(
+            earlier_causes(&repeated).unwrap(),
+            "earlier attempts also failed: stalled"
+        );
     }
 
     #[test]
