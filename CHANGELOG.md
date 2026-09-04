@@ -73,6 +73,20 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   precisely the empty report the check exists to prevent. This ran before the
   query, so successful runs broke the usual `latest.csv -> 2026-09-03.csv`
   rotation too, not just failed ones.
+- **A certificate field beginning `-` no longer reaches a spreadsheet as a
+  formula.** The formula-neutralising rule covered `=`, `+`, `@`, tab and
+  carriage return but skipped `-`, because `-` also leads every negative
+  `days_left` and prefixing it would have typed that column as text. `-` is
+  precisely the character a payload opens with to get past a filter covering
+  only the other three. The exemption is now the invariant that was actually
+  intended — a value that parses as a number is left alone — so `-30` still
+  reaches the file as `-30` while `-2+3+cmd|' /C calc'!A0` does not.
+- **Bidi control characters are neutralised in `--csv` as well as the table.**
+  A spreadsheet implements the Unicode bidirectional algorithm, so a CSV is
+  exposed to the same display spoofing described below, and it is the artefact
+  people forward to someone else. Only the override characters are escaped:
+  genuine right-to-left text in a subject DN reorders correctly from its own
+  character properties and is left exactly as issued.
 - **Bidi control characters in certificate fields no longer reorder a rendered
   table row.** The escape filter covered only the `Cc` control class, so
   U+202A-U+202E, U+2066-U+2069, U+061C and the directional marks reached the
