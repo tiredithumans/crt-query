@@ -7,8 +7,7 @@
 #
 # A binary formula, not a source build: it installs the very archives the
 # release publishes, checked against the same SHA256SUMS a manual install
-# would verify. Homebrew also strips the macOS quarantine attribute from what
-# it downloads, so there is no `xattr` step for this install path.
+# would verify.
 class CrtQuery < Formula
   desc "Query crt.sh certificate-transparency data from its public PostgreSQL database"
   homepage "https://github.com/tiredithumans/crt-query"

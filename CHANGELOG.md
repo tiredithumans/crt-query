@@ -25,11 +25,45 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   binary to generate completions. The Linux rows now pin `ubuntu-22.04`
   runners, which drops the floor to glibc 2.34, and a `glibc floor` step fails
   the release if a future runner-image bump raises it again.
+- **Both installers no longer destroy a working install to find out the new
+  binary does not run.** They overwrote the installed binary and only then ran
+  `--version` on it, so a replacement that cannot start on this system had
+  already replaced a working one — with the scratch directory cleared by the
+  exit trap and nothing left to restore. `install.sh` also sent that check's
+  stderr to `/dev/null`, discarding the loader's own explanation. The download
+  is now staged beside the destination, run, and moved into place only if it
+  works; the failure message carries the loader's first line.
+- `install.sh`'s checksum verification used GNU long options that BusyBox's
+  `sha256sum` rejects, so on a BusyBox host a byte-perfect download exited
+  non-zero and was reported as `checksum mismatch … the download does not match
+  the release's SHA256SUMS`. It now uses `-c` with output redirected, the one
+  form GNU coreutils, BusyBox and macOS `shasum` all accept.
+- `install.sh` mapped every Linux to `unknown-linux-gnu`, so a musl host
+  installed a glibc binary whose interpreter does not exist — `execve` returns
+  ENOENT and the shell reports "not found" for a file that is plainly there. It
+  now detects musl and reports that the release ships no such archive, which is
+  what the existing no-build-for-this-target branch was already written to say.
+- `install.ps1` ended its failure path with `exit 1`, which unwinds the *host*
+  under both documented invocations (`irm … | iex` and the scriptblock form) —
+  so the one outcome a user most needs to read, the checksum mismatch, closed
+  the window it was printed to. It now raises a single-line terminating error,
+  which still exits 1 under `pwsh -File`.
+- `install.ps1` wrote a relative `-Dir` verbatim into the persistent user PATH,
+  where every future process would resolve it against its own working
+  directory. The path is now resolved before use.
 
 ### Changed
 
 - The README now states the glibc 2.34 floor for the prebuilt Linux archives,
   in the install table and again under manual download.
+- The macOS Gatekeeper documentation was wrong: `curl` does not set
+  `com.apple.quarantine` — only downloaders that opt into
+  `LSFileQuarantineEnabled` do — so nothing on the documented install paths ever
+  arrived quarantined, and the manual-install instructions told people to run an
+  `xattr -d` that fails with `No such xattr`. Signing status has no bearing on
+  quarantine either. The claim is corrected in the README, `install.sh` and the
+  Homebrew packaging notes; `install.sh` still clears the attribute, now before
+  the run check rather than after, for an archive that arrived another way.
 
 ## [0.4.0] - 2026-09-03
 
