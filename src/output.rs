@@ -1,7 +1,9 @@
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -127,38 +129,113 @@ pub fn csv_ts(ts: Option<&DateTime<Utc>>) -> String {
 }
 
 /// Fail on an unwritable `--csv` destination before a connection is spent on
-/// the shared guest database. Creates the file if absent but never truncates:
-/// a later failure should not destroy the previous run's report.
+/// the shared guest database.
+///
+/// Checks exactly what [`replace_file`] will need: that the scratch file can
+/// be created beside the destination, and that an existing destination can be
+/// opened for writing. Nothing is left behind — the scratch file is removed
+/// again and an existing report is never truncated, since it is the previous
+/// run's and outliving a later failure is what it is for. An absent
+/// destination is not created either: an empty file where the documented
+/// contract promises a header row is worse than the absence it replaces.
 pub fn precheck_csv(out: &OutputOpts) -> Result<()> {
     if let Some(path) = &out.csv {
-        let existed = path.exists();
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
+        check_replaceable(path)
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
-        // Creating the file is a side effect of testing that it can be
-        // written, not the point of it. Left behind when the run then fails,
-        // it is an empty file where the documented contract promises a header
-        // row — a consumer testing for existence finds a report and parses
-        // nothing out of it, which is worse than the absence it replaced. An
-        // already-present file is untouched: that is the previous run's report
-        // and outliving a later failure is exactly what it is for.
-        if !existed {
-            // Remove what was actually created, not the path that was named.
-            // `exists()` follows symlinks and `remove_file` does not, so for a
-            // symlink whose target was missing the open created the *target*
-            // and this unlinked the *link* — destroying a file the caller made
-            // while leaving behind precisely the empty report described above.
-            // The usual rotation pattern (`latest.csv -> 2026-09-03.csv`) hits
-            // it on every run once the target has rotated away, successful runs
-            // included, since this check runs before the query.
-            let created = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            let _ = std::fs::remove_file(created);
-        }
     }
     Ok(())
+}
+
+fn check_replaceable(path: &Path) -> io::Result<()> {
+    let target = resolve_destination(path);
+    if target.exists() {
+        // Rename needs only the directory, but a read-only report or a
+        // directory at this path is a mistake worth catching before the query.
+        OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(&target)?;
+    }
+    let scratch = scratch_beside(&target)?;
+    File::create(&scratch)?;
+    std::fs::remove_file(&scratch)
+}
+
+/// Where the report actually lives: the destination with any symlink followed.
+///
+/// `latest.csv -> 2026-09-04.csv` is the ordinary rotation pattern, and both
+/// the writability check and the final rename must act on the *target*, as
+/// `File::create` would by following the link. `canonicalize` does that only
+/// while the target exists; once it has rotated away the link dangles and the
+/// chain has to be walked by hand, or the rename would replace the user's link
+/// with a plain file.
+fn resolve_destination(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    let mut current = path.to_path_buf();
+    // Bounded: a link cycle is the caller's problem, not a hang.
+    for _ in 0..16 {
+        let Ok(next) = std::fs::read_link(&current) else {
+            break;
+        };
+        current = if next.is_absolute() {
+            next
+        } else {
+            current
+                .parent()
+                .map_or_else(|| next.clone(), |dir| dir.join(&next))
+        };
+    }
+    current
+}
+
+/// The scratch path a report is written to before it is renamed over `target`.
+///
+/// In the same directory, because rename is atomic only within a filesystem.
+/// The process ID keeps two runs pointed at one destination from sharing a
+/// scratch file; whichever renames last wins, which is no worse than before.
+fn scratch_beside(target: &Path) -> io::Result<PathBuf> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::other("destination has no file name"))?;
+    let mut scratch = OsString::from(".");
+    scratch.push(name);
+    scratch.push(format!(".{}.tmp", std::process::id()));
+    Ok(target.with_file_name(scratch))
+}
+
+/// Replace the file at `path` with what `write` produces, or leave it exactly
+/// as it was.
+///
+/// `File::create` truncates before the first byte is written, so a failure
+/// part-way — a full disk, a write error — left a partial report where the
+/// previous run's had been, and a scheduled consumer reading the file at the
+/// wrong moment saw a header and half the rows. The content goes to a scratch
+/// file beside the destination and is renamed into place once complete and
+/// flushed to disk: rename is atomic on every platform this tool ships for, so
+/// a reader sees the old report or the new one and never a mixture, and a
+/// failure removes the scratch file and touches nothing else.
+///
+/// An existing report's permissions are carried over, as writing through it
+/// in place would have kept them.
+fn replace_file<T>(path: &Path, write: impl FnOnce(&File) -> Result<T>) -> Result<T> {
+    let target = resolve_destination(path);
+    let scratch = scratch_beside(&target)?;
+    let outcome: Result<T> = (|| {
+        let file = File::create(&scratch)?;
+        let value = write(&file)?;
+        file.sync_all()?;
+        if let Ok(previous) = std::fs::metadata(&target) {
+            std::fs::set_permissions(&scratch, previous.permissions())?;
+        }
+        std::fs::rename(&scratch, &target)?;
+        Ok(value)
+    })();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&scratch);
+    }
+    outcome
 }
 
 /// Render a result list as a table (default) or JSON array on stdout,
@@ -283,9 +360,7 @@ pub fn emit_update_status(status: &UpdateStatus, out: &OutputOpts) -> Result<()>
 
 fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
     if let Some(path) = &out.csv {
-        let file = File::create(path)
-            .with_context(|| format!("cannot write CSV to {}", path.display()))?;
-        let written = write_csv(rows, file)
+        let written = replace_file(path, |file| write_csv(rows, file))
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
         eprintln!("wrote {written} CSV row(s) to {}", path.display());
     }
@@ -319,9 +394,16 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
 /// to slip past a filter covering only `=`/`+`/`@`. It also leads every
 /// negative `days_left`, the one column a script is most likely to read as a
 /// number. The invariant that matters is narrower than dropping `-` from the
-/// set: *a `-`-led field that parses as a number is left alone*. Test that
-/// directly: `-30` is left alone while `-2+3+cmd|' /C calc'!A0` is
+/// set: *a `-`-led field that parses as a finite number is left alone*. Test
+/// that directly: `-30` is left alone while `-2+3+cmd|' /C calc'!A0` is
 /// neutralised.
+///
+/// Finite, because `f64::from_str` is wider than "a number this tool writes":
+/// it accepts `inf`, `infinity` and `nan` in any case, and rounds an
+/// overflowing exponent such as `1e999` to infinity. None of those is a value
+/// any column here emits, and a spreadsheet evaluates `-inf` as a formula —
+/// `#NAME?` in the cell rather than the text the log holds — so they stay
+/// quoted like any other `-`-led text.
 ///
 /// The exemption is for `-` alone, not for every leader that happens to parse.
 /// `id`, `issuer_ca_id` and `days_left` are the only numeric columns and none
@@ -337,7 +419,7 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
 fn csv_safe(value: &str) -> Cow<'_, str> {
     let value = bidi_safe(value);
     let leads_a_formula = match value.chars().next() {
-        Some('-') => value.parse::<f64>().is_err(),
+        Some('-') => !value.parse::<f64>().is_ok_and(f64::is_finite),
         Some('=' | '+' | '@' | '\t' | '\r') => true,
         _ => false,
     };
@@ -828,6 +910,168 @@ mod tests {
         );
     }
 
+    /// A fresh scratch directory per test: these write real files, and the
+    /// leftover-file assertions below need to see only their own.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("crt-query-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The half of the durability contract `File::create` could not keep: it
+    /// truncated before the first row, so a write that failed part-way left a
+    /// partial report where the previous run's had been. The README promises
+    /// the previous report survives a later failure, and "later" has to
+    /// include the write itself.
+    #[test]
+    fn a_failed_write_leaves_the_previous_report_intact_and_no_scratch_file() {
+        let dir = scratch_dir("replace-fail");
+        let path = dir.join("report.csv");
+        let previous = "Matched Identities\nexample.com\n";
+        std::fs::write(&path, previous).unwrap();
+
+        let err = replace_file(&path, |mut file| {
+            file.write_all(b"crt.sh ID,Issuer\n1,half a row").unwrap();
+            Err::<(), _>(anyhow::anyhow!("disk full"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("disk full"), "{err:#}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            previous,
+            "the failed write reached the previous report"
+        );
+        assert_eq!(
+            entries(&dir),
+            ["report.csv"],
+            "the scratch file was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_completed_write_replaces_the_previous_report_and_leaves_nothing_else() {
+        let dir = scratch_dir("replace-ok");
+        let path = dir.join("report.csv");
+        std::fs::write(&path, "old\n").unwrap();
+
+        let written = replace_file(&path, |mut file| {
+            file.write_all(b"new\n")?;
+            Ok(4_usize)
+        })
+        .unwrap();
+        assert_eq!(written, 4);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        assert_eq!(entries(&dir), ["report.csv"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `latest.csv -> 2026-09-04.csv` is the ordinary rotation pattern. A
+    /// rename over the *link* would replace it with a plain file and silently
+    /// end the rotation; the report has to land where `File::create` would have
+    /// put it by following the link — including when the target has rotated
+    /// away and the link dangles, which `canonicalize` cannot resolve.
+    #[test]
+    #[cfg(unix)]
+    fn writing_through_a_symlink_replaces_the_target_and_keeps_the_link() {
+        let dir = scratch_dir("replace-symlink");
+        let target = dir.join("2026-09-04.csv");
+        let link = dir.join("latest.csv");
+        std::os::unix::fs::symlink("2026-09-04.csv", &link).unwrap();
+
+        for (case, seed) in [("dangling", None), ("existing", Some("old\n"))] {
+            let _ = std::fs::remove_file(&target);
+            if let Some(seed) = seed {
+                std::fs::write(&target, seed).unwrap();
+            }
+            replace_file(&link, |mut file| {
+                file.write_all(b"new\n").map_err(Into::into)
+            })
+            .unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link).unwrap().is_symlink(),
+                "{case}: the user's symlink was replaced with a plain file"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "new\n",
+                "{case}: the report did not land at the link's target"
+            );
+            assert_eq!(entries(&dir), ["2026-09-04.csv", "latest.csv"], "{case}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writing through the file in place kept its mode; a scratch file gets
+    /// the umask's, so a `0600` report would have come back world-readable.
+    #[test]
+    #[cfg(unix)]
+    fn an_existing_reports_permissions_survive_the_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("replace-mode");
+        let path = dir.join("report.csv");
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        replace_file(&path, |mut file| {
+            file.write_all(b"new\n").map_err(Into::into)
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The precheck tests what the write will need: room for the scratch file
+    /// beside the destination. A directory the file can be opened in but not
+    /// created in used to pass the check and then fail after the query.
+    #[test]
+    #[cfg(unix)]
+    fn precheck_fails_when_the_scratch_file_cannot_be_created_beside_the_report() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("precheck-dir");
+        let path = dir.join("report.csv");
+        std::fs::write(&path, "old\n").unwrap();
+        // Writable file, read-only directory: the in-place open succeeds, the
+        // scratch file cannot be created.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory modes, so the case is unreachable there; the
+        // probe decides rather than a guess about the CI runner's account.
+        let modes_enforced = File::create(dir.join("probe")).is_err();
+        let opts = OutputOpts {
+            json: false,
+            csv: Some(path.clone()),
+            width: None,
+        };
+        let result = precheck_csv(&opts);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if modes_enforced {
+            let err = result.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("cannot write CSV to"),
+                "{err:#}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "old\n",
+            "the precheck touched the previous report"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn headers_and_cells_agree_in_arity() {
         let r = row(&["example.com"]);
@@ -919,6 +1163,29 @@ mod tests {
     fn the_numeric_exemption_does_not_leak_to_the_other_leaders() {
         assert!(csv_safe("+1").starts_with('\''));
         assert!(csv_safe("=1").starts_with('\''));
+    }
+
+    /// `f64::from_str` accepts more than the numbers this tool writes: `inf`,
+    /// `infinity` and `nan` in any case, and an overflowing exponent rounds to
+    /// infinity. A spreadsheet evaluates `-inf` as a formula (`#NAME?`), so
+    /// the exemption is for finite numbers only — the invariant as documented,
+    /// which the bare `parse().is_err()` did not actually implement.
+    #[test]
+    fn a_hyphen_led_non_finite_float_is_quoted() {
+        for hostile in ["-inf", "-Inf", "-Infinity", "-nan", "-NaN", "-1e999"] {
+            assert!(
+                hostile.parse::<f64>().is_ok(),
+                "{hostile:?} no longer parses as f64; this case is moot"
+            );
+            let safe = csv_safe(hostile);
+            assert!(
+                safe.starts_with('\''),
+                "{hostile:?} reached the file as a formula: {safe:?}"
+            );
+        }
+        // Exponents that stay finite are still numbers.
+        assert_eq!(csv_safe("-1e5"), "-1e5");
+        assert_eq!(csv_safe("-1.5e-3"), "-1.5e-3");
     }
 
     /// A spreadsheet implements the Unicode bidirectional algorithm, so the

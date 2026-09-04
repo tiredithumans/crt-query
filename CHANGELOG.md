@@ -13,6 +13,21 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Fixed
 
+- **A `--csv` write that fails part-way no longer destroys the previous
+  report.** The file was truncated before the first row was written, so a full
+  disk or a write error left a partial report where the last run's had been,
+  and a scheduled consumer reading the file at the wrong moment saw a header
+  and half the rows. The report is now written to a scratch file beside the
+  destination and renamed into place once complete: a reader sees the old
+  report or the new one, never a mixture, and a failure removes the scratch
+  file and touches nothing else. A symlinked destination (`latest.csv ->
+  2026-09-04.csv`) keeps its link, the target's permissions are carried over,
+  and the pre-query writability check now proves the scratch file can be
+  created rather than creating and deleting the report itself.
+- The CSV formula guard's exemption for negative numbers accepted `-inf`,
+  `-Infinity`, `-nan` and `-1e999`, which Rust's float parser reads as numbers
+  and a spreadsheet evaluates as formulas (`#NAME?`). The exemption is now for
+  finite numbers only; every `days_left` value is unaffected.
 - **The prebuilt Linux binaries could not start on most current distributions.**
   Both Linux targets built on Ubuntu 24.04 runners, and a binary inherits the
   glibc floor of the machine that linked it: std's process-spawn path — reached
