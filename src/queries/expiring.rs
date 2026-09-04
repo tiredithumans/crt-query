@@ -9,7 +9,7 @@ use crate::cache::Cache;
 use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, fmt_opt};
 use crate::queries::search::SearchRow;
-use crate::queries::{IDENTITY_QUERY, RawRow, fetch_by_term, to_rows};
+use crate::queries::{IDENTITY_QUERY, RawRow, Report, fetch_by_term, to_rows};
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
@@ -125,8 +125,8 @@ pub async fn run_expiring(
     since_expired: i32,
     limit: i64,
     dedupe: bool,
-) -> Result<Vec<ExpiringRow>> {
-    let raw = fetch_by_term(
+) -> Result<Report<ExpiringRow>> {
+    let fetched = fetch_by_term(
         source,
         cache,
         domains,
@@ -136,9 +136,15 @@ pub async fn run_expiring(
             (&since_expired, Type::INT4),
             (&limit, Type::INT8),
         ],
+        limit,
     )
     .await?;
-    Ok(assemble_expiring(raw, dedupe))
+    let raw_rows = fetched.rows.len();
+    Ok(Report {
+        rows: assemble_expiring(fetched.rows, dedupe),
+        raw_rows,
+        saturated: fetched.saturated,
+    })
 }
 
 /// Turn the rows every statement returned into the finished, sorted list.

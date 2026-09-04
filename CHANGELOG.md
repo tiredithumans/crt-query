@@ -11,6 +11,26 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `--limit` that fills up now says so, instead of passing for a short
+  answer.** `--limit` bounds identity rows fetched server-side, not
+  certificates: crt.sh returns one row per matched identity, logs a
+  precertificate alongside its final leaf, and repeats a name that appears as
+  both the commonName and a SAN — so the rows collapse, client-side, only after
+  the window has already been spent. Measured against the real database,
+  `search example.com --skip-expired --limit 10` fills its window with ten
+  identity rows spanning four crt.sh IDs and prints two certificates.
+
+  That was documented but invisible: the run looked exactly like a name with
+  two certificates to its name, with nothing to say more were behind the limit.
+  `search` and `expiring` now print a note on stderr when the window filled and
+  the collapse then shortened it, naming both counts and the two ways on —
+  raise `--limit`, or `--no-dedupe` to see the rows themselves. Because the
+  limit is per term, a multi-term run names the terms that actually filled,
+  which are the ones worth widening. Results are unchanged; stdout is
+  untouched, so `--json` and `--csv` consumers see nothing new.
+
 ## [0.5.0] - 2026-09-04
 
 ### Added

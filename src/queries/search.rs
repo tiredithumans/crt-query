@@ -8,7 +8,7 @@ use tokio_postgres::types::Type;
 use crate::cache::Cache;
 use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
-use crate::queries::{IDENTITY_QUERY, RawRow, fetch_by_term, to_rows};
+use crate::queries::{IDENTITY_QUERY, RawRow, Report, fetch_by_term, to_rows};
 
 /// Column index of the multi-valued identity field within `cells()`.
 const IDENTITIES_COL: usize = 3;
@@ -136,8 +136,8 @@ pub async fn run_search(
     skip_expired: bool,
     limit: i64,
     dedupe: bool,
-) -> Result<Vec<SearchRow>> {
-    let raw = fetch_by_term(
+) -> Result<Report<SearchRow>> {
+    let fetched = fetch_by_term(
         source,
         cache,
         queries,
@@ -147,9 +147,15 @@ pub async fn run_search(
             (&skip_expired, Type::BOOL),
             (&limit, Type::INT8),
         ],
+        limit,
     )
     .await?;
-    Ok(assemble_search(raw, dedupe))
+    let raw_rows = fetched.rows.len();
+    Ok(Report {
+        rows: assemble_search(fetched.rows, dedupe),
+        raw_rows,
+        saturated: fetched.saturated,
+    })
 }
 
 /// Turn the rows every statement returned into the finished, sorted list.
@@ -249,11 +255,121 @@ mod tests {
             true,
         )
         .await
-        .expect("a cached search must not need a connection");
+        .expect("a cached search must not need a connection")
+        .rows;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, 42);
         assert_eq!(rows[0].matched_identities, vec!["example.com".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reported bug, end to end through `run_search`, with the row shape
+    /// measured against the real crt.sh for
+    /// `search example.com --skip-expired --limit 10`: ten identity rows, four
+    /// crt.sh IDs, two certificates.
+    ///
+    /// Two multipliers stack. crt.sh logs a precertificate alongside its final
+    /// leaf, and returns one row per matched identity for each — and
+    /// `example.com` arrives twice per certificate, once as the commonName and
+    /// once as a SAN, so it burns two rows of the window while showing as one
+    /// entry in Matched Identities. The window is spent before `to_rows` has
+    /// collapsed anything, so a full window reads as a two-row result.
+    ///
+    /// Served from the cache so this needs no network: the collapse and the
+    /// saturation flag are what is under test, not the fetch.
+    #[tokio::test]
+    async fn a_full_window_collapsing_to_two_certificates_reports_itself() {
+        let dir =
+            std::env::temp_dir().join(format!("crt-query-cache-sat-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::at(dir.clone(), Mode::Enabled, crate::cache::DEFAULT_TTL);
+
+        let mut source = Source::new(Conn {
+            host: "127.0.0.1".into(),
+            port: 1,
+            dbname: DEFAULT_DBNAME.into(),
+            user: "guest".into(),
+            db_url: None,
+        });
+
+        // id, serial, identity — a precert/leaf pair per serial, and one row
+        // per matched identity on each half of the pair.
+        let raw: Vec<RawRow> = [
+            (100, "0f8f", "example.com"),
+            (100, "0f8f", "example.com"),
+            (100, "0f8f", "www.example.com"),
+            (101, "0f8f", "example.com"),
+            (101, "0f8f", "example.com"),
+            (101, "0f8f", "www.example.com"),
+            (200, "009d", "example.com"),
+            (200, "009d", "example.com"),
+            (201, "009d", "example.com"),
+            (201, "009d", "example.com"),
+        ]
+        .into_iter()
+        .map(|(id, serial, identity)| RawRow {
+            id,
+            issuer_ca_id: Some(1),
+            issuer_name: Some("Example CA".into()),
+            matched_identity: identity.to_string(),
+            common_name: Some("example.com".into()),
+            serial: Some(serial.to_string()),
+            not_before: Some(utc(2026, 1, 1)),
+            not_after: Some(utc(2026, 12, 31)),
+            server_now: Utc::now(),
+        })
+        .collect();
+        assert_eq!(raw.len(), 10, "the window this test is about");
+
+        let (valid_since, skip_expired, limit) = (365i32, true, 10i64);
+        cache.put(
+            &Key {
+                target: source.target().unwrap(),
+                sql: sql().to_string(),
+                term: "example.com".to_string(),
+                params: vec![
+                    format!("{valid_since:?}"),
+                    format!("{skip_expired:?}"),
+                    format!("{limit:?}"),
+                ],
+            },
+            &raw,
+        );
+
+        let report = run_search(
+            &mut source,
+            &cache,
+            &["example.com".to_string()],
+            valid_since,
+            skip_expired,
+            limit,
+            true,
+        )
+        .await
+        .expect("a cached search must not need a connection");
+
+        assert_eq!(report.raw_rows, 10);
+        assert_eq!(
+            report.rows.len(),
+            2,
+            "ten identity rows are two certificates"
+        );
+        assert_eq!(
+            report.saturated,
+            vec!["example.com".to_string()],
+            "ten rows against a --limit of ten is full"
+        );
+        assert!(
+            report.window_hid_certificates(),
+            "a full window that collapsed to two must not pass for a short answer"
+        );
+        // The duplicate commonName/SAN rows cost the window twice and show once.
+        assert_eq!(
+            report.rows[0].matched_identities.len() + report.rows[1].matched_identities.len(),
+            3,
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -16,6 +16,7 @@ use clap::Parser;
 use crate::cache::Cache;
 use crate::cli::{CacheAction, Cli, Commands};
 use crate::db::Source;
+use crate::queries::Report;
 use crate::queries::cert::CertDetail;
 
 /// Completed; results were emitted, even if there were none.
@@ -71,7 +72,7 @@ async fn run() -> Result<i32> {
             let terms = Commands::unique_terms(query);
             let lookback = Commands::search_lookback(*valid_since, *all_history);
             let (mut source, cache) = open_source(&cli)?;
-            let rows = queries::search::run_search(
+            let report = queries::search::run_search(
                 &mut source,
                 &cache,
                 &terms,
@@ -81,7 +82,7 @@ async fn run() -> Result<i32> {
                 !no_dedupe,
             )
             .await?;
-            if rows.is_empty() {
+            if report.rows.is_empty() {
                 let names = quoted(&terms);
                 if *skip_expired {
                     eprintln!("No unexpired certificates found for {names}.");
@@ -93,10 +94,12 @@ async fn run() -> Result<i32> {
                          {lookback} day(s); widen with --valid-since or --all-history."
                     );
                 }
+            } else if report.window_hid_certificates() {
+                eprintln!("{}", saturation_note(*limit, &terms, &report));
             }
             // Emitted even when empty: --json still owes the caller `[]`, and
             // --csv still owes a file, or a stale one is silently reused.
-            output::emit(&rows, &cli.out)?;
+            output::emit(&report.rows, &cli.out)?;
         }
         Commands::Cert { id } => {
             let (mut source, cache) = open_source(&cli)?;
@@ -120,7 +123,7 @@ async fn run() -> Result<i32> {
             let domains = Commands::unique_terms(domain);
             let lookback = Commands::expiring_lookback(*since_expired, *skip_expired);
             let (mut source, cache) = open_source(&cli)?;
-            let rows = queries::expiring::run_expiring(
+            let report = queries::expiring::run_expiring(
                 &mut source,
                 &cache,
                 &domains,
@@ -130,7 +133,7 @@ async fn run() -> Result<i32> {
                 !no_dedupe,
             )
             .await?;
-            if rows.is_empty() {
+            if report.rows.is_empty() {
                 let names = quoted(&domains);
                 let limit_note = limit_note(&domains);
                 if lookback == 0 {
@@ -144,8 +147,10 @@ async fn run() -> Result<i32> {
                          or expired in the last {lookback} day(s) ({limit_note})."
                     );
                 }
+            } else if report.window_hid_certificates() {
+                eprintln!("{}", saturation_note(*limit, &domains, &report));
             }
-            output::emit(&rows, &cli.out)?;
+            output::emit(&report.rows, &cli.out)?;
         }
         // None of the following needs the database.
         Commands::Cache { action } => run_cache(*action)?,
@@ -241,6 +246,49 @@ fn quoted(terms: &[String]) -> String {
         .join(", ")
 }
 
+/// The note printed when the row window filled and the collapse then handed
+/// back fewer certificates than rows.
+///
+/// `--limit` bounds identity rows, not certificates: crt.sh returns one row per
+/// matched identity per CT entry, and logs a precertificate alongside its final
+/// leaf, so several rows routinely collapse into a single certificate. Without
+/// this the run is simply short, and a full window reads as "that is all there
+/// is" — the one thing it does not mean.
+///
+/// The counts are run totals, so with several terms they only add up once
+/// `--limit` is understood to be per term — hence the parenthetical, and hence
+/// naming the terms that actually filled. Left unqualified, a two-term run
+/// could report "11 identity rows" under "--limit 10" and send the reader off
+/// to reconcile a contradiction that is not there.
+fn saturation_note<T>(limit: i64, terms: &[String], report: &Report<T>) -> String {
+    // One term is its own answer: naming it would only repeat the command.
+    let (per_term, filled) = if terms.len() == 1 {
+        (String::new(), String::new())
+    } else {
+        (
+            " (per term)".to_string(),
+            format!(" for {}", quoted(&report.saturated)),
+        )
+    };
+    let (raw, certs) = (report.raw_rows, report.rows.len());
+    format!(
+        "note: --limit {limit}{per_term} filled the server-side row window{filled}; \
+         {raw} identity {rows} collapsed to {certs} {cert}. Raise --limit for \
+         more, or --no-dedupe for the raw rows.",
+        rows = plural(raw, "row"),
+        cert = plural(certs, "certificate"),
+    )
+}
+
+/// English plural, so a one-certificate result does not read "1 certificates".
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
 /// The `--limit` caveat, which reads differently once more than one domain is
 /// in play because the limit applies to each of them.
 fn limit_note(domains: &[String]) -> &'static str {
@@ -254,6 +302,105 @@ fn limit_note(domains: &[String]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `saturated` defaults to every term; `note_for_filled` sets it apart.
+    fn note_for(limit: i64, terms: &[&str], certs: usize, raw_rows: usize) -> String {
+        note_for_filled(limit, terms, terms, certs, raw_rows)
+    }
+
+    fn note_for_filled(
+        limit: i64,
+        terms: &[&str],
+        saturated: &[&str],
+        certs: usize,
+        raw_rows: usize,
+    ) -> String {
+        let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+        saturation_note(
+            limit,
+            &terms,
+            &Report {
+                rows: vec![(); certs],
+                raw_rows,
+                saturated: saturated.iter().map(|t| t.to_string()).collect(),
+            },
+        )
+    }
+
+    /// The note is the whole feature. It has to name the flag that caused the
+    /// shortfall, both counts, and the two ways out — a user who is told only
+    /// that the result is short is exactly as stuck as before.
+    #[test]
+    fn the_saturation_note_names_the_limit_both_counts_and_the_way_out() {
+        let note = note_for(10, &["example.com"], 2, 10);
+        assert!(note.contains("--limit 10"), "{note}");
+        assert!(note.contains("10 identity rows"), "{note}");
+        assert!(note.contains("2 certificates"), "{note}");
+        assert!(note.contains("--no-dedupe"), "{note}");
+    }
+
+    /// `--limit` is per term, so with two names the ceiling being hit is not
+    /// the number typed — it is that number over again for each name. Saying
+    /// "--limit 10" flat would send someone looking for ten rows that are not
+    /// the ones they are missing.
+    #[test]
+    fn the_saturation_note_says_per_term_only_when_there_is_more_than_one() {
+        assert!(
+            note_for(10, &["example.com", "example.org"], 3, 20).contains("--limit 10 (per term)"),
+        );
+        assert!(
+            !note_for(10, &["example.com"], 2, 10).contains("per term"),
+            "one term is not per-term"
+        );
+    }
+
+    /// Saturation is per term, and the counts are run totals, so a multi-term
+    /// note has to name the term that actually filled — it is the one to raise
+    /// the limit for, and telling someone to widen a two-name search without
+    /// saying which half is no better than not telling them at all.
+    ///
+    /// The totals are also why the parenthetical matters: 11 rows reported
+    /// under `--limit 10` is a contradiction until the limit is understood to
+    /// be per term.
+    #[test]
+    fn a_multi_term_note_names_only_the_terms_that_filled() {
+        let note = note_for_filled(
+            10,
+            &["busy.example", "quiet.example"],
+            &["busy.example"],
+            4,
+            11,
+        );
+        assert!(note.contains("--limit 10 (per term)"), "{note}");
+        assert!(note.contains("for \"busy.example\""), "{note}");
+        assert!(
+            !note.contains("quiet.example"),
+            "a term that never filled must not be named: {note}"
+        );
+        assert!(
+            note.contains("11 identity rows collapsed to 4 certificates"),
+            "{note}"
+        );
+    }
+
+    /// A single term is its own answer, so naming it would only repeat back the
+    /// command that was just typed.
+    #[test]
+    fn a_single_term_note_does_not_name_the_term() {
+        let note = note_for(10, &["example.com"], 2, 10);
+        assert!(!note.contains("example.com"), "{note}");
+    }
+
+    /// One surviving certificate is the sharpest form of the surprise, and the
+    /// likeliest to be read as "there is nothing here".
+    #[test]
+    fn the_saturation_note_stays_singular_for_one_certificate() {
+        let note = note_for(6, &["example.com"], 1, 6);
+        assert!(
+            note.contains("6 identity rows collapsed to 1 certificate."),
+            "{note}"
+        );
+    }
 
     /// clap exits 2 on a usage error and we do not control that number, so the
     /// only way "no such certificate" stays distinguishable from "you typed the
