@@ -96,6 +96,51 @@ impl RawRow {
     }
 }
 
+/// What a fetch returned, and whether the server-side row window filled up.
+///
+/// The flag is the difference between "crt.sh holds nothing more" and
+/// "`--limit` stopped early", which the row count alone cannot tell apart once
+/// [`to_rows`] has collapsed it.
+#[derive(Debug)]
+pub struct Fetched {
+    pub rows: Vec<RawRow>,
+    /// The terms whose window came back full.
+    ///
+    /// Names rather than a flag, because `--limit` is per term: one busy term
+    /// fills its window while the rest come back short, and it is that term
+    /// the limit has to be raised for. A bare `true` would leave the caller
+    /// telling someone to widen a search without saying which half of it.
+    pub saturated: Vec<String>,
+}
+
+/// A finished report, plus enough of what it cost to build for the caller to
+/// tell a short answer from a truncated one.
+pub struct Report<T> {
+    pub rows: Vec<T>,
+    /// Identity rows the window held, before [`to_rows`] collapsed them.
+    pub raw_rows: usize,
+    /// The terms that filled their `--limit` window.
+    pub saturated: Vec<String>,
+}
+
+impl<T> Report<T> {
+    /// Whether this result is short because the row window filled, rather than
+    /// because crt.sh holds nothing more.
+    ///
+    /// `--limit` bounds identity rows, not certificates, and the collapse in
+    /// [`to_rows`] runs only after the server has already spent the window. A
+    /// full window that then collapses is indistinguishable, from the output
+    /// alone, from a name that genuinely has a handful of certificates — which
+    /// is the confusion this exists to name.
+    ///
+    /// Both halves are required. A full window that collapsed nothing handed
+    /// the caller exactly the rows they asked for, and a window that never
+    /// filled has nothing behind it to report.
+    pub fn window_hid_certificates(&self) -> bool {
+        !self.saturated.is_empty() && self.rows.len() < self.raw_rows
+    }
+}
+
 /// Run an identity statement once per term and collect every row it returns.
 ///
 /// One statement per term, in sequence, for the reasons CONTRIBUTING.md
@@ -108,19 +153,25 @@ impl RawRow {
 ///
 /// `$1` is always the term. `extra` binds `$2` onwards and is the same for
 /// every term — `search` and `expiring` differ only there.
+///
+/// `limit` is the row cap the caller has already bound inside `extra`, passed
+/// again because `extra` is opaque here and a full window has to be recognised
+/// to be reported.
 pub async fn fetch_by_term(
     source: &mut Source,
     cache: &Cache,
     terms: &[String],
     sql: &str,
     extra: &[(&(dyn ToSql + Sync), Type)],
-) -> Result<Vec<RawRow>> {
+    limit: i64,
+) -> Result<Fetched> {
     // The bind parameters past `$1` are identical for every term, so they are
     // rendered once and shared by every key built below.
     let params_key: Vec<String> = extra.iter().map(|(v, _)| format!("{v:?}")).collect();
     let target = source.target()?;
 
     let mut raw = Vec::new();
+    let mut saturated = Vec::new();
     for term in terms {
         let key = Key {
             target: target.clone(),
@@ -129,6 +180,11 @@ pub async fn fetch_by_term(
             params: params_key.clone(),
         };
         if let Some(hit) = cache.get_rows(&key) {
+            // The limit is part of the key, so a hit was written under this
+            // same cap and its length means what a fresh fetch's would.
+            if hit.len() as i64 >= limit {
+                saturated.push(term.clone());
+            }
             raw.extend(hit);
             continue;
         }
@@ -147,9 +203,15 @@ pub async fn fetch_by_term(
             fetched.push(RawRow::from_pg(row)?);
         }
         cache.put(&key, &fetched);
+        if fetched.len() as i64 >= limit {
+            saturated.push(term.clone());
+        }
         raw.extend(fetched);
     }
-    Ok(raw)
+    Ok(Fetched {
+        rows: raw,
+        saturated,
+    })
 }
 
 /// Collapse raw identity rows into one row per certificate.
@@ -273,13 +335,25 @@ mod tests {
         }
 
         let limit: i32 = 365;
-        let rows = fetch_by_term(&mut source, &cache, &terms, sql, &[(&limit, Type::INT4)])
-            .await
-            .expect("a fully cached run must not need a connection");
+        let fetched = fetch_by_term(
+            &mut source,
+            &cache,
+            &terms,
+            sql,
+            &[(&limit, Type::INT4)],
+            100,
+        )
+        .await
+        .expect("a fully cached run must not need a connection");
 
+        let rows = fetched.rows;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].matched_identity, "a.example");
         assert_eq!(rows[1].matched_identity, "b.example");
+        assert!(
+            fetched.saturated.is_empty(),
+            "one row per term is nowhere near the cap"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -300,12 +374,82 @@ mod tests {
             &["uncached.example".to_string()],
             "SELECT 1",
             &[(&limit, Type::INT4)],
+            100,
         )
         .await
         .expect_err("a miss must not be reported as an empty result");
         assert!(
             format!("{err:#}").contains("127.0.0.1:1"),
             "the failure should name the target it could not reach, got: {err:#}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The note exists because a full window and a genuinely small result look
+    /// identical in the output, so both halves of the condition carry weight.
+    /// All three cases are pinned: dropping either half of the `&&` leaves one
+    /// of these failing rather than the whole suite green.
+    #[test]
+    fn only_a_full_window_that_collapsed_is_worth_a_note() {
+        let report = |certs: usize, raw_rows: usize, saturated: bool| Report {
+            rows: vec![(); certs],
+            raw_rows,
+            saturated: if saturated {
+                vec!["example.com".to_string()]
+            } else {
+                Vec::new()
+            },
+        };
+        // 10 identity rows in, 2 certificates out, window full: the reported bug.
+        assert!(report(2, 10, true).window_hid_certificates());
+        // Full window, nothing collapsed: the caller got the rows they asked for.
+        assert!(!report(10, 10, true).window_hid_certificates());
+        // Collapsed, but the window never filled: nothing is behind it to find.
+        assert!(!report(2, 10, false).window_hid_certificates());
+    }
+
+    /// A cache hit has to recognise a full window the same way a fresh fetch
+    /// does. The limit is part of the key, so a hit was written under this same
+    /// cap and its length means the same thing — but the flag is set on a
+    /// separate code path, and skipping it would make the note appear only on
+    /// the first run of a query and never again.
+    #[tokio::test]
+    async fn a_cached_full_window_is_still_reported_as_saturated() {
+        let dir = std::env::temp_dir().join(format!("crt-query-cache-sat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::at(dir.clone(), Mode::Enabled, crate::cache::DEFAULT_TTL);
+
+        let sql = "SELECT 1";
+        let limit: i32 = 365;
+        let mut source = unreachable_source();
+        cache.put(
+            &Key {
+                target: source.target().unwrap(),
+                sql: sql.to_string(),
+                term: "example.com".to_string(),
+                params: vec!["365".to_string()],
+            },
+            &vec![cached_row("example.com"); 3],
+        );
+
+        let fetched = fetch_by_term(
+            &mut source,
+            &cache,
+            &["example.com".to_string()],
+            sql,
+            &[(&limit, Type::INT4)],
+            3,
+        )
+        .await
+        .expect("a cached run must not need a connection");
+
+        assert_eq!(fetched.rows.len(), 3);
+        assert_eq!(
+            fetched.saturated,
+            vec!["example.com".to_string()],
+            "three rows against a cap of three is a full window, and the note \
+             needs the name of the term that filled it"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
