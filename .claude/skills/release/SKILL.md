@@ -7,7 +7,7 @@ argument-hint: "[bump type: patch, minor, major]"
 # Release — bump → lockfile → changelog → PR → tag → draft → publish
 
 The pipeline: release PR onto `main` → annotated `vX.Y.Z` tag on the **merge commit** →
-`.github/workflows/release.yml` builds four target binaries and assembles a **draft** release with
+`.github/workflows/release.yml` builds five target binaries and assembles a **draft** release with
 `SHA256SUMS` → a human publishes it. Publishing is the only step that reaches users.
 
 `main` is protected — never commit to it directly; everything lands via the release PR.
@@ -74,7 +74,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha>   # the MERGE COMMIT on main, not the 
 git push origin vX.Y.Z
 ```
 
-The tag push triggers `release.yml`: `guard` (tag ↔ manifest ↔ changelog) → a 4-target build matrix
+The tag push triggers `release.yml`: `guard` (tag ↔ manifest ↔ changelog) → a 5-target build matrix
 → a **draft** release.
 
 ## 7. Verify the draft
@@ -83,9 +83,11 @@ The tag push triggers `release.yml`: `guard` (tag ↔ manifest ↔ changelog) �
 gh release view vX.Y.Z --json isDraft,assets
 ```
 
-Expect five assets:
+Expect six assets — the count follows the build matrix in `release.yml`, so update this list when
+that changes:
 
 - `crt-query-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- `crt-query-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
 - `crt-query-vX.Y.Z-aarch64-apple-darwin.tar.gz`
 - `crt-query-vX.Y.Z-x86_64-apple-darwin.tar.gz`
 - `crt-query-vX.Y.Z-x86_64-pc-windows-msvc.zip`
@@ -93,6 +95,16 @@ Expect five assets:
 
 Sanity-check the notes rendered on the draft against `CHANGELOG.md`, and confirm `SHA256SUMS` lists
 every archive. Download one archive and run the binary's `--version` if anything looks off.
+
+Since v0.4.0 every archive also carries a build-provenance attestation. Check one:
+
+```sh
+gh attestation verify <archive> --repo tiredithumans/crt-query
+```
+
+It prints nothing when stdout is not a terminal, so read the **exit code**, not the output. If you
+want to be sure the check is live rather than vacuous, run it against a wrong `--repo` and confirm
+that fails.
 
 ## 8. Publish — ONLY on explicit human instruction
 
@@ -102,6 +114,22 @@ gh release edit vX.Y.Z --draft=false --latest
 
 Never `gh release create`: the workflow already made the draft, and a second release would bypass
 the assembled assets and checksums.
+
+## 9. Regenerate the Homebrew formula
+
+`generate.sh` copies every checksum out of the release's own `SHA256SUMS`, fetched over the public
+download URL — which serves nothing for a draft. So this runs **after** publishing, never before:
+
+```sh
+just homebrew-formula        # defaults to the latest release
+```
+
+Then copy `packaging/homebrew/crt-query.rb` into the tap repository as `Formula/crt-query.rb`. Until
+that lands, `brew install` still serves the previous version.
+
+Homebrew runs the installed binary at install time (`generate_completions_from_executable`) and again
+in `test do`, so the formula must only call subcommands that exist in the release it points at —
+never one that only exists on `main`.
 
 ## Re-cut pattern (broken draft, not yet published)
 
