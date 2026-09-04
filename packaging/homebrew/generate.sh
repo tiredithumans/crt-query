@@ -3,6 +3,10 @@
 #
 #   packaging/homebrew/generate.sh [vX.Y.Z]   (default: the latest release)
 #
+# Release.yml's `tap` job runs this on `release: published` and pushes the
+# result to the tap, so a normal release needs no manual run. This stays the
+# fallback, and the way to inspect what the formula will say before a release.
+#
 # Every checksum in the formula is copied straight out of the release's
 # SHA256SUMS, so the formula cannot drift from the archives it points at, and
 # nothing here has to be typed by hand at release time.
@@ -95,10 +99,12 @@ fi
 cat > "$OUT" <<RUBY
 # Homebrew formula for crt-query. GENERATED — do not edit by hand.
 #
-# Regenerate after a release with \`just homebrew-formula\`, then copy this
-# file into the tap repository as Formula/crt-query.rb. The tap has to be a
-# PUBLIC repo named homebrew-tap for
-# \`brew install tiredithumans/tap/crt-query\` to resolve.
+# Written by the \`tap\` job in release.yml over in
+# $REPO, which regenerates this from the published
+# SHA256SUMS on \`release: published\` and pushes it here. Reproduce it by hand
+# with \`just homebrew-formula\` in that repo. The tap has to be a PUBLIC repo
+# named homebrew-tap for \`brew install tiredithumans/tap/crt-query\` to
+# resolve.
 #
 # A binary formula, not a source build: it installs the very archives the
 # release publishes, checked against the same SHA256SUMS a manual install
