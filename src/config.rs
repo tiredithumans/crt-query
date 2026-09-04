@@ -315,6 +315,46 @@ mod tests {
         );
     }
 
+    /// `resolve` folds five settings; the helpers above vary only `host` and
+    /// `db_url`, hardcoding port/dbname/user to None, so nothing exercised
+    /// their precedence. Deleting a fallback is caught by clippy's dead-field
+    /// lint, but an *inversion* — `file.port.or(cli.port)` — passes cargo test,
+    /// clippy at -D warnings and fmt --check, while letting a stale
+    /// config.toml silently override an explicit --port or --user. Against an
+    /// internal mirror also on 5432 that is a successful connection to the
+    /// wrong target, with db::hint suppressed whenever stderr is not a tty.
+    #[test]
+    fn port_dbname_and_user_take_the_cli_then_the_file_then_the_default() {
+        let from_file = || FileConfig {
+            port: Some(2),
+            dbname: Some("file-db".to_string()),
+            user: Some("file-user".to_string()),
+            ..FileConfig::default()
+        };
+        let from_cli = ConnOpts {
+            host: None,
+            port: Some(1),
+            dbname: Some("cli-db".to_string()),
+            user: Some("cli-user".to_string()),
+            db_url: None,
+        };
+
+        let both = resolve(&from_cli, &from_file());
+        assert_eq!(both.port, 1, "an explicit --port must beat the config file");
+        assert_eq!(both.dbname, "cli-db");
+        assert_eq!(both.user, "cli-user");
+
+        let file_only = resolve(&cli(None, None), &from_file());
+        assert_eq!(file_only.port, 2);
+        assert_eq!(file_only.dbname, "file-db");
+        assert_eq!(file_only.user, "file-user");
+
+        let neither = resolve(&cli(None, None), &FileConfig::default());
+        assert_eq!(neither.port, DEFAULT_PORT);
+        assert_eq!(neither.dbname, DEFAULT_DBNAME);
+        assert_eq!(neither.user, DEFAULT_USER);
+    }
+
     #[test]
     fn config_path_lives_under_the_crt_query_directory() {
         let path = config_path_in(Path::new("/home/u/.config"));

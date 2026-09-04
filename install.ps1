@@ -122,7 +122,7 @@ the $label release has no build for ${target}.
 It ships:
 $available
 Build from source instead:
-  cargo install --git https://github.com/$Repo
+  cargo install --locked --git https://github.com/$Repo
 "@
     }
     if ($entry.Count -gt 1) {

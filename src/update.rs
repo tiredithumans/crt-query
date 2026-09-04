@@ -39,7 +39,7 @@ const UPGRADE_HINT: &str = "\
 Upgrade: re-run the install script — it resolves the latest release and \
 verifies its SHA256SUMS.\n  \
 Linux/macOS: curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh\n  \
-From source: cargo install --git https://github.com/tiredithumans/crt-query --force";
+From source: cargo install --locked --git https://github.com/tiredithumans/crt-query --force";
 
 /// The fields used out of GitHub's release object; serde ignores the rest.
 #[derive(Deserialize)]
@@ -238,5 +238,12 @@ mod tests {
     fn the_upgrade_hint_names_a_verifying_path() {
         assert!(UPGRADE_HINT.contains("install.sh"));
         assert!(UPGRADE_HINT.contains("SHA256SUMS"));
+        // `cargo install` re-resolves versions unless told not to, so without
+        // this the from-source route builds a dependency set no gate has seen
+        // — while every justfile recipe and release.yml pass --locked.
+        assert!(
+            UPGRADE_HINT.contains("cargo install --locked"),
+            "the from-source hint must pin the lockfile:\n{UPGRADE_HINT}"
+        );
     }
 }

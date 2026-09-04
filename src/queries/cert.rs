@@ -170,4 +170,52 @@ mod tests {
     fn a_certificate_without_sans_still_writes_one_row() {
         assert_eq!(detail(&[]).csv_rows().len(), 1);
     }
+
+    /// The only Serialize record with no key-set assertion. ExpiringRow's is
+    /// pinned in expiring.rs (transitively pinning SearchRow's eight through
+    /// `#[serde(flatten)]`) and UpdateStatus's in output.rs. A plain field
+    /// rename compiles — the columns are read by string literal, so the golden
+    /// SQL is untouched — and silently renames a `cert --json` key.
+    #[test]
+    fn the_cert_json_document_keeps_its_ten_keys() {
+        let value = serde_json::to_value(detail_fixture()).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "common_name",
+                "id",
+                "issuer_ca_id",
+                "issuer_name",
+                "not_after",
+                "not_before",
+                "sans",
+                "serial",
+                "sha256_fingerprint",
+                "subject",
+            ],
+            "the `cert --json` shape changed"
+        );
+    }
+
+    fn detail_fixture() -> CertDetail {
+        CertDetail {
+            id: 1,
+            issuer_ca_id: Some(1),
+            issuer_name: Some("Test CA".to_string()),
+            subject: Some("CN=example.com".to_string()),
+            common_name: Some("example.com".to_string()),
+            serial: Some("0a".to_string()),
+            not_before: None,
+            not_after: None,
+            sha256_fingerprint: Some("ff".to_string()),
+            sans: vec!["example.com".to_string()],
+        }
+    }
 }

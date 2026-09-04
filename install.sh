@@ -186,7 +186,7 @@ if [ -z "$archive" ]; then
 It ships:
 $available
 Build from source instead:
-  cargo install --git https://github.com/$REPO"
+  cargo install --locked --git https://github.com/$REPO"
 fi
 
 if [ "$(printf '%s\n' "$archive" | wc -l)" -gt 1 ]; then

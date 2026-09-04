@@ -23,9 +23,12 @@ by default, writes no state beyond files you ask for with `--csv`, and the
 Things that are in scope:
 
 - Anything that could execute code or write outside a path the user specified.
-  Note that `check-update` shells out to the system `curl`, resolved through
-  `PATH` — the only external process this tool starts, and the only place a
-  `PATH` entry the user did not intend could get code running.
+  Note that `check-update` shells out to the system `curl` — the only external
+  process this tool starts. On Unix that resolves through `PATH`. On Windows it
+  does not resolve through `PATH` alone: Rust's standard library implements its
+  own search, which looks in the directory containing `crt-query.exe` *before*
+  `System32` and before `PATH`. So a `curl.exe` sitting next to an unpacked
+  `crt-query.exe` wins, whether or not that directory is on `PATH`.
 - Credential disclosure through `--db-url` when pointing the tool at a private
   database — for example a password reaching stderr, a log, or an error message.
 - Injection into the SQL sent to the server. Every user value is bound as a

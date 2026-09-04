@@ -193,11 +193,12 @@ pub fn emit_detail<T: OutputRecord>(record: &T, out: &OutputOpts) -> Result<()> 
         return write_json(record);
     }
     let mut table = new_table(out);
-    for (header, cell) in T::headers().iter().zip(cells) {
-        table.add_row(vec![
-            (*header).to_string(),
-            display_safe(&cell).into_owned(),
-        ]);
+    // Through `display_safe_row`, the same helper `build_table` uses, rather
+    // than calling `display_safe` again here: this is the only view that
+    // renders Subject and SANs, and a second sanitising path is one nothing
+    // was covering.
+    for (header, cell) in T::headers().iter().zip(display_safe_row(cells)) {
+        table.add_row(vec![(*header).to_string(), cell]);
     }
     print_table(&table)
 }
@@ -920,6 +921,78 @@ mod tests {
     fn the_c1_range_is_already_covered_by_is_control() {
         for c in '\u{80}'..='\u{9f}' {
             assert!(c.is_control(), "U+{:04X} is no longer Cc", c as u32);
+        }
+    }
+
+    /// `emit_missing` is called only from the exit-3 path in main.rs and by no
+    /// test, so reducing it to `Ok(())` passed everything — while it alone
+    /// upholds the documented "always write the file, header-only when empty"
+    /// contract. Combined with precheck_csv leaving a pre-existing file in
+    /// place, a regression means a scheduled job silently re-reads yesterday's
+    /// report for a certificate that no longer resolves.
+    #[test]
+    fn emit_missing_still_writes_a_header_only_report() {
+        let dir = std::env::temp_dir().join(format!("crt-query-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("missing.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let out = OutputOpts {
+            json: false,
+            csv: Some(path.clone()),
+            width: None,
+        };
+        emit_missing::<SearchRow>(&out, 3).unwrap();
+
+        let written = std::fs::read_to_string(&path).expect("a report was promised");
+        let mut lines = written.lines();
+        assert_eq!(
+            lines.next(),
+            Some(SearchRow::headers().join(",").as_str()),
+            "the header row is the contract a consumer parses"
+        );
+        assert_eq!(lines.next(), None, "a not-found report has no data rows");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `emit_detail` is the only view that renders Subject and SANs, and it
+    /// sanitised on a path of its own that no test exercised.
+    #[test]
+    fn the_detail_view_sanitises_its_cells_too() {
+        struct Hostile;
+        impl Serialize for Hostile {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str("hostile")
+            }
+        }
+        impl OutputRecord for Hostile {
+            fn headers() -> &'static [&'static str] {
+                &["Subject", "SANs"]
+            }
+            fn cells(&self) -> Vec<String> {
+                vec![
+                    "evil\u{1b}[31m".to_string(),
+                    "carriage\rreturn\u{202e}flip".to_string(),
+                ]
+            }
+        }
+        let mut table = new_table(&opts(None));
+        for (header, cell) in Hostile::headers()
+            .iter()
+            .zip(display_safe_row(Hostile.cells()))
+        {
+            table.add_row(vec![(*header).to_string(), cell]);
+        }
+        let rendered = table.to_string();
+        for (name, c) in [
+            ("ESC", '\u{1b}'),
+            ("CR", '\r'),
+            ("RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
+        ] {
+            assert!(
+                !rendered.contains(c),
+                "{name} reached the detail table:\n{rendered:?}"
+            );
         }
     }
 
