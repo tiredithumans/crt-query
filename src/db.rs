@@ -29,9 +29,20 @@ const RETRY_DELAY: Duration = Duration::from_secs(2);
 /// This bound is for the case where nothing comes back at all.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Ceiling on one connection attempt, including the startup exchange that
-/// `connect_timeout` leaves uncovered.
+/// Ceiling on one connection attempt, including the name resolution and
+/// startup exchange that `connect_timeout` leaves uncovered.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What `tokio-postgres` applies to a single TCP connect.
+///
+/// Named rather than left inline because it is the one bound in this file that
+/// is not the whole story, and the ordering against `CONNECT_TIMEOUT` reads
+/// like a guarantee it does not give: the driver applies this *per resolved
+/// address*, inside a loop over hosts and another over the addresses each host
+/// resolves to, and `lookup_host` is not covered at all. So an attempt against
+/// a multi-address host costs up to 10s x N, which is why `CONNECT_TIMEOUT`
+/// wraps the whole thing rather than trusting this to bound it.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A connected client plus whatever killed its connection task, if anything.
 pub struct Db {
@@ -87,53 +98,76 @@ impl Db {
     }
 
     fn explain(&self, err: tokio_postgres::Error) -> anyhow::Error {
-        // A SQLSTATE the server actually sent is authoritative and more
-        // specific than anything the connection task can say, so it is checked
-        // first; the dead-connection cause explains the no-SQLSTATE case,
-        // where the server never answered at all.
-        let context = match err.code() {
-            Some(&SqlState::QUERY_CANCELED) => {
-                "the crt.sh guest database cancelled the query (statement timeout); \
-                 try a more specific search term or a lower --limit"
-                    .to_string()
-            }
-            Some(&SqlState::TOO_MANY_CONNECTIONS) => {
-                "the crt.sh guest database is at its connection limit; \
-                 wait a moment and retry"
-                    .to_string()
-            }
-            Some(&SqlState::ADMIN_SHUTDOWN)
-            | Some(&SqlState::CRASH_SHUTDOWN)
-            | Some(&SqlState::CONNECTION_FAILURE)
-            | Some(&SqlState::CONNECTION_DOES_NOT_EXIST) => {
-                format!(
-                    "{} closed the connection mid-query; retry in a moment",
-                    self.target
-                )
-            }
-            // No SQLSTATE: the server never answered. If the connection task
-            // recorded why the socket died, that is the real cause.
-            None => match self.conn_err.get() {
-                Some(cause) => format!(
-                    "lost the connection to {} mid-query ({cause}); the guest database \
-                     is shared and drops connections under load — retry in a moment",
-                    self.target
-                ),
-                None if err.is_closed() => format!(
-                    "the connection to {} was closed mid-query; retry in a moment",
-                    self.target
-                ),
-                None => return anyhow::Error::new(err),
-            },
-            _ => return anyhow::Error::new(err),
-        };
-        anyhow::Error::new(err).context(context)
+        match explain_context(
+            err.code(),
+            self.conn_err.get().map(String::as_str),
+            err.is_closed(),
+            &self.target,
+        ) {
+            Some(context) => anyhow::Error::new(err).context(context),
+            None => anyhow::Error::new(err),
+        }
+    }
+}
+
+/// Translate a query failure into something actionable, or `None` to let the
+/// raw error stand.
+///
+/// Split from [`Db::explain`] so it can be tested: `tokio_postgres::Error`
+/// exposes no public constructor carrying a SQLSTATE, so every arm below was
+/// reachable only from a live server. Returning `None` rather than a fallback
+/// string is deliberate — an unmapped SQLSTATE is better read raw than
+/// wrapped in a guess.
+///
+/// A SQLSTATE the server actually sent is authoritative and more specific than
+/// anything the connection task can say, so it is checked first; the
+/// dead-connection cause explains the no-SQLSTATE case, where the server never
+/// answered at all.
+fn explain_context(
+    code: Option<&SqlState>,
+    conn_err: Option<&str>,
+    is_closed: bool,
+    target: &str,
+) -> Option<String> {
+    match code {
+        Some(&SqlState::QUERY_CANCELED) => Some(
+            "the crt.sh guest database cancelled the query (statement timeout); \
+             try a more specific search term or a lower --limit"
+                .to_string(),
+        ),
+        Some(&SqlState::TOO_MANY_CONNECTIONS) => Some(
+            "the crt.sh guest database is at its connection limit; \
+             wait a moment and retry"
+                .to_string(),
+        ),
+        Some(&SqlState::ADMIN_SHUTDOWN)
+        | Some(&SqlState::CRASH_SHUTDOWN)
+        | Some(&SqlState::CONNECTION_FAILURE)
+        | Some(&SqlState::CONNECTION_DOES_NOT_EXIST) => Some(format!(
+            "{target} closed the connection mid-query; retry in a moment"
+        )),
+        // No SQLSTATE: the server never answered. If the connection task
+        // recorded why the socket died, that is the real cause.
+        None => match conn_err {
+            Some(cause) => Some(format!(
+                "lost the connection to {target} mid-query ({cause}); the guest database \
+                 is shared and drops connections under load — retry in a moment"
+            )),
+            None if is_closed => Some(format!(
+                "the connection to {target} was closed mid-query; retry in a moment"
+            )),
+            None => None,
+        },
+        _ => None,
     }
 }
 
 fn build_config(conn: &Conn) -> Result<Config> {
     let mut config = match &conn.db_url {
-        Some(url) => url.parse::<Config>().context("invalid --db-url")?,
+        // The context names where the URL came from. Hardcoding `--db-url` gave
+        // a bad `db_url` in the config file a message naming a flag the user
+        // never typed, and no path to go and edit.
+        Some((url, source)) => url.parse::<Config>().with_context(|| source.describe())?,
         None => {
             let mut c = Config::new();
             c.host(&conn.host)
@@ -144,22 +178,29 @@ fn build_config(conn: &Conn) -> Result<Config> {
         }
     };
     config
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(TCP_CONNECT_TIMEOUT)
         .application_name("crt-query");
     Ok(config)
 }
 
-/// Host and port for user-facing messages. Derived from the parsed config so
-/// that a password embedded in `--db-url` never reaches stderr or a CI log.
-fn target(config: &Config) -> String {
-    let host = match config.get_hosts().first() {
+/// The host a config points at. Derived from the parsed config so that a
+/// password embedded in a `db_url` never reaches stderr or a CI log.
+///
+/// Also what decides whether the advice written about the shared guest
+/// database applies at all — see [`connect_advice`].
+fn host_of(config: &Config) -> String {
+    match config.get_hosts().first() {
         Some(Host::Tcp(h)) => h.clone(),
         #[cfg(unix)]
         Some(Host::Unix(path)) => path.display().to_string(),
         None => "<no host>".to_string(),
-    };
+    }
+}
+
+/// Host and port for user-facing messages.
+fn target(config: &Config) -> String {
     let port = config.get_ports().first().copied().unwrap_or(5432);
-    format!("{host}:{port}")
+    format!("{}:{port}", host_of(config))
 }
 
 /// Full `source` chain of a connection error. `tokio_postgres::Error` renders
@@ -182,18 +223,78 @@ fn chain(err: &tokio_postgres::Error) -> String {
 /// three times, so retrying only delays the error the caller has to read —
 /// with two misleading "retrying..." lines in front of it.
 fn worth_retrying(err: &tokio_postgres::Error) -> bool {
-    match err.code() {
+    worth_retrying_parts(err.code(), &err.to_string())
+}
+
+/// The decision, split from the `tokio_postgres::Error` that carries it.
+///
+/// `tokio_postgres::Error` has no public constructor that carries a SQLSTATE,
+/// so a test cannot build the input this rule consumes. Taking the two fields
+/// the rule actually reads makes it reachable — and the old test could only
+/// assert that `INVALID_PASSWORD.code()` starts with "28", a property of the
+/// PostgreSQL spec rather than of anything decided here.
+fn worth_retrying_parts(code: Option<&SqlState>, rendered: &str) -> bool {
+    match code {
         // Class 28 — invalid authorization specification.
         Some(code) if code.code().starts_with("28") => false,
         Some(&SqlState::INVALID_CATALOG_NAME) => false,
-        _ => true,
+        Some(_) => true,
+        // No SQLSTATE means the server never answered — usually load, which is
+        // what the retries are for. But a connection setting that is wrong on
+        // this side never reaches a server at all, and is decided identically
+        // three times: `postgresql:///certwatch` with no host, mismatched
+        // host/port lists, a missing password. tokio-postgres gives those no
+        // code either, so the rendered text is the only thing separating them,
+        // and without this they burned the full retry budget behind two
+        // misleading "retrying..." lines — exactly what this function's doc
+        // comment above says it exists to prevent.
+        None => !is_client_config_error(rendered),
+    }
+}
+
+/// Whether an error with no SQLSTATE is the caller's configuration rather than
+/// the network. These are the two shapes `tokio-postgres` renders for it.
+fn is_client_config_error(rendered: &str) -> bool {
+    rendered.starts_with("invalid configuration")
+        || rendered.starts_with("invalid connection string")
+}
+
+/// Why the connect loop stopped, which is what decides the closing advice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// Every attempt was spent.
+    Exhausted,
+    /// A deterministic failure; further attempts were pointless.
+    Fatal,
+}
+
+/// Closing context for a run of failed connection attempts.
+///
+/// The overload line is for the case it names — attempts spent against the
+/// shared guest database — and for nothing else. It used to be attached
+/// unconditionally, including on the `Fatal` break, so a rejected password
+/// against a host the caller chose themselves was answered with "the crt.sh
+/// guest database is shared and may be overloaded": advice they cannot act on,
+/// printed in front of the SQLSTATE that named the real problem.
+fn connect_advice(target: &str, host: &str, ending: Ending) -> String {
+    match ending {
+        Ending::Fatal => format!("could not connect to {target}"),
+        Ending::Exhausted if host == crate::config::DEFAULT_HOST => format!(
+            "could not connect to {target} after {CONNECT_ATTEMPTS} attempts; the crt.sh \
+             guest database is shared and may be overloaded — wait a moment and retry"
+        ),
+        Ending::Exhausted => {
+            format!("could not connect to {target} after {CONNECT_ATTEMPTS} attempts")
+        }
     }
 }
 
 pub async fn connect(conn: &Conn) -> Result<Db> {
     let config = build_config(conn)?;
     let target = target(&config);
+    let host = host_of(&config);
     let mut last_err: Option<anyhow::Error> = None;
+    let mut ending = Ending::Exhausted;
     for attempt in 1..=CONNECT_ATTEMPTS {
         // NoTls: the guest DB serves public read-only data with passwordless
         // auth. Switch to tokio-postgres-rustls if transport privacy is needed.
@@ -204,9 +305,13 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
         let attempted = match tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await {
             Ok(result) => result,
             Err(_) => {
+                // Not "connected, but the startup exchange never completed":
+                // this bound also spans name resolution and every TCP connect
+                // the host resolves to, so naming one phase asserts something
+                // the timeout cannot distinguish.
                 let stalled = anyhow::anyhow!(
-                    "no response from {target} within {}s (connected, but the startup \
-                     exchange never completed)",
+                    "no response from {target} within {}s (name resolution, connect \
+                     or the startup exchange did not complete)",
                     CONNECT_TIMEOUT.as_secs()
                 );
                 if attempt < CONNECT_ATTEMPTS {
@@ -247,22 +352,19 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
                 let fatal = !retryable;
                 last_err = Some(anyhow::Error::new(e));
                 if fatal {
+                    ending = Ending::Fatal;
                     break;
                 }
             }
         }
     }
-    Err(last_err.expect("at least one attempt")).with_context(|| {
-        format!(
-            "could not connect to {target}; the crt.sh guest database is shared \
-             and may be overloaded — wait a moment and retry"
-        )
-    })
+    Err(last_err.expect("at least one attempt")).context(connect_advice(&target, &host, ending))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DbUrlSource;
 
     fn conn(db_url: Option<&str>) -> Conn {
         Conn {
@@ -270,7 +372,7 @@ mod tests {
             port: 5432,
             dbname: "certwatch".to_string(),
             user: "guest".to_string(),
-            db_url: db_url.map(str::to_string),
+            db_url: db_url.map(|u| (u.to_string(), DbUrlSource::Flag)),
         }
     }
 
@@ -309,6 +411,11 @@ mod tests {
         // And a connection attempt must not be able to outlast the whole
         // retry budget it is one third of.
         assert!(CONNECT_TIMEOUT < QUERY_TIMEOUT);
+        // The per-address TCP bound sits under the whole-attempt bound. Note
+        // this ordering alone does not bound an attempt: tokio-postgres applies
+        // TCP_CONNECT_TIMEOUT once per resolved address, so CONNECT_TIMEOUT is
+        // what actually caps the total.
+        assert!(TCP_CONNECT_TIMEOUT < CONNECT_TIMEOUT);
     }
 
     #[test]
@@ -316,15 +423,148 @@ mod tests {
         // Retrying is for load and transport. A password the server rejected
         // will be rejected identically twice more, so retrying only buries the
         // real error under two misleading "retrying..." lines.
+        //
+        // This calls the decision function. The version that asserted
+        // `INVALID_PASSWORD.code().starts_with("28")` pinned the PostgreSQL
+        // spec, not this rule: flipping the prefix here to "29" left it green.
+        for code in [
+            SqlState::INVALID_PASSWORD,
+            SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+            SqlState::INVALID_CATALOG_NAME,
+        ] {
+            assert!(
+                !worth_retrying_parts(Some(&code), "db error"),
+                "{code:?} is deterministic and must not be retried"
+            );
+        }
+    }
+
+    #[test]
+    fn the_authorization_class_prefix_still_means_what_it_did() {
+        // A canary for the `starts_with("28")` above, which is the whole of
+        // what separates a rejected password from three attempts.
         for code in [
             SqlState::INVALID_PASSWORD,
             SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
         ] {
             assert!(
                 code.code().starts_with("28"),
-                "{code:?} is no longer class 28; worth_retrying needs updating"
+                "{code:?} is no longer class 28; worth_retrying_parts needs updating"
             );
         }
         assert_eq!(SqlState::INVALID_CATALOG_NAME.code(), "3D000");
+    }
+
+    #[test]
+    fn load_and_transport_failures_are_retried() {
+        assert!(worth_retrying_parts(
+            Some(&SqlState::TOO_MANY_CONNECTIONS),
+            "db error"
+        ));
+        assert!(worth_retrying_parts(
+            Some(&SqlState::CONNECTION_FAILURE),
+            "db error"
+        ));
+        assert!(worth_retrying_parts(
+            None,
+            "error connecting to server: Connection refused (os error 61)"
+        ));
+    }
+
+    #[test]
+    fn a_client_side_configuration_error_is_not_retried() {
+        // No SQLSTATE, because no server ever saw these: a URL with no host,
+        // mismatched host/port lists, a missing password. They fall in the
+        // same `code() == None` bucket as a dropped socket and used to burn
+        // the whole retry budget behind two misleading "retrying..." lines.
+        // The rendered prefix is the only thing telling them apart — both
+        // spellings verified against tokio-postgres 0.7.18.
+        for rendered in ["invalid configuration", "invalid connection string"] {
+            assert!(
+                !worth_retrying_parts(None, rendered),
+                "{rendered:?} cannot succeed on a second attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn each_mapped_sqlstate_explains_itself() {
+        let cancelled =
+            explain_context(Some(&SqlState::QUERY_CANCELED), None, false, "crt.sh:5432").unwrap();
+        assert!(cancelled.contains("statement timeout"), "{cancelled}");
+        assert!(cancelled.contains("--limit"), "{cancelled}");
+
+        let busy = explain_context(
+            Some(&SqlState::TOO_MANY_CONNECTIONS),
+            None,
+            false,
+            "crt.sh:5432",
+        )
+        .unwrap();
+        assert!(busy.contains("connection limit"), "{busy}");
+
+        let shutdown = explain_context(
+            Some(&SqlState::ADMIN_SHUTDOWN),
+            None,
+            false,
+            "db.internal:6432",
+        )
+        .unwrap();
+        assert!(shutdown.contains("db.internal:6432"), "{shutdown}");
+        assert!(shutdown.contains("closed the connection"), "{shutdown}");
+    }
+
+    #[test]
+    fn an_unmapped_failure_leaves_the_raw_error_to_speak_for_itself() {
+        // Wrapping an unrecognised SQLSTATE in a guess would bury the one
+        // description that is actually authoritative.
+        assert_eq!(
+            explain_context(Some(&SqlState::SYNTAX_ERROR), None, false, "crt.sh:5432"),
+            None
+        );
+        assert_eq!(explain_context(None, None, false, "crt.sh:5432"), None);
+    }
+
+    #[test]
+    fn the_connection_tasks_cause_beats_a_bare_closed_flag() {
+        let with_cause =
+            explain_context(None, Some("connection reset by peer"), true, "crt.sh:5432").unwrap();
+        assert!(
+            with_cause.contains("connection reset by peer"),
+            "the socket's real cause was dropped: {with_cause}"
+        );
+
+        let bare = explain_context(None, None, true, "crt.sh:5432").unwrap();
+        assert!(bare.contains("was closed mid-query"), "{bare}");
+    }
+
+    #[test]
+    fn overload_advice_is_only_offered_where_it_could_be_true() {
+        let guest = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted);
+        assert!(guest.contains("guest database is shared"), "{guest}");
+
+        // A host the caller pointed us at themselves. Telling them to wait out
+        // load on crt.sh is advice about a service they are not talking to.
+        let own = connect_advice("db.internal:6432", "db.internal", Ending::Exhausted);
+        assert!(!own.contains("guest database"), "{own}");
+        assert!(own.contains("db.internal:6432"), "{own}");
+
+        // A rejected password stopped after one attempt; it was never load,
+        // and the SQLSTATE behind this context is what names the real problem.
+        let fatal = connect_advice("crt.sh:5432", "crt.sh", Ending::Fatal);
+        assert!(!fatal.contains("overloaded"), "{fatal}");
+        assert!(!fatal.contains("attempts"), "{fatal}");
+    }
+
+    #[test]
+    fn a_config_file_db_url_names_the_file_and_not_a_flag() {
+        let mut c = conn(Some("not a url"));
+        c.db_url = Some(("not a url".to_string(), DbUrlSource::ConfigFile));
+        let err = format!("{:#}", build_config(&c).unwrap_err());
+        assert!(err.contains("db_url"), "{err}");
+        assert!(
+            !err.contains("--db-url"),
+            "blamed a flag the user never typed: {err}"
+        );
     }
 }

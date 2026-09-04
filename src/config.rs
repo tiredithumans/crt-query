@@ -25,6 +25,31 @@ pub struct FileConfig {
     pub db_url: Option<String>,
 }
 
+/// Where a resolved `db_url` came from.
+///
+/// Carried so that an unparseable one can name the thing the caller actually
+/// set. The error context was hardcoded to `--db-url`, so a bad `db_url` in the
+/// config file produced a message byte-identical to the flag case — naming a
+/// flag the user never typed, and no file to go and look at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbUrlSource {
+    Flag,
+    ConfigFile,
+}
+
+impl DbUrlSource {
+    /// How to describe a `db_url` that failed to parse.
+    pub fn describe(self) -> String {
+        match self {
+            Self::Flag => "invalid --db-url".to_string(),
+            Self::ConfigFile => match config_path() {
+                Some(path) => format!("invalid `db_url` in {}", path.display()),
+                None => "invalid `db_url` in the config file".to_string(),
+            },
+        }
+    }
+}
+
 /// Fully resolved connection settings, after CLI flags and the config file
 /// have been folded into the built-in defaults.
 #[derive(Debug, Clone)]
@@ -33,7 +58,8 @@ pub struct Conn {
     pub port: u16,
     pub dbname: String,
     pub user: String,
-    pub db_url: Option<String>,
+    /// The URL and where it was set, so a parse failure can name its source.
+    pub db_url: Option<(String, DbUrlSource)>,
 }
 
 /// Where the config file is read from, if a location can be determined at all.
@@ -110,7 +136,15 @@ pub fn load() -> Result<FileConfig> {
 /// `db_url` from either source overrides the individual host/port/dbname/user
 /// settings entirely, mirroring what `--db-url` does on the command line.
 pub fn resolve(cli: &ConnOpts, file: &FileConfig) -> Conn {
-    let db_url = cli.db_url.clone().or_else(|| file.db_url.clone());
+    let db_url = cli
+        .db_url
+        .clone()
+        .map(|url| (url, DbUrlSource::Flag))
+        .or_else(|| {
+            file.db_url
+                .clone()
+                .map(|url| (url, DbUrlSource::ConfigFile))
+        });
     Conn {
         host: cli
             .host
@@ -209,6 +243,12 @@ mod tests {
         }
     }
 
+    /// The URL and its source together: the source is what decides whether a
+    /// parse failure names `--db-url` or the config file.
+    fn url_of(conn: &Conn) -> Option<(&str, DbUrlSource)> {
+        conn.db_url.as_ref().map(|(url, src)| (url.as_str(), *src))
+    }
+
     #[test]
     fn defaults_apply_when_nothing_is_set() {
         let conn = resolve(&cli(None, None), &FileConfig::default());
@@ -244,8 +284,8 @@ mod tests {
             &file(Some("also-ignored.example"), None),
         );
         assert_eq!(
-            conn.db_url.as_deref(),
-            Some("postgresql://u@cli.example/db")
+            url_of(&conn),
+            Some(("postgresql://u@cli.example/db", DbUrlSource::Flag))
         );
     }
 
@@ -255,7 +295,12 @@ mod tests {
             &cli(Some("ignored.example"), None),
             &file(None, Some("postgresql://u@f.example/db")),
         );
-        assert_eq!(conn.db_url.as_deref(), Some("postgresql://u@f.example/db"));
+        assert_eq!(
+            url_of(&conn),
+            Some(("postgresql://u@f.example/db", DbUrlSource::ConfigFile)),
+            "a config-file db_url must be marked as such, or a parse failure \
+             blames a --db-url flag the user never typed"
+        );
     }
 
     #[test]
@@ -265,8 +310,8 @@ mod tests {
             &file(None, Some("postgresql://u@f.example/db")),
         );
         assert_eq!(
-            conn.db_url.as_deref(),
-            Some("postgresql://u@cli.example/db")
+            url_of(&conn),
+            Some(("postgresql://u@cli.example/db", DbUrlSource::Flag))
         );
     }
 

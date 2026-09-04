@@ -51,6 +51,21 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 - `install.ps1` wrote a relative `-Dir` verbatim into the persistent user PATH,
   where every future process would resolve it against its own working
   directory. The path is now resolved before use.
+- **Connection failures no longer assert causes the code cannot observe.** A
+  failed connection was always closed with "the crt.sh guest database is shared
+  and may be overloaded", including when the attempt stopped on a rejected
+  password against an entirely different host the caller had named themselves.
+  That advice now appears only when the attempts really were spent against
+  crt.sh. The stalled-connection message claimed the startup exchange had not
+  completed, which the timeout cannot distinguish from name resolution or the
+  TCP connect it also spans; it now names all three.
+- Connection settings that are wrong on this side — a `db_url` with no host,
+  mismatched host/port lists — carry no SQLSTATE, so they were treated as
+  transient and retried three times behind two misleading `retrying...` lines.
+  They now fail immediately, which is what the retry policy already documented.
+- An unparseable `db_url` taken from the config file reported `invalid
+  --db-url`, naming a flag the caller never typed and no file to go and edit.
+  It now names the config file and its path.
 
 ### Changed
 
