@@ -11,6 +11,26 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-25
+
+### Changed
+
+- **Dependencies are at their latest releases.** `clap` 4.6.6 -> 4.6.7,
+  `clap_complete` 4.6.9 -> 4.6.11, `comfy-table` 8.0.0 -> 8.0.1 and `toml`
+  1.1.5 -> 1.1.6, plus their transitive dependencies (`cc`, `rand`, `rustix`,
+  `smallvec`, `syn`, `wasm-bindgen` and the rest). All patch-level; no
+  behaviour changed. Built with Rust 1.98.1.
+
+### Supply chain
+
+- Publishing a release now pushes the regenerated Homebrew formula to the tap
+  automatically, after checking every checksum against the published
+  `SHA256SUMS` and running the published Linux binary. The tap had stayed on
+  v0.4.0 through three releases because copying the formula across was a manual
+  step.
+- The `taiki-e/install-action` and `github/codeql-action` pins moved to their
+  latest releases.
+
 ## [0.5.1] - 2026-09-04
 
 ### Fixed
@@ -490,7 +510,8 @@ Initial release.
   checksum. `cargo-audit`, `cargo-deny` and CodeQL run on every PR and weekly.
 - Dual-licensed MIT OR Apache-2.0. Requires Rust 1.98+.
 
-[Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/tiredithumans/crt-query/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/tiredithumans/crt-query/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tiredithumans/crt-query/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/tiredithumans/crt-query/compare/v0.4.0...v0.4.1
