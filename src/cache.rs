@@ -401,6 +401,11 @@ impl Cache {
 /// would silently orphan every user's cache. This is not a cryptographic hash
 /// and does not need to be — it names a file, and the full key inside the file
 /// is what decides a hit.
+///
+/// `tests/cache.rs` carries its own copy of this function and seeds entries
+/// with it for the real binary to find. The copy is deliberate: a change here
+/// orphans every user's cache just as a toolchain bump would have, so it has
+/// to fail a test and be made on purpose, not slip through as a refactor.
 fn digest(key: &Key) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -765,6 +770,21 @@ mod tests {
         let mut edited = old.clone();
         edited.sql = format!("{} -- a new column", old.sql);
         assert!(cache.get_rows(&edited).is_none());
+    }
+
+    /// Every entry on every user's disk is named by this function, so its
+    /// output is a format, not an implementation detail: a different digest
+    /// for the same key is a cold cache for everyone who upgrades. The same
+    /// literal is asserted against the copy in `tests/cache.rs`, which seeds
+    /// entries for the real binary, so the two cannot drift apart unnoticed.
+    #[test]
+    fn the_digest_is_pinned() {
+        assert_eq!(
+            digest(&key("example.com")),
+            "7366c5f8c0d1e192",
+            "the filename digest changed; every existing cache entry is now \
+             orphaned. If that is intended, update tests/cache.rs to match"
+        );
     }
 
     /// Length-prefixing each field. Without it the fields run together and
