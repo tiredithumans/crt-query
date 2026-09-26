@@ -78,7 +78,7 @@ jobs:
       # (they locate it through CARGO_BIN_EXE), so the step compiled nothing
       # new. Rustdoc, on the other hand, had no gate, and a broken intra-doc
       # link is a doc comment pointing at something that is not there. Run on
-      # every leg because some items, INSTALL_ROUTES among them, differ by OS.
+      # every leg because some items exist only under a `#[cfg]` for one OS.
       - name: Docs
         run: just doc
 
@@ -89,6 +89,14 @@ jobs:
       - name: Release profile builds
         if: runner.os == 'Linux'
         run: just build-release
+
+      # The same reasoning for the musl target the release now ships static
+      # Linux archives for: without this, the tag push is the first time it is
+      # compiled at all. x86-64 only: the aarch64 musl row differs in CPU, not
+      # in how it links, and the release checks both rows for static linking.
+      - name: Static musl build
+        if: runner.os == 'Linux'
+        run: just build-musl
 
       # install.ps1 confirms a good install by running the binary it just
       # copied. `lint-scripts` only parses that file, so a runtime fault in the

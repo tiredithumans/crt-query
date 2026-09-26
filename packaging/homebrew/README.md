@@ -11,6 +11,12 @@ only go stale — and did: it still named v0.5.1 after v0.5.2 was published. The
 path is gitignored; `just homebrew-formula` writes it locally when you want to
 look at it.
 
+The formula names four archives: the two macOS builds and the two glibc Linux
+builds. The release also ships static musl Linux archives and Windows ones,
+which it leaves alone. `generate.sh` picks each archive by its whole suffix, so
+`-x86_64-unknown-linux-gnu.tar.gz` cannot match a `-linux-musl` name, and the
+`tap` job counts exactly four url/sha256 pairs before it pushes anything.
+
 Homebrew is worth carrying because it gives the macOS/Linux cohort an upgrade
 path the release archives do not: `brew upgrade` finds new versions on its own,
 where a downloaded binary has to be replaced by hand.

@@ -19,6 +19,19 @@ build:
 build-release:
     cargo build --locked --release
 
+# The release ships statically linked musl archives beside the glibc ones, and
+# without this the tag push would be the first time anything compiled for a
+# musl target: the same trap `build-release` exists to close for the release
+# profile. Builds for this machine's own CPU, since the runner's cc drives the
+# link and cannot link for another architecture. No musl-tools needed: rustc
+# carries musl's CRT objects and libc.a for the target itself, and nothing in
+# the dependency tree compiles C on Linux. Linux-only, so absent elsewhere.
+# Static musl release build; the binary lands in target/<cpu>-unknown-linux-musl/release/crt-query.
+[linux]
+build-musl:
+    rustup target add {{ arch() }}-unknown-linux-musl
+    cargo build --locked --release --target {{ arch() }}-unknown-linux-musl
+
 # Run the CLI, e.g. `just run search example.com --limit 20`.
 run *ARGS:
     cargo run --locked -- {{ARGS}}
@@ -116,10 +129,11 @@ verify: fmt-check lint test msrv lint-scripts doc
 
 # Two required checks have no local counterpart and are not covered here:
 # `actionlint`, which CI installs from a pinned tarball rather than a recipe,
-# and CodeQL's Analyze, which only runs on GitHub. `build-release` is a CI step
-# too — left out for the same reason `audit` and `deny` were until now, that it
-# costs minutes for a profile nothing else here exercises. Run it by hand when
-# touching the release profile.
+# and CodeQL's Analyze, which only runs on GitHub. `build-release` and
+# `build-musl` are CI steps too — left out for the same reason `audit` and
+# `deny` were until now, that they cost minutes for a profile nothing else here
+# exercises. Run them by hand when touching the release profile or the release
+# targets.
 #
 # (`just --list` shows only the comment line directly above a recipe, which is
 # why the summary sits last rather than first.)
@@ -127,7 +141,7 @@ verify: fmt-check lint test msrv lint-scripts doc
 verify-full: fmt-check lint test msrv lint-scripts doc audit deny
     @echo ""
     @echo "verify-full OK — the gates that can run locally all pass."
-    @echo "  CI additionally runs: actionlint, CodeQL Analyze, build-release."
+    @echo "  CI additionally runs: actionlint, CodeQL Analyze, build-release, build-musl."
 
 # --- Release helpers -------------------------------------------------------
 

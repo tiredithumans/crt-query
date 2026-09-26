@@ -141,13 +141,17 @@ options, the script has to become a scriptblock first:
 ```
 
 **Manual download.** Releases ship archives for `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
-`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them. Both Linux
-archives are glibc builds requiring **glibc 2.34 or newer**; there is no musl
-archive, so Alpine and other musl systems build from source:
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
+`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them. The
+`-linux-gnu` archives are glibc builds requiring **glibc 2.34 or newer**
+(`getconf GNU_LIBC_VERSION` prints yours). The `-linux-musl` archives are static
+and run on any Linux: take one of those on Alpine or another musl system, or on
+an older glibc.
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu        # Apple Silicon: aarch64-apple-darwin
+                                       # Alpine, or glibc < 2.34: x86_64-unknown-linux-musl
 # `latest` redirects to the newest release, so there is no version to keep
 # up to date here. The tag is in the archive name once it lands.
 BASE=https://github.com/tiredithumans/crt-query/releases/latest/download

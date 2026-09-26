@@ -29,11 +29,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The oldest glibc a published Linux binary has to load on: RHEL/Rocky 9 and
-  # Amazon Linux 2023 (2.34), Ubuntu 22.04 (2.35), Debian 12 (2.36). The two
-  # Linux rows below are pinned to the runner that produces this floor, and the
-  # `glibc floor` step in each Linux build fails the release if it ever rises.
-  # README.md quotes this number; keep the two in step.
+  # The oldest glibc a published -linux-gnu binary has to load on: RHEL/Rocky 9
+  # and Amazon Linux 2023 (2.34), Ubuntu 22.04 (2.35), Debian 12 (2.36). The
+  # two -linux-gnu rows below are pinned to the runner that produces this
+  # floor, and the `glibc floor` step in each of those builds fails the release
+  # if it ever rises. Below the floor, the static musl archives are the answer.
+  # README.md quotes this number, and install.sh uses it (GLIBC_FLOOR there) to
+  # send older hosts to the musl archive; keep all three in step.
   GLIBC_FLOOR: GLIBC_2.34
 
 jobs:
@@ -87,7 +89,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both Linux rows pin an explicit 22.04 runner rather than taking
+          # Both glibc rows pin an explicit 22.04 runner rather than taking
           # `ubuntu-latest`. A binary inherits the glibc floor of the machine
           # that linked it, so `latest` silently raises it every time GitHub
           # moves the alias — which is how v0.4.0 shipped binaries that could
@@ -98,6 +100,22 @@ jobs:
           # install.sh computes this target on every ARM64 Linux host, and
           # before this existed it resolved to an archive no release shipped.
           - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          # Statically linked musl builds, for the two kinds of Linux host the
+          # glibc rows cannot serve: musl distributions such as Alpine, where
+          # the glibc binary's PT_INTERP does not exist, and glibc older than
+          # GLIBC_FLOOR, where it refuses to start. install.sh picks these for
+          # both. There is no musl-tools step because nothing needs one: rustc
+          # carries musl's CRT objects and libc.a for these targets and links
+          # them itself, with the runner's cc only driving the link, and no
+          # dependency compiles C on Linux (`cc` is in the tree for Haiku
+          # alone). A dependency that did would need musl-gcc, and ci.yml's
+          # `just build-musl` would fail on it before a tag ever did. The same
+          # pinned images as the glibc rows, for a toolchain that does not move
+          # under a release, not for a floor: a static binary has none.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-22.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -131,8 +149,12 @@ jobs:
       # Assert the floor rather than the runner label: pinning the image is
       # what holds it today, but this is what says so out loud, and it fails
       # the release instead of the user's install.
+      #
+      # Matched on the -linux-gnu suffix, not on "linux": a musl binary has no
+      # GLIBC_ verneeds to find, so this step would pass it having checked
+      # nothing. The musl rows get the step below instead.
       - name: glibc floor
-        if: contains(matrix.target, 'linux')
+        if: endsWith(matrix.target, '-linux-gnu')
         shell: bash
         run: |
           set -euo pipefail
@@ -147,6 +169,42 @@ jobs:
             exit 1
           fi
           echo "floor holds: highest required is $highest, at or below $GLIBC_FLOOR"
+
+      # The musl archives exist for hosts where the glibc binary cannot start,
+      # so the one property they must have is needing nothing from the host:
+      # no program interpreter and no shared libraries. A musl binary that
+      # still named /lib/ld-musl-*.so.1 would start on Alpine and nowhere else,
+      # and install.sh would be sending the old-glibc hosts to an archive that
+      # fails on them exactly as the glibc one does. rustc links musl targets
+      # statically by default today; this is what fails the release if that
+      # default, or a flag somebody adds, ever changes it. Both rows run on a
+      # native runner, so the binary is also run once, the way install.sh will.
+      #
+      # Checked by header rather than by `file`, whose wording differs between
+      # versions ("static-pie linked" against "statically linked"). A static
+      # PIE keeps a DYNAMIC segment for its own relocations, so that is not
+      # the test; PT_INTERP and DT_NEEDED are.
+      - name: musl build is statically linked
+        if: endsWith(matrix.target, '-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/crt-query"
+          # Captured whole, then searched without -q: grep -q exits at the first
+          # match, readelf can then die of SIGPIPE, and under pipefail that turns
+          # a found INTERP into a failed test that the `if` reads as absent.
+          headers=$(readelf -lW "$bin")
+          dynamic=$(readelf -dW "$bin")
+          interp=$(printf '%s\n' "$headers" | grep -F 'INTERP' || true)
+          needed=$(printf '%s\n' "$dynamic" | grep -F '(NEEDED)' || true)
+          if [ -n "$interp" ] || [ -n "$needed" ]; then
+            printf '%s\n' "$interp" "$needed"
+            echo "::error::$bin is dynamically linked; the musl archives must be static to run on any Linux host."
+            exit 1
+          fi
+          "$bin" --version
+          "$bin" completions bash > /dev/null
+          echo "static: no program interpreter, no shared libraries, and it runs"
 
       # One archive per target, named so a human can tell at a glance which
       # binary they downloaded: crt-query-v1.2.3-<target>.<ext>
@@ -263,9 +321,10 @@ jobs:
     # `brew upgrade` follows, so a soft-launched version would land on everyone.
     #
     # Every other install path already ignores pre-releases for free, by going
-    # through /releases/latest — install.sh:149, generate.sh:22 with no tag, and
-    # check-update (src/update.rs:26,132, which says so outright). This is the
-    # one path that has to check the flag itself.
+    # through /releases/latest — install.sh and generate.sh when given no tag,
+    # and check-update (src/update.rs, which says so outright). This is the one
+    # path that has to check the flag itself. Named by file rather than by line:
+    # the line numbers this used to carry had drifted off their targets.
     #
     # Parenthesised because `&&` binds tighter than `||`: bare, the clause would
     # attach to the tap_only branch and leave the release path unguarded.
@@ -371,9 +430,13 @@ jobs:
                 url="" ;;
             esac
           done < packaging/homebrew/crt-query.rb
-          # Four url/sha256 pairs: two macOS, two Linux. Windows publishes an
-          # archive but has no place in a formula. A parse that silently found
-          # none would otherwise pass this step by checking nothing.
+          # Four url/sha256 pairs: two macOS, two glibc Linux. The release
+          # ships more archives than that, but the musl and Windows ones have
+          # no place in the formula, and generate.sh matches each target by
+          # its whole suffix, so -linux-gnu.tar.gz can never pick up a
+          # -linux-musl one. A parse that silently found none would otherwise
+          # pass this step by checking nothing; one that found a fifth means
+          # the formula changed shape and this step wants another look.
           if [ "$checked" -ne 4 ]; then
             echo "::error::checked $checked url/sha256 pairs, expected 4"; exit 1
           fi

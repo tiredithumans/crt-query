@@ -7,7 +7,7 @@ argument-hint: "[bump type: patch, minor, major]"
 # Release — bump → lockfile → changelog → PR → tag → draft → publish
 
 The pipeline: release PR onto `main` → annotated `vX.Y.Z` tag on the **merge commit** →
-`.github/workflows/release.yml` builds five target binaries and assembles a **draft** release with
+`.github/workflows/release.yml` builds seven target binaries and assembles a **draft** release with
 `SHA256SUMS` → a human publishes it. Publishing is the only step that reaches users.
 
 `main` is protected — never commit to it directly; everything lands via the release PR.
@@ -74,7 +74,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha>   # the MERGE COMMIT on main, not the 
 git push origin vX.Y.Z
 ```
 
-The tag push triggers `release.yml`: `guard` (tag ↔ manifest ↔ changelog) → a 5-target build matrix
+The tag push triggers `release.yml`: `guard` (tag ↔ manifest ↔ changelog) → a 7-target build matrix
 → a **draft** release.
 
 ## 7. Verify the draft
@@ -83,11 +83,13 @@ The tag push triggers `release.yml`: `guard` (tag ↔ manifest ↔ changelog) �
 gh release view vX.Y.Z --json isDraft,assets
 ```
 
-Expect six assets — the count follows the build matrix in `release.yml`, so update this list when
+Expect eight assets — the count follows the build matrix in `release.yml`, so update this list when
 that changes:
 
 - `crt-query-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
 - `crt-query-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
+- `crt-query-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz`
+- `crt-query-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz`
 - `crt-query-vX.Y.Z-aarch64-apple-darwin.tar.gz`
 - `crt-query-vX.Y.Z-x86_64-apple-darwin.tar.gz`
 - `crt-query-vX.Y.Z-x86_64-pc-windows-msvc.zip`
@@ -170,7 +172,7 @@ release: v0.2.0 (minor)
 ✅ version bumped (Cargo.toml) · lockfile synced
 ✅ CHANGELOG [Unreleased] → [0.2.0] - 2026-09-02
 ✅ verify-full green · PR #NN merged · tagged v0.2.0 on <merge-sha>
-✅ draft verified: 4 archives + SHA256SUMS, notes match the changelog
+✅ draft verified: 7 archives + SHA256SUMS, notes match the changelog
 
 ⏸ awaiting human sign-off, then:
    gh release edit v0.2.0 --draft=false --latest
