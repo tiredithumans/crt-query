@@ -123,7 +123,9 @@ verify-full: fmt-check lint test msrv lint-scripts build audit deny
 version:
     @sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1
 
-# Regenerate the Homebrew formula from a release (default: latest). See packaging/homebrew/README.md.
+# The output is gitignored: release.yml's `tap` job generates the formula in CI
+# and pushes it to the tap, never back here, so a committed copy only goes stale.
+# Generate the Homebrew formula from a release (default: latest), for inspection. See packaging/homebrew/README.md.
 homebrew-formula VERSION="":
     ./packaging/homebrew/generate.sh {{VERSION}}
 

@@ -139,8 +139,10 @@ gh workflow run release.yml -f tap_only=true       # skips the build; syncs from
 ```
 
 The local `just homebrew-formula` still exists as a fallback and for inspecting the generated file.
-It writes `packaging/homebrew/crt-query.rb`; copying that into the tap by hand is only necessary if
-the automation is broken.
+It writes `packaging/homebrew/crt-query.rb`, which is gitignored: the tap is the only copy anyone
+installs from, and the `tap` job never writes the file back to this repo, so there is nothing to
+commit here after a release. Copying it into the tap by hand is only necessary if the automation is
+broken.
 
 Why it hangs off publish rather than the tag push: `generate.sh` copies every checksum out of the
 release's own `SHA256SUMS`, fetched over the public download URL, which serves nothing for a draft.

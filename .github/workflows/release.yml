@@ -297,6 +297,11 @@ jobs:
 
       # A manual re-sync passes no tag, and generate.sh then resolves
       # /releases/latest — which is what a re-sync is asking for anyway.
+      #
+      # The formula is gitignored, not committed, so the checkout above holds
+      # no copy of it and every step below reads the file this one writes. A
+      # tracked copy held whatever was last committed by hand, since nothing
+      # pushes the result back here, and it duly went stale.
       - name: Regenerate the formula from the published release
         id: gen
         env:

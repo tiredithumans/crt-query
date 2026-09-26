@@ -1,9 +1,15 @@
 # Homebrew tap
 
-`crt-query.rb` is a binary formula: it installs the archives a GitHub release
-publishes, verified against the same `SHA256SUMS` a manual install would check.
-It is generated — `just homebrew-formula` rewrites it from a release, so the
-checksums cannot drift from the archives they point at.
+The formula, `crt-query.rb`, is a binary formula: it installs the archives a
+GitHub release publishes, verified against the same `SHA256SUMS` a manual
+install would check. It is generated — `generate.sh` writes it from a release,
+so the checksums cannot drift from the archives they point at.
+
+It is not committed here. The `tap` job described below generates it in CI and
+pushes it to the tap repository, never back to this one, so a tracked copy could
+only go stale — and did: it still named v0.5.1 after v0.5.2 was published. The
+path is gitignored; `just homebrew-formula` writes it locally when you want to
+look at it.
 
 Homebrew is worth carrying because it gives the macOS/Linux cohort an upgrade
 path the release archives do not: `brew upgrade` finds new versions on its own,
@@ -48,7 +54,8 @@ gh workflow run release.yml -f tap_only=true    # syncs from the latest release
 just homebrew-formula              # or: just homebrew-formula v0.2.0
 ```
 
-Then, in a checkout of the tap:
+That writes the gitignored `packaging/homebrew/crt-query.rb`. Then, in a
+checkout of the tap:
 
 ```sh
 cp .../crt-query/packaging/homebrew/crt-query.rb Formula/crt-query.rb
