@@ -346,10 +346,15 @@ certificates in it are public, but the list of names you searched for is not.
 `crt-query check-update` reports whether a newer release exists, and exits `0`
 either way — being out of date is a report, not a failure. It is the only
 subcommand that contacts anything other than crt.sh, and only when you ask;
-nothing checks in the background. It shells out to the system `curl`, so that
-has to be on `PATH` — the only path in this tool that runs an external program.
-On Windows the search is Rust's, not `PATH` alone: it looks in the directory
-holding `crt-query.exe` before `System32` and before `PATH`. `--json` gives `current`, `latest`,
+nothing checks in the background. It reads which release
+`github.com/tiredithumans/crt-query/releases/latest` redirects to — the
+redirect the install scripts rely on too — rather than asking GitHub's API,
+whose per-IP limit on unauthenticated requests a shared address can use up.
+
+It shells out to the system `curl`, so that has to be on `PATH` — the only path
+in this tool that runs an external program. On Windows the search is Rust's,
+not `PATH` alone: it looks in the directory holding `crt-query.exe` before
+`System32` and before `PATH`. `--json` gives `current`, `latest`,
 `update_available` and `release_url` for a scheduled check.
 
 To upgrade, re-run whatever you installed with: `brew upgrade crt-query`,
