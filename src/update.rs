@@ -25,6 +25,8 @@
 //! install script, which verifies the release's SHA256SUMS before it replaces
 //! anything, or rebuild from source.
 
+#[cfg(any(windows, test))]
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -69,6 +71,10 @@ const USER_AGENT: &str = concat!("crt-query/", env!("CARGO_PKG_VERSION"));
 const NULL_DEVICE: &str = "NUL";
 #[cfg(not(windows))]
 const NULL_DEVICE: &str = "/dev/null";
+
+/// The name curl is run by wherever a full path is not known, left for the
+/// platform's own search to resolve.
+const CURL: &str = "curl";
 
 /// The prebuilt install routes available on the platform this binary was built
 /// for, ordered as the README's install table orders them.
@@ -238,6 +244,73 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+/// Which curl to run on Windows, given the value of `%SystemRoot%` and a way
+/// to ask whether a file exists.
+///
+/// A bare `curl` is not resolved through `PATH` on Windows. Rust's standard
+/// library does its own search, and looks in the directory holding
+/// `crt-query.exe` before `System32` and before `PATH`, so a `curl.exe`
+/// unpacked next to `crt-query.exe` — from the same download folder, say — is
+/// the one that runs. `System32` has had a `curl.exe` of its own since
+/// Windows 10 1803, and naming it by its full path skips the search entirely.
+///
+/// `SystemRoot` has to be an absolute drive path, `C:\` or `C:/` onwards,
+/// before it is trusted. A relative value would be resolved against the
+/// current directory, which is the planting problem again by another route;
+/// a drive-relative (`C:Windows`) or root-relative (`\Windows`) one depends on
+/// the current directory or drive too; and a UNC share would have this reach
+/// across the network just to decide which program to start. The rule is
+/// spelt out by hand rather than left to [`Path::is_absolute`], which answers
+/// for the host it runs on, while the tests check the Windows answer on every
+/// host.
+///
+/// When there is no such file, or no usable `SystemRoot` — Windows before
+/// 1803, or an environment that has lost the variable — this falls back to
+/// the bare name and the search described above. That keeps the subcommand
+/// working where it worked before, and leaves those systems exactly as exposed
+/// as every system used to be, which `SECURITY.md` says in so many words.
+#[cfg(any(windows, test))]
+fn windows_curl(system_root: Option<&str>, exists: impl Fn(&Path) -> bool) -> String {
+    let Some(root) = system_root.filter(|root| is_windows_drive_absolute(root)) else {
+        return CURL.to_string();
+    };
+    let candidate = format!("{}\\System32\\curl.exe", root.trim_end_matches(['\\', '/']));
+    if exists(Path::new(&candidate)) {
+        candidate
+    } else {
+        CURL.to_string()
+    }
+}
+
+/// Whether `path` is absolute by Windows rules and rooted at a drive letter:
+/// `C:\…` or `C:/…`, on whatever host this runs on.
+#[cfg(any(windows, test))]
+fn is_windows_drive_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+/// The curl this build runs: see [`windows_curl`] for why Windows names one by
+/// its full path. Everywhere else the bare name, resolved through `PATH` like
+/// any other command.
+///
+/// A `SystemRoot` that is not valid Unicode is treated as unset. That costs a
+/// system with one nothing but the fallback, and there is no such system in
+/// practice: the variable is set by Windows itself.
+fn curl_program() -> String {
+    #[cfg(windows)]
+    {
+        windows_curl(std::env::var("SystemRoot").ok().as_deref(), Path::is_file)
+    }
+    #[cfg(not(windows))]
+    {
+        CURL.to_string()
+    }
+}
+
 /// Ask GitHub which release is newest, through the system `curl`.
 ///
 /// Shelling out rather than linking an HTTP client: TLS plus an async client
@@ -256,7 +329,8 @@ fn is_newer(latest: &str, current: &str) -> bool {
 /// the flag keeps that true even if the URL or a config file ever says
 /// otherwise.
 fn fetch_latest_release() -> Result<LatestRelease> {
-    let output = Command::new("curl")
+    let program = curl_program();
+    let output = Command::new(&program)
         .args([
             "--silent",
             "--show-error",
@@ -277,7 +351,7 @@ fn fetch_latest_release() -> Result<LatestRelease> {
         .output()
         .with_context(|| {
             format!(
-                "could not run curl, which check-update needs to reach GitHub; \
+                "could not run {program}, which check-update needs to reach GitHub; \
                  install curl, or see the newest release at {RELEASES_PAGE}"
             )
         })?;
@@ -486,6 +560,68 @@ mod tests {
             .to_string();
         assert!(!err.contains('\u{1b}'), "a raw escape reached the message");
         assert!(err.contains(r"\u{1b}[2J"), "{err}");
+    }
+
+    /// The Windows curl choice, exercised on every host rather than only on the
+    /// one CI leg that builds for Windows, so that a contributor on Linux or
+    /// macOS sees it break too.
+    fn windows_curl_with(root: Option<&str>, present: Option<&str>) -> String {
+        windows_curl(root, |path| {
+            Some(path.to_str().expect("a UTF-8 candidate")) == present
+        })
+    }
+
+    /// Named by its full path, `System32`'s curl cannot be displaced by a
+    /// `curl.exe` beside `crt-query.exe`, which a bare name would find first.
+    #[test]
+    fn windows_runs_system32_curl_by_its_full_path() {
+        let system32 = Some(r"C:\Windows\System32\curl.exe");
+        assert_eq!(
+            windows_curl_with(Some(r"C:\Windows"), system32),
+            r"C:\Windows\System32\curl.exe"
+        );
+        // A trailing separator does not produce a doubled one.
+        assert_eq!(
+            windows_curl_with(Some(r"C:\Windows\"), system32),
+            r"C:\Windows\System32\curl.exe"
+        );
+        assert_eq!(
+            windows_curl_with(Some("D:/WINDOWS"), Some(r"D:/WINDOWS\System32\curl.exe")),
+            r"D:/WINDOWS\System32\curl.exe"
+        );
+    }
+
+    /// Windows before 1803 has no `System32\curl.exe`. It still gets the bare
+    /// name, so the subcommand keeps working there — with the old search.
+    #[test]
+    fn windows_falls_back_to_the_bare_name_without_system32_curl() {
+        assert_eq!(windows_curl_with(Some(r"C:\Windows"), None), "curl");
+        assert_eq!(windows_curl_with(None, None), "curl");
+    }
+
+    /// A `SystemRoot` that is not an absolute drive path is not trusted, and
+    /// not even probed: relative forms resolve against the current directory,
+    /// which is the planting problem by another route, and a UNC share would
+    /// reach across the network to decide which program to start.
+    #[test]
+    fn windows_ignores_a_system_root_that_is_not_an_absolute_drive_path() {
+        for root in [
+            "",
+            "Windows",
+            r".\Windows",
+            r"C:Windows",
+            r"\Windows",
+            r"\\server\share\Windows",
+            // Absolute, but Windows never sets one, and reading the form
+            // correctly would be parsing for a system that does not exist.
+            r"\\?\C:\Windows",
+            "C:",
+        ] {
+            let chosen = windows_curl(Some(root), |path| {
+                panic!("{root:?} is not trustworthy, but {path:?} was probed")
+            });
+            assert_eq!(chosen, "curl", "{root:?}");
+        }
     }
 
     #[test]
