@@ -340,6 +340,13 @@ impl Cache {
     /// long one would leave a month of dead search results on disk. Everything
     /// unprefixed, `cert` misses included, is judged by the short lifetime
     /// whichever view is doing the pruning.
+    ///
+    /// Scratch files go too, once they are older than the short lifetime and
+    /// [`SCRATCH_GRACE`]. A write that was interrupted between the scratch
+    /// file and the rename (a killed cron job, a full disk) leaves one behind,
+    /// and nothing else would ever remove it: `clear` counts entries, and a
+    /// scratch file is not one. Only names this module writes are touched —
+    /// see [`is_scratch`] — so anything else in the directory is left alone.
     fn prune(&self) {
         let Some(dir) = self.dir.as_deref() else {
             return;
@@ -350,11 +357,13 @@ impl Cache {
         let now = SystemTime::now();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.extension().is_some_and(|e| e == "json") {
-                continue;
-            }
             let name = entry.file_name();
-            let ttl = if name.to_string_lossy().starts_with(CERT_PREFIX) {
+            let name = name.to_string_lossy();
+            let ttl = if is_scratch(&name) {
+                self.ttl.max(SCRATCH_GRACE)
+            } else if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            } else if name.starts_with(CERT_PREFIX) {
                 CERT_TTL
             } else {
                 self.ttl
@@ -437,7 +446,7 @@ fn create_dir(dir: &Path) -> std::io::Result<()> {
 /// entry and an interrupted write leaves the previous one intact. Same approach
 /// as the CSV destination in `output.rs`.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let scratch = path.with_extension("tmp");
+    let scratch = scratch_path(path);
     std::fs::write(&scratch, text)?;
     match std::fs::rename(&scratch, path) {
         Ok(()) => Ok(()),
@@ -446,6 +455,55 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Where the entry at `path` is written before it is renamed into place:
+/// `[cert-]<digest>.<pid>.tmp`, beside it.
+///
+/// The process ID is there for the reason `output.rs`'s `scratch_beside` gives
+/// for CSV. The scratch file used to be `[cert-]<digest>.tmp`, shared by every
+/// process writing the same entry, and the README advertises `expiring --csv`
+/// on a schedule, where two runs finishing the same query together is
+/// ordinary. One run's rename could then move the other's half-written file
+/// into place, leaving a truncated entry for every later run to read as
+/// corrupt, and the other's rename failed on a file that had gone. With the
+/// process ID each run renames only what it wrote, and whichever renames last
+/// wins, which is no worse than one run replacing another's entry a moment
+/// later. One process never races itself: everything runs in sequence on a
+/// current-thread runtime.
+fn scratch_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", std::process::id()))
+}
+
+/// The youngest a scratch file can be and still be pruned, whatever the short
+/// lifetime says.
+///
+/// Scratch files are judged by the short lifetime, but `cache_ttl_secs` goes
+/// down to zero, and a zero lifetime would let one run's prune delete another
+/// run's scratch file between its write and its rename. No write this module
+/// makes takes more than a moment, so a scratch file this old was abandoned.
+const SCRATCH_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// Whether `name` is a scratch file this module wrote: `[cert-]<digest>.tmp`
+/// as v0.5.x named them, or `[cert-]<digest>.<pid>.tmp` as [`scratch_path`]
+/// names them now.
+///
+/// Matched exactly rather than by the `.tmp` extension, because pruning
+/// deletes what matches and the cache directory is not the only thing that
+/// might hold a file ending in `.tmp`.
+fn is_scratch(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let stem = stem.strip_prefix(CERT_PREFIX).unwrap_or(stem);
+    let (hash, pid) = match stem.split_once('.') {
+        Some((hash, pid)) => (hash, Some(pid)),
+        None => (stem, None),
+    };
+    let is_digest =
+        hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let is_pid = pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    is_digest && is_pid
 }
 
 /// Where entries are kept, or `None` if the environment names no absolute
@@ -799,6 +857,128 @@ mod tests {
         assert_eq!(cache.clear().unwrap(), 1, "only the .json entry counts");
         assert!(stray.exists(), "clear must not touch a foreign file");
         let _ = std::fs::remove_file(&stray);
+    }
+
+    /// Wind a file's mtime back, which is all pruning looks at.
+    fn backdate(path: &Path, by: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - by)
+            .unwrap();
+    }
+
+    /// A scratch file named for its entry alone was shared by every process
+    /// writing that entry, so two scheduled runs finishing the same query
+    /// together could rename each other's half-written file into place.
+    #[test]
+    fn the_scratch_file_is_named_for_the_process_writing_it() {
+        let cache = scratch("scratch-pid", Mode::Enabled, DEFAULT_TTL);
+        let k = key("example.com");
+        let entry = cache.path(&k).unwrap();
+        let scratch = scratch_path(&entry);
+        let stem = entry.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            scratch.file_name().unwrap().to_string_lossy(),
+            format!("{stem}.{}.tmp", std::process::id())
+        );
+        assert_eq!(
+            scratch.parent(),
+            entry.parent(),
+            "rename needs one directory"
+        );
+        assert!(is_scratch(&scratch.file_name().unwrap().to_string_lossy()));
+
+        // And a completed write leaves nothing of it behind.
+        cache.put(&k, &vec![row(1, Utc::now())]);
+        assert!(entry.exists());
+        assert!(
+            !scratch.exists(),
+            "the scratch file should have been renamed"
+        );
+    }
+
+    /// Only names this module writes are ever pruned as scratch files. The
+    /// match is exact because a match gets deleted.
+    #[test]
+    fn only_the_scratch_names_this_module_writes_count_as_scratch() {
+        let hash = "0123456789abcdef";
+        for name in [
+            format!("{hash}.tmp"),
+            format!("{hash}.4242.tmp"),
+            format!("{CERT_PREFIX}{hash}.tmp"),
+            format!("{CERT_PREFIX}{hash}.4242.tmp"),
+        ] {
+            assert!(is_scratch(&name), "{name} is a scratch name");
+        }
+        for name in [
+            "notes.tmp".to_string(),
+            format!("{hash}.json"),
+            format!("{CERT_PREFIX}{hash}.json"),
+            format!("{hash}.pid.tmp"),
+            format!("{hash}..tmp"),
+            format!("{hash}.1.2.tmp"),
+            "0123456789abcde.tmp".to_string(),
+            "0123456789ABCDEF.tmp".to_string(),
+            format!(".{hash}.1.tmp"),
+        ] {
+            assert!(!is_scratch(&name), "{name} is not a scratch name");
+        }
+    }
+
+    /// An interrupted write leaves its scratch file behind, and nothing else
+    /// ever removes it. Once it is older than the short lifetime it is
+    /// abandoned, whichever process or release left it.
+    #[test]
+    fn an_abandoned_scratch_file_is_pruned_once_older_than_the_short_lifetime() {
+        let cache = scratch("scratch-prune", Mode::Enabled, DEFAULT_TTL);
+        let dir = cache.dir.clone().unwrap();
+        let hash = digest(&key("abandoned.example"));
+        let abandoned = [
+            dir.join(format!("{hash}.999999.tmp")),
+            dir.join(format!("{hash}.tmp")),
+            dir.join(format!("{CERT_PREFIX}{hash}.12.tmp")),
+        ];
+        let recent = dir.join(format!("{hash}.888888.tmp"));
+        let foreign = dir.join("notes.tmp");
+        for path in abandoned.iter().chain([&recent, &foreign]) {
+            std::fs::write(path, "half-written").unwrap();
+            backdate(path, DEFAULT_TTL + Duration::from_secs(3600));
+        }
+        // Younger than the short lifetime, so possibly still some run's.
+        backdate(&recent, DEFAULT_TTL / 2);
+
+        // Any write prunes.
+        cache.put(&key("example.com"), &vec![row(1, Utc::now())]);
+
+        for path in &abandoned {
+            assert!(!path.exists(), "{} was left behind", path.display());
+        }
+        assert!(recent.exists(), "a scratch file inside the lifetime went");
+        assert!(foreign.exists(), "a file this module never writes went");
+    }
+
+    /// The lifetime is configurable down to zero, and one run's prune must not
+    /// delete another run's scratch file between its write and its rename.
+    #[test]
+    fn a_fresh_scratch_file_survives_a_prune_even_under_a_zero_lifetime() {
+        let cache = scratch("scratch-fresh", Mode::Enabled, Duration::ZERO);
+        let dir = cache.dir.clone().unwrap();
+        let hash = digest(&key("in-flight.example"));
+        let fresh = dir.join(format!("{hash}.999999.tmp"));
+        let old = dir.join(format!("{hash}.888888.tmp"));
+        std::fs::write(&fresh, "being written").unwrap();
+        std::fs::write(&old, "abandoned").unwrap();
+        backdate(&old, SCRATCH_GRACE + Duration::from_secs(60));
+
+        cache.put(&key("example.com"), &vec![row(1, Utc::now())]);
+
+        assert!(fresh.exists(), "a prune reached a write still in flight");
+        assert!(
+            !old.exists(),
+            "the grace period is a floor, not a reason to keep everything"
+        );
     }
 
     #[cfg(not(windows))]
