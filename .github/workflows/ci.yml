@@ -22,10 +22,20 @@ on:
     # toolchain or dependency change that nothing in the repo triggered.
     - cron: "0 6 * * 1"
 
-# A new push to the same branch supersedes the in-flight run.
+# A new push to a pull request supersedes its in-flight run: nobody will merge
+# the older head, so its result is worth nothing. A push to main is different.
+# Every merge is a commit that stays in the history, and cancelling its run
+# when a second merge landed a minute later left the first with no completed
+# CI record at all — no way to tell afterwards whether it was ever green.
+#
+# So only pull_request runs cancel, and every other run gets a group of its
+# own. Turning cancel-in-progress off alone would not be enough: a group holds
+# one running and one pending run, and GitHub cancels the pending one when a
+# third arrives, so three quick merges would still lose the middle one's run.
+# Nothing here deploys, so there is nothing for runs on main to serialise.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege, declared explicitly so a change to the repo-level default
 # cannot silently re-broaden this workflow.
