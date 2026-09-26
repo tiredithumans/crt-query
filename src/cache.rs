@@ -12,6 +12,23 @@
 //! [`crate::queries::fetch_by_term`] already loops at, so a multi-term run can
 //! hit on some terms and miss on others.
 //!
+//! # Lifetimes
+//!
+//! Two, told apart by filename so that pruning never has to open an entry:
+//!
+//! - **Short** (an hour by default, `cache_ttl_secs` in the config file):
+//!   `search` and `expiring` results, and a `cert` ID that was not found.
+//! - **Long** ([`CERT_TTL`], thirty days, `cert-` prefix): a certificate that
+//!   was found. The record at a crt.sh ID cannot change, so there is nothing
+//!   for a short lifetime to protect.
+//!
+//! A miss is short-lived because it is not the same kind of fact. The guest
+//! database is a replica that runs behind the crt.sh website, so an ID logged
+//! minutes ago is a miss there for a while and then stops being one. v0.5.x
+//! kept the miss for the full thirty days, and a user who looked a fresh ID up
+//! too early was told "no such certificate", with exit 3, for a month after it
+//! arrived.
+//!
 //! # Staleness
 //!
 //! `SEARCH_SQL` and `EXPIRING_SQL` evaluate their validity windows server-side
@@ -41,16 +58,24 @@ use crate::queries::RawRow;
 /// rather than to a failing run.
 const FORMAT_VERSION: u32 = 1;
 
-/// Default lifetime for `search` and `expiring` results.
+/// Default short lifetime: `search` and `expiring` results, and a `cert` ID
+/// that was not found.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Marks an entry as holding a `cert` lookup, so that pruning can apply the
-/// right lifetime without opening it.
+/// Marks an entry as holding a found certificate, so that pruning can apply
+/// the long lifetime without opening it.
+///
+/// A `cert` miss carries no prefix: it lives and is pruned under the short
+/// lifetime like any other entry. See the module docs on why.
 const CERT_PREFIX: &str = "cert-";
 
-/// Lifetime for a `cert <ID>` lookup. A certificate at a given crt.sh ID is
-/// immutable — the record cannot change under us — so the short TTL that exists
-/// to bound window drift buys nothing here.
+/// Lifetime for a certificate that `cert <ID>` found. A certificate at a given
+/// crt.sh ID is immutable — the record cannot change under us — so the short
+/// TTL that exists to bound window drift buys nothing here.
+///
+/// Only for a certificate that was found. An ID that was not found can start
+/// existing once the lagging replica catches up, which is why a miss gets the
+/// short lifetime instead.
 pub const CERT_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 
 /// What a cached entry is keyed on. Held in full inside the entry and compared
@@ -119,8 +144,16 @@ impl Mode {
 pub struct Cache {
     dir: Option<PathBuf>,
     mode: Mode,
+    /// The short lifetime, even on the long-lived view.
+    ///
+    /// [`Cache::for_certs`] used to overwrite this with [`CERT_TTL`], so a
+    /// prune that ran after writing a certificate judged every unprefixed
+    /// entry by thirty days and left dead search results and `cert` misses in
+    /// place. Keeping the short lifetime here and deriving the long one from
+    /// `long_lived` lets every prune apply both correctly — see
+    /// [`Cache::lifetime`].
     ttl: Duration,
-    /// Whether these entries are the long-lived `cert` kind.
+    /// Whether these entries are the long-lived kind: found certificates.
     ///
     /// Tracked rather than inferred from `ttl`, which is configurable: pruning
     /// has to tell the two apart by name, and comparing durations would make
@@ -161,15 +194,18 @@ impl Cache {
         }
     }
 
-    /// The same cache, holding `cert` lookups under their own long lifetime.
+    /// The same cache, holding found certificates under their own long
+    /// lifetime.
     ///
     /// Those entries are named apart from the rest so that pruning can apply
-    /// each lifetime to the entries it belongs to — see [`Cache::prune`].
+    /// each lifetime to the entries it belongs to — see [`Cache::prune`]. A
+    /// `cert` miss does not belong here: it goes through the ordinary cache,
+    /// under the short lifetime. See the module docs.
     pub fn for_certs(&self) -> Self {
         Self {
             dir: self.dir.clone(),
             mode: self.mode,
-            ttl: CERT_TTL,
+            ttl: self.ttl,
             long_lived: true,
         }
     }
@@ -184,7 +220,12 @@ impl Cache {
     /// How long an entry stays usable.
     #[cfg(test)]
     pub(crate) fn ttl(&self) -> Duration {
-        self.ttl
+        self.lifetime()
+    }
+
+    /// How long an entry written through this view stays usable.
+    fn lifetime(&self) -> Duration {
+        if self.long_lived { CERT_TTL } else { self.ttl }
     }
 
     /// Where entries live, if anywhere.
@@ -215,7 +256,7 @@ impl Cache {
             .signed_duration_since(entry.fetched_at)
             .to_std()
             .ok()?;
-        if age > self.ttl {
+        if age > self.lifetime() {
             return None;
         }
         Some((entry.payload, age))
@@ -296,7 +337,9 @@ impl Cache {
     /// Each lifetime is applied only to the entries it governs, which is what
     /// the `cert-` prefix is for. Pruning everything under the short one would
     /// discard still-valid certificate records; pruning everything under the
-    /// long one would leave a month of dead search results on disk.
+    /// long one would leave a month of dead search results on disk. Everything
+    /// unprefixed, `cert` misses included, is judged by the short lifetime
+    /// whichever view is doing the pruning.
     fn prune(&self) {
         let Some(dir) = self.dir.as_deref() else {
             return;
@@ -335,7 +378,8 @@ impl Cache {
         format!("{}{}.json", self.prefix(), digest(key))
     }
 
-    /// What marks an entry as belonging to the long-lived `cert` lifetime.
+    /// What marks an entry as belonging to the long lifetime: a found
+    /// certificate.
     fn prefix(&self) -> &'static str {
         if self.long_lived { CERT_PREFIX } else { "" }
     }
@@ -826,6 +870,37 @@ mod tests {
             left,
             vec![certs.filename(&cert_key)],
             "only the long-lived entry should survive a zero-lifetime search prune"
+        );
+    }
+
+    /// The other direction. `for_certs` used to replace the short lifetime
+    /// with the long one, so a prune that ran after a certificate write judged
+    /// every unprefixed entry by thirty days and kept dead search results and
+    /// `cert` misses around. It has to apply the short lifetime to those
+    /// whichever view is pruning.
+    #[test]
+    fn a_prune_after_a_certificate_write_still_applies_the_short_lifetime() {
+        // Written under the default lifetime, so its own prune keeps it.
+        let lenient = scratch("prune-certs", Mode::Enabled, DEFAULT_TTL);
+        let stale = key("example.com");
+        lenient.put(&stale, &vec![row(1, Utc::now())]);
+        assert!(lenient.path(&stale).unwrap().exists());
+
+        // The same directory under a zero short lifetime: writing a
+        // certificate through the long-lived view prunes as it goes.
+        let strict = Cache::at(lenient.dir.clone().unwrap(), Mode::Enabled, Duration::ZERO);
+        let certs = strict.for_certs();
+        let cert_key = key("12345");
+        certs.put(&cert_key, &Some(1i64));
+
+        assert!(
+            !lenient.path(&stale).unwrap().exists(),
+            "an unprefixed entry outlived the short lifetime because the prune \
+             came from the long-lived view"
+        );
+        assert!(
+            certs.get::<Option<i64>>(&cert_key).is_some(),
+            "the long lifetime still governs the certificate itself"
         );
     }
 

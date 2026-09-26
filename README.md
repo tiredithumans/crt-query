@@ -307,7 +307,7 @@ survives an outage, because it never opens a connection at all.
 | | |
 |---|---|
 | Where | `$XDG_CACHE_HOME/crt-query`, else `~/.cache/crt-query` (`%LOCALAPPDATA%\crt-query\cache` on Windows) |
-| Lifetime | one hour for `search` and `expiring`; 30 days for `cert` |
+| Lifetime | one hour for `search`, `expiring` and a `cert` ID that was not found; 30 days for a certificate that `cert` found |
 | Inspect | `crt-query cache path` |
 | Empty it | `crt-query cache clear` |
 
@@ -318,9 +318,15 @@ crt-query search example.com --refresh    # re-asks, then re-caches
 crt-query search example.com --no-cache   # ignores the cache entirely
 ```
 
-`cert` gets the long lifetime because a certificate at a given crt.sh ID cannot
-change. `search` and `expiring` get the short one because their validity windows
-— `--valid-since`, `--within`, `--since-expired` — are evaluated by the server
+A certificate that `cert` found gets the long lifetime, because the record at a
+given crt.sh ID cannot change. An ID it did not find gets the short one: the
+guest database is a replica that runs behind the crt.sh website, so an ID you
+have just seen there can be missing from it for a while, and a miss remembered
+for a month would go on answering exit `3` long after the certificate arrived.
+`--refresh` re-asks straight away.
+
+`search` and `expiring` get the short lifetime because their validity windows —
+`--valid-since`, `--within`, `--since-expired` — are evaluated by the server
 when the query runs, so **a cached result carries the window as it stood when it
 was written**. The drift is bounded by the lifetime above and stays well inside
 the day granularity those flags work in, but `--refresh` is there when you need
@@ -329,7 +335,8 @@ the window recomputed now.
 Configure it alongside the connection:
 
 ```toml
-# Turn it off entirely, or change how long a search stays usable.
+# Turn it off entirely, or change the short lifetime: how long a search, or a
+# cert ID that was not found, stays usable.
 cache = true
 cache_ttl_secs = 3600
 ```
