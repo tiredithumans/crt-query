@@ -42,6 +42,17 @@ lint:
 test:
     cargo test --locked
 
+# Took the place of a `build` gate that only repeated `test`, whose integration
+# tests already build the binary into target/debug (see the Docs step in
+# ci.yml). The doc comments here carry the history behind the code, and an
+# intra-doc link to an item that was renamed or is private is a reference
+# nobody can follow; nothing checked for one until this. --document-private-items
+# because this is a binary crate: almost nothing in it is public, so without the
+# flag rustdoc would skip nearly every comment worth checking.
+# Docs gate: rustdoc with every warning, broken intra-doc links included, an error.
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
+
 # Fast inner-loop type check; fails in seconds where `verify` takes minutes.
 check:
     cargo check --locked --all-targets
@@ -98,21 +109,22 @@ deny:
 # --- Aggregates ------------------------------------------------------------
 
 # Every offline CI gate, in CI order. Run this before opening a PR.
-verify: fmt-check lint test msrv lint-scripts build
+verify: fmt-check lint test msrv lint-scripts doc
     @echo ""
     @echo "verify OK — NOT run (needs network): audit, deny."
     @echo "  just verify-full adds the dependency gates"
 
-# Full CI parity for everything that can run locally: the offline gates plus
-# both dependency-policy scans.
-#
 # Two required checks have no local counterpart and are not covered here:
 # `actionlint`, which CI installs from a pinned tarball rather than a recipe,
 # and CodeQL's Analyze, which only runs on GitHub. `build-release` is a CI step
 # too — left out for the same reason `audit` and `deny` were until now, that it
 # costs minutes for a profile nothing else here exercises. Run it by hand when
 # touching the release profile.
-verify-full: fmt-check lint test msrv lint-scripts build audit deny
+#
+# (`just --list` shows only the comment line directly above a recipe, which is
+# why the summary sits last rather than first.)
+# Full CI parity for what can run locally: every offline gate plus both dependency-policy scans.
+verify-full: fmt-check lint test msrv lint-scripts doc audit deny
     @echo ""
     @echo "verify-full OK — the gates that can run locally all pass."
     @echo "  CI additionally runs: actionlint, CodeQL Analyze, build-release."

@@ -73,8 +73,14 @@ jobs:
       # CI must never add load to it.
       - name: Tests
         run: just test
-      - name: Build
-        run: just build
+      # There used to be a `just build` here, which only repeated work: the
+      # integration tests build the debug binary into target/debug themselves
+      # (they locate it through CARGO_BIN_EXE), so the step compiled nothing
+      # new. Rustdoc, on the other hand, had no gate, and a broken intra-doc
+      # link is a doc comment pointing at something that is not there. Run on
+      # every leg because some items, INSTALL_ROUTES among them, differ by OS.
+      - name: Docs
+        run: just doc
 
       # The release profile (lto = "thin", strip = true) is otherwise compiled
       # for the first time by the tag push — after an annotated tag exists, and
@@ -87,8 +93,9 @@ jobs:
       # install.ps1 confirms a good install by running the binary it just
       # copied. `lint-scripts` only parses that file, so a runtime fault in the
       # check itself passes every gate and then breaks every Windows install --
-      # which is exactly what happened. Run the real shape against the binary
-      # built above; keep it in lockstep with the block in install.ps1.
+      # which is exactly what happened. Run the real shape against the debug
+      # binary the Tests step built into target/debug for the integration
+      # tests; keep it in lockstep with the block in install.ps1.
       - name: install.ps1 verification shape runs clean
         if: runner.os == 'Windows'
         shell: pwsh

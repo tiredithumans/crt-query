@@ -409,12 +409,15 @@ Requires Rust 1.98+ (pinned via `rust-toolchain.toml`) and
 
 ```sh
 just build-release   # binary lands in target/release/crt-query
-just verify          # fmt-check · lint · test · msrv · lint-scripts · build — offline
+just verify          # fmt-check · lint · test · msrv · lint-scripts · doc — offline
 just verify-full     # adds cargo-audit + cargo-deny (needs network)
 ```
 
-`just --list` shows every recipe. `lint-scripts` covers `install.sh` and
-`install.ps1`; it needs `shellcheck` and `pwsh` on PATH.
+`just --list` shows every recipe. `lint-scripts` covers `install.sh`,
+`install.ps1` and the Homebrew formula generator; it needs `shellcheck` and
+`pwsh` on PATH. `doc` runs rustdoc over every item, private ones included,
+with warnings as errors, so a doc comment linking to an item that does not
+exist fails the gate.
 
 Every test is offline and never contacts crt.sh — it is a shared public service
 on donated infrastructure, and a test suite pointed at it would be both flaky
