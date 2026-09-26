@@ -97,7 +97,7 @@ $ crt-query expiring example.com --within 60
 | --- | --- |
 | macOS · Linux (x86-64 · ARM64) | `brew install tiredithumans/tap/crt-query` |
 | macOS · Linux | `curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \| sh` |
-| Windows (x86-64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
+| Windows (x86-64 · ARM64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
 | From source | `cargo install --locked --git https://github.com/tiredithumans/crt-query` |
 
 Every prebuilt route resolves the newest release, verifies the archive against
@@ -145,12 +145,12 @@ options, the script has to become a scriptblock first:
 
 **Manual download.** Releases ship archives for `x86_64-unknown-linux-gnu`,
 `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
-`aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
-`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them. The
-`-linux-gnu` archives are glibc builds requiring **glibc 2.34 or newer**
-(`getconf GNU_LIBC_VERSION` prints yours). The `-linux-musl` archives are static
-and run on any Linux: take one of those on Alpine or another musl system, or on
-an older glibc.
+`aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, plus one `SHA256SUMS`
+covering all of them. The `-linux-gnu` archives are glibc builds requiring
+**glibc 2.34 or newer** (`getconf GNU_LIBC_VERSION` prints yours). The
+`-linux-musl` archives are static and run on any Linux: take one of those on
+Alpine or another musl system, or on an older glibc.
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu        # Apple Silicon: aarch64-apple-darwin

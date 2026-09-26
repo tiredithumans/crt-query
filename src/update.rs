@@ -49,8 +49,9 @@ const USER_AGENT: &str = concat!("crt-query/", env!("CARGO_PKG_VERSION"));
 /// `/usr/local/bin` for Homebrew's own to shadow or be shadowed by. It does not
 /// appear on Windows, where Homebrew does not run.
 ///
-/// Windows on ARM needs no separate entry: `install.ps1` installs the x86-64
-/// build, which Windows runs under emulation.
+/// Windows on ARM needs no separate entry: the same `install.ps1` line installs
+/// the native ARM64 build, and falls back to the x86-64 one, which Windows runs
+/// under emulation, only for a release that predates the native build.
 ///
 /// Labels are padded so every command starts in the same column as the
 /// `From source:` line below, which is the only thing making a three-line block

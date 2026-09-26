@@ -123,6 +123,13 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          # Native ARM64, on GitHub's Windows ARM64 runner. Before this row,
+          # Windows on ARM got the x86-64 build and ran it under emulation.
+          # install.ps1 already asked for this target first and fell back to
+          # x86-64 only when a release lacked it, so it picks the native build
+          # up with no change beyond its comments.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -220,17 +227,59 @@ jobs:
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           rm -rf "dist/$NAME"
 
+      # PowerShell and .NET only. This used to be bash and 7-Zip, which
+      # windows-latest carries; windows-11-arm is a partner image maintained
+      # apart from GitHub's own, and while it lists both today, nothing obliges
+      # it to keep doing so. pwsh is what every Windows step here already
+      # relies on, and ZipFile ships inside it.
+      #
+      # ZipFile.CreateFromDirectory rather than Compress-Archive: .NET
+      # documents that it writes entry names with "/", the separator the zip
+      # format specifies, and includeBaseDirectory ($true below) keeps the
+      # layout install.ps1 extracts and then looks inside for — one top-level
+      # crt-query-<tag>-<target>/ holding crt-query.exe and the three
+      # documents. Compress-Archive documents the layout but not the
+      # separator, and a backslash one unpacks as flat, oddly named files
+      # anywhere but Windows. The layout is read back afterwards regardless,
+      # because a wrong one breaks every Windows install and nothing else
+      # here would notice.
       - name: Package (windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          NAME="crt-query-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$NAME"
-          cp "target/${{ matrix.target }}/release/crt-query.exe" "dist/$NAME/"
-          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$NAME/"
-          (cd dist && 7z a "$NAME.zip" "$NAME" >/dev/null)
-          rm -rf "dist/$NAME"
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $name = "crt-query-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          $dist = (New-Item -ItemType Directory -Path dist -Force).FullName
+          $stage = (New-Item -ItemType Directory -Path (Join-Path $dist $name) -Force).FullName
+          Copy-Item -Path "target/${{ matrix.target }}/release/crt-query.exe" -Destination $stage
+          Copy-Item -Path README.md, LICENSE-MIT, LICENSE-APACHE -Destination $stage
+
+          # Both rows build on a native runner, so the binary can be run here:
+          # an exe for the wrong architecture fails now rather than on install.
+          $exe = Join-Path $stage 'crt-query.exe'
+          $version = & $exe --version
+          if ($LASTEXITCODE -ne 0 -or -not $version) { throw "$exe did not run" }
+          Write-Host "packaging $version"
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = Join-Path $dist "$name.zip"
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+              $stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+          Remove-Item -Path $stage -Recurse -Force
+
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+              $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+          } finally {
+              $archive.Dispose()
+          }
+          $expected = @('crt-query.exe', 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE' |
+              ForEach-Object { "$name/$_" })
+          if (Compare-Object -ReferenceObject $expected -DifferenceObject $entries -CaseSensitive) {
+              throw "$name.zip holds [$($entries -join ', ')], expected [$($expected -join ', ')]"
+          }
+          Write-Host "$name.zip: $($entries -join ', ')"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
