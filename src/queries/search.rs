@@ -160,11 +160,17 @@ pub async fn run_search(
 
 /// Turn the rows every statement returned into the finished, sorted list.
 ///
-/// Split out of `run_search` for the same reason as
-/// [`crate::queries::expiring::assemble_expiring`]: everything above it needs a
-/// database and nothing here does, so the newest-first ordering — which is the
-/// whole reason the client-side sort exists — had no seam a test could reach.
-/// Deleting the sort compiled clean and left the suite green.
+/// Split out of `run_search` for the same reason as `assemble_expiring` in
+/// [`crate::queries::expiring`]: everything above it needs a database and
+/// nothing here does, so the newest-first ordering — which is the whole reason
+/// the client-side sort exists — had no seam a test could reach. Deleting the
+/// sort compiled clean and left the suite green.
+///
+/// The function is named in code rather than linked because it is private to
+/// its module. Intra-doc links resolve with Rust's own visibility rules, so a
+/// link to it from here is unresolved even under `--document-private-items`,
+/// and that broke `cargo doc` under `-D warnings`. The module is public, so
+/// linking to it keeps the pointer without widening anything's visibility.
 ///
 /// Dedup runs over the merged rows, so a certificate matching two of the terms
 /// appears once, carrying both matched identities.
