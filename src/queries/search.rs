@@ -229,7 +229,7 @@ mod tests {
         let (valid_since, skip_expired, limit) = (365i32, false, 100i64);
         cache.put(
             &Key {
-                target: source.target().unwrap(),
+                target: source.cache_identity().unwrap(),
                 sql: sql().to_string(),
                 term: "example.com".to_string(),
                 params: vec![
@@ -332,7 +332,7 @@ mod tests {
         let (valid_since, skip_expired, limit) = (365i32, true, 10i64);
         cache.put(
             &Key {
-                target: source.target().unwrap(),
+                target: source.cache_identity().unwrap(),
                 sql: sql().to_string(),
                 term: "example.com".to_string(),
                 params: vec![

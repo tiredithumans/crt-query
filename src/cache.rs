@@ -58,9 +58,15 @@ pub const CERT_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 /// collision is a miss, never a wrong answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
-    /// `host:port/dbname`. Pointing `--host` elsewhere must not read entries
-    /// written against crt.sh, or a private mirror and the public database
-    /// would answer for each other.
+    /// `host:port/dbname`, from [`crate::db::Source::cache_identity`].
+    /// Pointing `--host` elsewhere must not read entries written against
+    /// crt.sh, or a private mirror and the public database would answer for
+    /// each other, and the same goes for a second database behind one server.
+    ///
+    /// This field said `host:port/dbname` for a release while every caller
+    /// filled it with the user-facing `host:port`, so the database half of
+    /// that promise was never kept. The identity is a separate accessor now,
+    /// and the user-facing target is not something a key can be built from.
     pub target: String,
     /// The statement text itself. Editing `SEARCH_SQL` or `EXPIRING_SQL`
     /// invalidates every entry that came from the old one, which extends the

@@ -100,7 +100,7 @@ impl OutputRecord for CertDetail {
 pub async fn run_cert(source: &mut Source, cache: &Cache, id: i64) -> Result<Option<CertDetail>> {
     let cache = cache.for_certs();
     let key = Key {
-        target: source.target()?,
+        target: source.cache_identity()?,
         sql: CERT_SQL.to_string(),
         term: id.to_string(),
         params: Vec::new(),
