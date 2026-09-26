@@ -332,6 +332,10 @@ was written**. The drift is bounded by the lifetime above and stays well inside
 the day granularity those flags work in, but `--refresh` is there when you need
 the window recomputed now.
 
+Entries are keyed on the host, port and database they came from, so pointing
+`--host`, `--dbname` or `--db-url` somewhere else never serves what another
+database answered.
+
 Configure it alongside the connection:
 
 ```toml
