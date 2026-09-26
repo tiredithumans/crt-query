@@ -105,9 +105,12 @@ that release's `SHA256SUMS`, and stages the new binary beside the installed one
 so it only replaces it once it has been shown to run. **Re-run the same command
 to upgrade.**
 
-The prebuilt Linux binaries are glibc builds and need **glibc 2.34 or newer** —
-RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later. On
-an older distribution, or on a musl system such as Alpine, build from source.
+Linux has two prebuilt flavours. The glibc build needs **glibc 2.34 or newer**
+— RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later.
+The musl build is statically linked and needs nothing from the system, so it
+runs on Alpine and other musl distributions, and on a glibc older than 2.34.
+`install.sh` checks which one the machine needs and says which it chose;
+Homebrew installs the glibc build.
 
 <details>
 <summary>Script options, and installing by hand</summary>

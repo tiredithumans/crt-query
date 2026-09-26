@@ -26,6 +26,12 @@ set -eu
 REPO="tiredithumans/crt-query"
 BIN="crt-query"
 
+# The oldest glibc the -linux-gnu archives start on. It is GLIBC_FLOOR in
+# .github/workflows/release.yml (spelled GLIBC_2.34 there), which fails any
+# release whose glibc binaries need more; keep the two in step. A glibc host
+# older than this is given the static musl archive instead.
+GLIBC_FLOOR="2.34"
+
 dir="${CRT_QUERY_DIR:-/usr/local/bin}"
 version="${CRT_QUERY_VERSION:-}"
 
@@ -59,6 +65,31 @@ USAGE
 
 need() {
     command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found on PATH"
+}
+
+# True when $1, a glibc version such as "2.31", is older than GLIBC_FLOOR.
+# Anything that does not parse as <major>.<minor> answers false, so a version
+# this cannot read keeps the glibc build rather than guessing: that build is
+# right for every glibc host at or above the floor, and the staged check below
+# still refuses it, with nothing replaced, on a host where it cannot start.
+glibc_below_floor() {
+    case "$1" in
+        *.*) ;;
+        *) return 1 ;;
+    esac
+    have_major=${1%%.*}
+    have_minor=${1#*.}
+    have_minor=${have_minor%%.*}
+    floor_major=${GLIBC_FLOOR%%.*}
+    floor_minor=${GLIBC_FLOOR#*.}
+    case "$have_major" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    case "$have_minor" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    [ "$have_major" -lt "$floor_major" ] && return 0
+    [ "$have_major" -eq "$floor_major" ] && [ "$have_minor" -lt "$floor_minor" ]
 }
 
 while [ "$#" -gt 0 ]; do
@@ -106,19 +137,44 @@ fi
 
 # --- Target triple ---------------------------------------------------------
 
+# Which Linux archive was picked, and why. Printed once the target is settled,
+# because on an old glibc the answer is not the one the host's libc suggests.
+libc_note=""
 os=$(uname -s)
 case "$os" in
     Linux)
-        # Compute the honest triple. Hardcoding gnu makes a musl host match the
-        # glibc archive and walk straight past the "no build for $target"
-        # refusal below — installing a binary whose PT_INTERP does not exist,
-        # so execve returns ENOENT and the shell reports "not found" for a file
-        # that is plainly there in ls -l. Naming the target musl instead lets
-        # that refusal do its job and list what the release really ships.
+        # Compute the honest triple. Hardcoding gnu once made a musl host match
+        # the glibc archive, installing a binary whose PT_INTERP does not exist
+        # there, so execve returns ENOENT and the shell reports "not found" for
+        # a file that is plainly there in ls -l. The release now ships a static
+        # musl archive, which is what a musl host gets; a release old enough to
+        # have none meets the "no build for $target" refusal below, which lists
+        # what it does ship.
         if ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; then
             os_part="unknown-linux-musl"
+            libc_note="musl libc detected, so installing the static musl build."
         else
             os_part="unknown-linux-gnu"
+            # The glibc build needs GLIBC_FLOOR or newer: below it, ld.so
+            # refuses the binary before main, as it did every v0.4.0 install on
+            # a distribution older than the build machine. The musl build is
+            # static and needs nothing from the host, so it is the one that
+            # starts there. getconf prints "glibc 2.35"; a host where it is
+            # missing or says anything else keeps the glibc build (see
+            # glibc_below_floor).
+            glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+            case "$glibc" in
+                "glibc "[0-9]*.[0-9]*) glibc=${glibc#glibc } ;;
+                *) glibc="" ;;
+            esac
+            if [ -z "$glibc" ]; then
+                libc_note="Could not read the glibc version, so installing the glibc build."
+            elif glibc_below_floor "$glibc"; then
+                os_part="unknown-linux-musl"
+                libc_note="glibc $glibc is older than $GLIBC_FLOOR, the oldest the glibc build starts on, so installing the static musl build instead."
+            else
+                libc_note="glibc $glibc detected, so installing the glibc build."
+            fi
         fi
         ;;
     Darwin) os_part="apple-darwin" ;;
@@ -136,6 +192,7 @@ case "$machine" in
 esac
 
 target="$cpu-$os_part"
+[ -z "$libc_note" ] || note "$libc_note"
 
 # --- Release ---------------------------------------------------------------
 
