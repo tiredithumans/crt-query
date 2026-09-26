@@ -17,9 +17,8 @@ if a gate fails.
   unpushed → report "nothing to ship" and stop.
 - **Gate check:** if anything under `src/`, `Cargo.toml` or `Cargo.lock` changed, run `just verify`
   (fmt-check · lint · test · msrv · lint-scripts · doc — every offline CI gate) and stop on
-  failure. If
-  dependencies changed, run `just verify-full` instead: it adds `audit` and `deny`, the two gates
-  that need network and that a dependency bump is most likely to break.
+  failure. If dependencies changed, run `just verify-full` instead: it adds `audit` and `deny`, the
+  two gates that need network and that a dependency bump is most likely to break.
   Changes limited to docs, `.claude/` or `.github/` can skip verify — say so in the PR test plan.
   Remote CI still runs the required checks either way.
 - **Changelog check:** if the change is user-facing (a feature, a fix, or a behavior change), add an

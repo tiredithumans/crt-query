@@ -158,8 +158,9 @@ jobs:
       # the release instead of the user's install.
       #
       # Matched on the -linux-gnu suffix, not on "linux": a musl binary has no
-      # GLIBC_ verneeds to find, so this step would pass it having checked
-      # nothing. The musl rows get the step below instead.
+      # GLIBC_ verneeds at all, so the grep below finds nothing and, under
+      # pipefail, fails the step with a bare exit 1 and no annotation (tried
+      # against a local musl build). The musl rows get the step below instead.
       - name: glibc floor
         if: endsWith(matrix.target, '-linux-gnu')
         shell: bash

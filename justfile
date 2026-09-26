@@ -22,7 +22,7 @@ build-release:
 # The release ships statically linked musl archives beside the glibc ones, and
 # without this the tag push would be the first time anything compiled for a
 # musl target: the same trap `build-release` exists to close for the release
-# profile. Builds for this machine's own CPU, since the runner's cc drives the
+# profile. Builds for this machine's own CPU, since the host's cc drives the
 # link and cannot link for another architecture. No musl-tools needed: rustc
 # carries musl's CRT objects and libc.a for the target itself, and nothing in
 # the dependency tree compiles C on Linux. Linux-only, so absent elsewhere.

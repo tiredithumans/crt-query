@@ -416,6 +416,7 @@ Requires Rust 1.98+ (pinned via `rust-toolchain.toml`) and
 
 ```sh
 just build-release   # binary lands in target/release/crt-query
+just build-musl      # Linux only: static binary in target/<cpu>-unknown-linux-musl/release/
 just verify          # fmt-check · lint · test · msrv · lint-scripts · doc — offline
 just verify-full     # adds cargo-audit + cargo-deny (needs network)
 ```
