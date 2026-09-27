@@ -216,15 +216,17 @@ fn resolve_destination(path: &Path) -> PathBuf {
 /// The scratch path a report is written to before it is renamed over `target`.
 ///
 /// In the same directory, because rename is atomic only within a filesystem.
-/// The process ID keeps two runs pointed at one destination from sharing a
-/// scratch file; whichever renames last wins, which is no worse than before.
+/// The process ID and a clock tick keep two runs pointed at one destination
+/// from sharing a scratch file, including two containers that are both PID 1
+/// on a shared volume; see `cache::scratch_tag`. Whichever renames last wins,
+/// which is no worse than before.
 fn scratch_beside(target: &Path) -> io::Result<PathBuf> {
     let name = target
         .file_name()
         .ok_or_else(|| io::Error::other("destination has no file name"))?;
     let mut scratch = OsString::from(".");
     scratch.push(name);
-    scratch.push(format!(".{}.tmp", std::process::id()));
+    scratch.push(format!(".{}.tmp", crate::cache::scratch_tag()));
     Ok(target.with_file_name(scratch))
 }
 

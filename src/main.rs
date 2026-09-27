@@ -205,7 +205,7 @@ fn open_source(cli: &Cli) -> Result<(Source, Cache)> {
     let file = config::load()?;
     let env = config::EnvConfig::load()?;
     let cache = build_cache(&cli.cache, &file);
-    Ok((Source::new(config::resolve(&cli.conn, &env, &file)), cache))
+    Ok((Source::new(config::resolve(&cli.conn, &env, &file)?), cache))
 }
 
 /// Fold the cache flags and config file into a cache.
@@ -244,8 +244,20 @@ fn run_cache(action: CacheAction) -> Result<()> {
         // No absolute cache directory in this environment, so there is nowhere
         // for entries to be — see `cache::cache_root` for why relative is
         // refused rather than resolved.
-        notice!("No cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path.");
-        return Ok(());
+        //
+        // `cache path` cannot answer, and says so as an error: exiting 0 with
+        // nothing on stdout let `$(crt-query cache path)` read as an empty
+        // path, and under `--quiet` there was not even a note to say why.
+        // `cache clear` has genuinely nothing to do, so it stays a success.
+        const WHY: &str =
+            "no cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path";
+        return match action {
+            CacheAction::Path => Err(anyhow::anyhow!(WHY)),
+            CacheAction::Clear => {
+                notice!("Nothing to clear: {WHY}.");
+                Ok(())
+            }
+        };
     };
     match action {
         CacheAction::Path => println!("{}", dir.display()),

@@ -463,7 +463,7 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Where the entry at `path` is written before it is renamed into place:
-/// `[cert-]<digest>.<pid>.tmp`, beside it.
+/// `[cert-]<digest>.<pid>-<nanos>.tmp`, beside it; see [`scratch_tag`].
 ///
 /// The process ID is there for the reason `output.rs`'s `scratch_beside` gives
 /// for CSV. The scratch file used to be `[cert-]<digest>.tmp`, shared by every
@@ -488,7 +488,7 @@ fn scratch_path(path: &Path) -> PathBuf {
 /// the process ID was added to prevent. The wall clock's nanoseconds separate
 /// them; the process ID still separates two processes on one host that read
 /// the same clock tick.
-fn scratch_tag() -> String {
+pub(crate) fn scratch_tag() -> String {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());

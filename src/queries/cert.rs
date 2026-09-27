@@ -37,8 +37,9 @@ SELECT c.id, c.issuer_ca_id, ca.name AS issuer_name,
 }
 
 /// Look a certificate up by crt.sh ID. Byte-identical to the statement v0.5.x
-/// sent, which matters beyond the golden file: the statement text is part of
-/// every cache key, so changing it would orphan every cached certificate.
+/// sent. The statement text is part of every cache key, so editing it orphans
+/// every cached certificate; this release already does that once by adding
+/// the database to the key, and a gratuitous edit here would do it again.
 const CERT_SQL: &str = concat!(cert_select!(), " WHERE c.id = $1");
 
 /// Look a certificate up by the SHA-256 of its DER encoding, bound as `bytea`.
@@ -250,8 +251,8 @@ pub async fn run_cert(
 /// `cert-` filename prefix on the long-lived view is what keeps a found
 /// certificate and a miss in separate files.
 ///
-/// An ID lookup builds exactly the key v0.5.x did, so cached certificates
-/// survive the upgrade. A fingerprint lookup has its own statement and term, so
+/// An ID lookup keeps v0.5.x's statement and term; only the identity changed,
+/// when the database joined it. A fingerprint lookup has its own statement and term, so
 /// the same certificate looked up both ways is two entries: correct, if
 /// slightly wasteful, and it keeps a miss by one spelling from answering for
 /// the other.
@@ -467,9 +468,6 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
-        /// A certificate a `--refresh` run found after a miss was cached has to
-        /// win over the miss, which is still sitting in the short-lived view
-        /// until it ages out.
         #[test]
         fn a_certificate_in_the_short_lived_view_is_not_trusted() {
             // Nothing writes one there, so one found there came from somewhere
@@ -483,6 +481,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        /// A certificate a `--refresh` run found after a miss was cached has to
+        /// win over the miss, which is still sitting in the short-lived view
+        /// until it ages out.
         #[test]
         fn a_certificate_found_after_a_cached_miss_wins() {
             let dir = scratch("supersede");
@@ -545,7 +546,7 @@ mod tests {
     /// certificate is orphaned by the upgrade; a fingerprint lookup must not
     /// share it.
     #[test]
-    fn an_id_keeps_its_old_key_and_a_fingerprint_gets_its_own() {
+    fn an_id_keeps_its_old_statement_and_term_and_a_fingerprint_gets_its_own() {
         let id = cert_key("h:1/db".into(), &CertRef::Id(42));
         assert_eq!(id.sql, sql());
         assert_eq!(id.term, "42");

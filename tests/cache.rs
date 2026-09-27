@@ -559,3 +559,60 @@ fn a_certificate_looked_up_by_fingerprint_is_served_from_the_cache() {
         assert_eq!(detail["id"], 22625564176_i64);
     }
 }
+
+/// The table path has its own write, separate from `--json`'s, and it has to
+/// carry the alert through a closed reader too: `expiring --fail-on-expiring |
+/// head` is the likelier shape of the two.
+#[test]
+fn fail_on_expiring_keeps_exit_4_when_a_table_reader_goes_away() {
+    use std::process::Stdio;
+    let sandbox = Sandbox::new("fail-on-expiring-table");
+    let rows: Vec<Value> = (0..2000)
+        .map(|i| {
+            let mut row = raw_row(i, &format!("host{i}.busy.example"));
+            row["serial"] = json!(format!("{i:08x}"));
+            row
+        })
+        .collect();
+    sandbox.seed("", &Key::expiring("busy.example"), Value::Array(rows));
+
+    let mut child = sandbox
+        .command()
+        .args(["expiring", "busy.example", "--fail-on-expiring"])
+        .args(["--host", "127.0.0.1", "--port", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn crt-query");
+    drop(child.stdout.take().expect("stdout was piped"));
+    let status = child.wait().expect("wait for crt-query");
+    assert_eq!(
+        status.code(),
+        Some(4),
+        "the alert was lost to a closed pipe"
+    );
+}
+
+/// The empty-result and not-found explanations are informational: `--quiet`
+/// drops them, and the exit code still carries the answer.
+#[test]
+fn quiet_silences_the_empty_and_not_found_explanations() {
+    let sandbox = Sandbox::new("quiet-empty");
+    sandbox.seed("", &Key::search("nothing.example"), json!([]));
+    sandbox.seed("", &Key::cert(99), Value::Null);
+
+    let loud = sandbox.run(&["search", "nothing.example"]);
+    assert!(
+        stderr(&loud).contains("No certificates found"),
+        "{}",
+        stderr(&loud)
+    );
+
+    let empty = sandbox.run(&["--quiet", "search", "nothing.example"]);
+    assert_eq!(code(&empty), 0);
+    assert_eq!(stderr(&empty), "");
+
+    let missing = sandbox.run(&["--quiet", "cert", "99"]);
+    assert_eq!(code(&missing), 3, "not found is still exit 3");
+    assert_eq!(stderr(&missing), "");
+}

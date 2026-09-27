@@ -52,7 +52,7 @@ them all. Clippy runs with `-D warnings`, rustdoc with `-D warnings`.
 
 - `src/main.rs` exit codes and dispatch · `src/cli.rs` clap definition ·
   `src/db.rs` connect/retry and error translation · `src/cache.rs` result
-  cache · `src/queries/` the three statements · `src/output.rs` table/JSON/CSV.
+  cache · `src/queries/` the SQL statements and their readers · `src/output.rs` table/JSON/CSV.
 - `install.sh`, `install.ps1`, `packaging/homebrew/generate.sh` and
   `.github/workflows/release.yml` make up the release channel.
 - `.claude/skills/release` cuts a release; `.claude/skills/ship` lands a change

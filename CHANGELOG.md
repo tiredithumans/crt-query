@@ -77,6 +77,18 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Changed
 
+- **A `db_url` combined with a setting from a higher-precedence source is now
+  an error.** A config-file `db_url` used to override an explicit `--host` or
+  `--port` without a word, contradicting the documented precedence and sending
+  the query somewhere the caller had said not to; the new environment layer
+  would have made that easy to hit. A `db_url` still replaces the individual
+  settings from its own layer and those below it, and `--db-url` with `--host`
+  on one command line still means the URL. `--port 6432` with a `db_url` in the
+  config file, or `CRT_QUERY_HOST` with one there, now fails before connecting
+  and names both.
+- `crt-query cache path` exits `1` when the environment names no absolute cache
+  directory, instead of exiting `0` with nothing on stdout, which
+  `$(crt-query cache path)` read as an empty path.
 - The generated Homebrew formula is no longer committed. The release workflow
   generates it and pushes it to the tap, so the copy here only ever went stale
   (it still named v0.5.1 after v0.5.2 shipped).

@@ -311,7 +311,11 @@ connect, so a stray one cannot break `completions` or `cache`, and `--help`
 names them without printing their values.
 
 Precedence, highest first: command-line flag, environment variable, config
-file, built-in default. A missing file is fine. A file that exists but does not parse is an error — an
+file, built-in default. A `db_url` sets the whole connection, so it replaces
+the host, port, database and user from its own layer and every layer below it.
+One given *above* it — `--port` with a `db_url` in the config file, say, or
+`CRT_QUERY_HOST` with one there — is an error naming both, rather than a silent
+guess at which you meant. A missing file is fine. A file that exists but does not parse is an error — an
 unknown or misspelled key fails the run rather than being ignored, so a typo
 cannot quietly leave you querying somewhere you did not intend.
 

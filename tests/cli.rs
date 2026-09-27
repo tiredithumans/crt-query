@@ -376,27 +376,41 @@ fn the_cache_lives_where_the_environment_says_and_clears_from_there() {
 }
 
 /// A relative `$XDG_CACHE_HOME` must not be resolved against the working
-/// directory — see `cache::cache_root`. The run still has to succeed, because a
-/// cache that cannot find a home is a missing optimisation, not a failure.
+/// directory — see `cache::cache_root`. A query still works without a cache,
+/// but `cache path` has no answer to give, and says so as an error rather than
+/// exiting 0 with an empty stdout that `$(crt-query cache path)` would read as
+/// a path. `cache clear` has nothing to do, which is a success.
 #[cfg(not(windows))]
 #[test]
 fn a_relative_cache_home_yields_no_cache_rather_than_a_local_one() {
-    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
-        .args(["cache", "path"])
-        .env("XDG_CACHE_HOME", "relative/path")
-        .env_remove("HOME")
-        .output()
-        .expect("failed to run the crt-query binary");
-    assert_eq!(code(&out), 0, "cache path exited {}", code(&out));
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_crt-query"))
+            .args(args)
+            .env("XDG_CACHE_HOME", "relative/path")
+            .env_remove("HOME")
+            .output()
+            .expect("failed to run the crt-query binary")
+    };
+    for args in [&["cache", "path"][..], &["--quiet", "cache", "path"][..]] {
+        let out = run(args);
+        assert_eq!(code(&out), 1, "{args:?} exited {}", code(&out));
+        assert!(
+            stdout(&out).trim().is_empty(),
+            "a relative cache home must name no directory, got: {}",
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains("no cache directory"),
+            "{args:?}: expected the reason on stderr even under --quiet, got: {}",
+            stderr(&out)
+        );
+    }
+    let clear = run(&["cache", "clear"]);
+    assert_eq!(code(&clear), 0, "{}", stderr(&clear));
     assert!(
-        stdout(&out).trim().is_empty(),
-        "a relative cache home must name no directory, got: {}",
-        stdout(&out)
-    );
-    assert!(
-        stderr(&out).contains("No cache directory"),
-        "expected the reason on stderr, got: {}",
-        stderr(&out)
+        stderr(&clear).contains("Nothing to clear"),
+        "{}",
+        stderr(&clear)
     );
 }
 
@@ -537,4 +551,41 @@ fn quiet_still_reports_errors() {
         "{}",
         stderr(&out)
     );
+}
+
+/// A `db_url` from a lower layer used to beat a setting from a higher one, so an
+/// exported CRT_QUERY_DB_URL silently overrode an explicit `--port`. It is now
+/// a conflict, caught before any connection is attempted.
+#[test]
+fn a_flag_under_an_environment_db_url_is_a_conflict() {
+    let out = run_with_env(
+        &["search", "example.com", "--port", "2"],
+        &[(
+            "CRT_QUERY_DB_URL",
+            "postgresql://guest@127.0.0.1:1/certwatch",
+        )],
+    );
+    let err = stderr(&out);
+    assert_eq!(code(&out), 1, "{err}");
+    assert!(
+        err.contains("--port conflicts with CRT_QUERY_DB_URL"),
+        "{err}"
+    );
+    assert!(!err.contains("could not connect"), "{err}");
+}
+
+/// `cache clear`'s count is informational, so `--quiet` drops it.
+#[cfg(not(windows))]
+#[test]
+fn quiet_silences_cache_clear() {
+    let home = std::env::temp_dir().join(format!("crt-query-quiet-clear-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("create scratch XDG_CACHE_HOME");
+    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+        .args(["--quiet", "cache", "clear"])
+        .env("XDG_CACHE_HOME", &home)
+        .output()
+        .expect("failed to run the crt-query binary");
+    assert_eq!(code(&out), 0);
+    assert_eq!(stderr(&out), "", "--quiet printed an informational line");
+    let _ = std::fs::remove_dir_all(&home);
 }
