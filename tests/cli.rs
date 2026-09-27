@@ -265,6 +265,10 @@ fn exit_code_documentation_is_present_for_the_case_this_suite_cannot_reach() {
         "README no longer documents exit 3; the only offline record of the \
          not-found contract is this line plus the constant in src/main.rs"
     );
+    assert!(
+        readme.contains("`4` `expiring --fail-on-expiring`"),
+        "README no longer documents exit 4 for expiring --fail-on-expiring"
+    );
 }
 
 /// `precheck_csv` creates the destination to prove it is writable, then removes

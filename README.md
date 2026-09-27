@@ -205,6 +205,9 @@ crt-query cert 22625564176
 
 # What is expiring, or recently expired
 crt-query expiring example.com example.org --within 30
+
+# The same as a monitoring check: exit 4 when anything is listed
+crt-query --quiet expiring example.com --skip-expired --within 14 --fail-on-expiring
 ```
 
 `--json` writes JSON to stdout instead of a table, and `--csv <path>`
@@ -258,7 +261,7 @@ anything close to renewal.
 | `completions` | Emits a shell script rather than a record, so it ignores both `--json` and `--csv` and never creates the CSV destination |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
 | Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |
-| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
+| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID · `4` `expiring --fail-on-expiring` found certificates to report. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
 
 Left to size itself, the table keeps atomic columns — an ID, a hex serial, a
 timestamp — off the wrapping list, and holds a floor under the free-text ones so

@@ -268,15 +268,29 @@ fn replace_file<T>(path: &Path, write: impl FnOnce(&File) -> Result<T>) -> Resul
 /// a script depends on, and skipping the CSV write would leave a stale file
 /// from a previous run in place.
 pub fn emit<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
+    emit_exiting(rows, out, crate::EXIT_OK)
+}
+
+/// [`emit`], for a run that has already decided on an exit status other than
+/// success: a reader that goes away mid-write ends the run with
+/// `broken_pipe_exit` rather than 0, for the reason [`on_stdout_with`] gives.
+/// `expiring --fail-on-expiring` is the caller, and piping its alert into
+/// `head` must not turn "certificates are expiring" into "all clear".
+pub fn emit_exiting<T: OutputRecord>(
+    rows: &[T],
+    out: &OutputOpts,
+    broken_pipe_exit: i32,
+) -> Result<()> {
     write_csv_if_requested(rows, out)?;
     if out.json {
-        return write_json(rows);
+        return on_stdout_with(broken_pipe_exit, |w| json_to(w, rows));
     }
     if rows.is_empty() {
         // The caller has already explained the empty result on stderr.
         return Ok(());
     }
-    print_table(&build_table(rows, out))
+    let table = build_table(rows, out);
+    on_stdout_with(broken_pipe_exit, |w| writeln!(w, "{table}"))
 }
 
 /// Render a single record as a key/value detail table, a JSON object,
@@ -459,10 +473,14 @@ pub fn emit_raw(bytes: &[u8]) -> Result<()> {
 }
 
 fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
-    on_stdout(|w| {
-        serde_json::to_writer_pretty(&mut *w, value).map_err(io::Error::from)?;
-        writeln!(w)
-    })
+    on_stdout(|w| json_to(w, value))
+}
+
+/// Pretty-printed JSON and a trailing newline, the one shape every JSON
+/// document this tool prints takes.
+fn json_to<T: Serialize + ?Sized>(w: &mut dyn Write, value: &T) -> io::Result<()> {
+    serde_json::to_writer_pretty(&mut *w, value).map_err(io::Error::from)?;
+    writeln!(w)
 }
 
 /// Run a write against stdout, treating a reader that has gone away

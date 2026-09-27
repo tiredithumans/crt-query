@@ -42,6 +42,7 @@ use serde_json::{Value, json};
 /// are part of every key, so these are the key material too.
 const SEARCH_SQL: &str = include_str!("../src/queries/golden/search.sql");
 const CERT_SQL: &str = include_str!("../src/queries/golden/cert.sql");
+const EXPIRING_SQL: &str = include_str!("../src/queries/golden/expiring.sql");
 
 /// `host:port/dbname` for `--host 127.0.0.1 --port 1` and the default
 /// database, as `Source::cache_identity` renders it.
@@ -79,6 +80,22 @@ impl Key {
                 format!("{:?}", 365i32),
                 format!("{:?}", false),
                 format!("{:?}", limit),
+            ],
+        }
+    }
+
+    /// The key `expiring <domain>` builds with every flag at its default:
+    /// `--within 30` and `--since-expired 30` (both `i32`), `--limit 500` (an
+    /// `i64`).
+    fn expiring(domain: &str) -> Self {
+        Self {
+            target: IDENTITY.to_string(),
+            sql: EXPIRING_SQL.to_string(),
+            term: domain.to_string(),
+            params: vec![
+                format!("{:?}", 30i32),
+                format!("{:?}", 30i32),
+                format!("{:?}", 500i64),
             ],
         }
     }
@@ -439,5 +456,66 @@ fn quiet_silences_every_informational_line_but_keeps_the_output() {
     assert!(
         csv.exists(),
         "--quiet must not skip the report it was asked for"
+    );
+}
+
+/// `expiring --fail-on-expiring` exits 4 when the report lists anything, so a
+/// monitoring check can act on the status alone, and prints the report either
+/// way. Without the flag the same report is an ordinary exit 0.
+#[test]
+fn fail_on_expiring_exits_4_only_when_there_is_something_to_report() {
+    let sandbox = Sandbox::new("fail-on-expiring");
+    sandbox.seed(
+        "",
+        &Key::expiring("busy.example"),
+        json!([raw_row(7, "busy.example")]),
+    );
+    sandbox.seed("", &Key::expiring("quiet.example"), json!([]));
+
+    let alert = sandbox.run(&["expiring", "busy.example", "--fail-on-expiring", "--json"]);
+    assert_eq!(code(&alert), 4, "stderr was:\n{}", stderr(&alert));
+    assert_never_dialled(&alert);
+    let rows: Value = serde_json::from_str(&stdout(&alert)).expect("the report is still printed");
+    assert_eq!(rows[0]["id"], 7);
+
+    let plain = sandbox.run(&["expiring", "busy.example"]);
+    assert_eq!(code(&plain), 0, "without the flag a report is a success");
+
+    let empty = sandbox.run(&["expiring", "quiet.example", "--fail-on-expiring"]);
+    assert_eq!(code(&empty), 0, "nothing to report is not an alert");
+}
+
+/// The alert survives a reader that stops early. The broken-pipe path used to
+/// exit 0 from inside the writer, which for this flag would turn "certificates
+/// are expiring" into "all clear" the moment someone piped it into `head`.
+#[test]
+fn fail_on_expiring_keeps_exit_4_when_the_reader_goes_away() {
+    use std::process::Stdio;
+    let sandbox = Sandbox::new("fail-on-expiring-pipe");
+    // Enough rows that the JSON outgrows the pipe buffer, so the write is
+    // still in progress when the reader goes away.
+    let rows: Vec<Value> = (0..2000)
+        .map(|i| {
+            let mut row = raw_row(i, &format!("host{i}.busy.example"));
+            row["serial"] = json!(format!("{i:08x}"));
+            row
+        })
+        .collect();
+    sandbox.seed("", &Key::expiring("busy.example"), Value::Array(rows));
+
+    let mut child = sandbox
+        .command()
+        .args(["expiring", "busy.example", "--fail-on-expiring", "--json"])
+        .args(["--host", "127.0.0.1", "--port", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn crt-query");
+    drop(child.stdout.take().expect("stdout was piped"));
+    let status = child.wait().expect("wait for crt-query");
+    assert_eq!(
+        status.code(),
+        Some(4),
+        "the alert was lost to a closed pipe"
     );
 }

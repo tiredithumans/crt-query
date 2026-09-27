@@ -37,6 +37,13 @@ const EXIT_ERROR: i32 = 1;
 /// false "the certificate is gone" alert, which is the exact confusion this
 /// code exists to prevent.
 const EXIT_NOT_FOUND: i32 = 3;
+/// `expiring --fail-on-expiring` found something to report: a certificate
+/// expiring inside `--within`, or one already expired inside the look-back.
+///
+/// Not EXIT_ERROR, because nothing failed, and not 2 or 3, which already mean
+/// "you typed it wrong" and "no such certificate". A monitoring check has to be
+/// able to tell "act on this" from "the check itself broke".
+const EXIT_EXPIRING: i32 = 4;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -123,6 +130,7 @@ async fn run() -> Result<i32> {
             skip_expired,
             limit,
             no_dedupe,
+            fail_on_expiring,
         } => {
             let domains = Commands::unique_terms(domain);
             let lookback = Commands::expiring_lookback(*since_expired, *skip_expired);
@@ -154,7 +162,15 @@ async fn run() -> Result<i32> {
             } else if report.window_hid_certificates() {
                 notice!("{}", saturation_note(*limit, &domains, &report));
             }
-            output::emit(&report.rows, &cli.out)?;
+            // Decided before writing, so a reader that goes away mid-report
+            // cannot turn the alert into a success; see `emit_exiting`.
+            let code = if *fail_on_expiring && !report.rows.is_empty() {
+                EXIT_EXPIRING
+            } else {
+                EXIT_OK
+            };
+            output::emit_exiting(&report.rows, &cli.out, code)?;
+            return Ok(code);
         }
         // None of the following needs the database.
         Commands::Cache { action } => run_cache(*action)?,
@@ -418,6 +434,7 @@ mod tests {
             ("EXIT_OK", EXIT_OK),
             ("EXIT_ERROR", EXIT_ERROR),
             ("EXIT_NOT_FOUND", EXIT_NOT_FOUND),
+            ("EXIT_EXPIRING", EXIT_EXPIRING),
         ] {
             assert_ne!(code, CLAP_USAGE_ERROR, "{name} collides with clap's exit 2");
         }
@@ -429,7 +446,11 @@ mod tests {
             EXIT_NOT_FOUND, 3,
             "README documents exit 3 for a missing certificate"
         );
-        let mut codes = [EXIT_OK, EXIT_ERROR, EXIT_NOT_FOUND];
+        assert_eq!(
+            EXIT_EXPIRING, 4,
+            "README documents exit 4 for expiring --fail-on-expiring"
+        );
+        let mut codes = [EXIT_OK, EXIT_ERROR, EXIT_NOT_FOUND, EXIT_EXPIRING];
         codes.sort_unstable();
         let distinct = codes.windows(2).all(|w| w[0] != w[1]);
         assert!(distinct, "exit codes must stay distinguishable: {codes:?}");

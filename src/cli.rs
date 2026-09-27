@@ -197,6 +197,12 @@ pub enum Commands {
         /// pairs not collapsed
         #[arg(long)]
         no_dedupe: bool,
+
+        /// Exit 4 instead of 0 when the report lists any certificate, so cron
+        /// or a monitoring check can act on the status alone. The report is
+        /// printed in full either way
+        #[arg(long)]
+        fail_on_expiring: bool,
     },
 
     /// Inspect or clear the local result cache

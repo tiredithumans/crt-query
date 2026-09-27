@@ -20,7 +20,8 @@ points at what matters most.
   `src/queries/golden/`; re-blessing one means re-checking the columns its
   reader pulls out by name.
 - **Machine contracts are pinned by tests.** Exit codes (`0` done, `1` failed,
-  `2` clap usage error, `3` no such certificate), the `--json` key sets, CSV
+  `2` clap usage error, `3` no such certificate, `4` `expiring
+  --fail-on-expiring` found something), the `--json` key sets, CSV
   headers and header-only files for empty results, and the on-disk cache
   format (`tests/cache.rs` re-implements its filename digest on purpose). Change
   one only deliberately, with its test and the README.
