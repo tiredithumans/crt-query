@@ -11,6 +11,8 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-27
+
 ### Added
 
 - **`cert` accepts a SHA-256 fingerprint as well as a crt.sh ID.**
@@ -616,7 +618,8 @@ Initial release.
   checksum. `cargo-audit`, `cargo-deny` and CodeQL run on every PR and weekly.
 - Dual-licensed MIT OR Apache-2.0. Requires Rust 1.98+.
 
-[Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/tiredithumans/crt-query/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/tiredithumans/crt-query/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/tiredithumans/crt-query/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tiredithumans/crt-query/compare/v0.4.1...v0.5.0
