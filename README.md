@@ -223,8 +223,8 @@ matched identities. An empty or whitespace-only name — usually an unset shell
 variable — is a usage error (exit 2) rather than a query that finds nothing.
 
 Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
-`--db-url postgresql://…`. Set them once in a [config file](#configuration)
-rather than on every run.
+`--db-url postgresql://…`. Set them once in a [config file](#configuration) or
+in the environment rather than on every run.
 
 ## The search window
 
@@ -295,8 +295,15 @@ user = "guest"
 # db_url = "postgresql://guest@crt.sh:5432/certwatch"
 ```
 
-Precedence, highest first: command-line flag, config file, built-in default. A
-missing file is fine. A file that exists but does not parse is an error — an
+Each connection setting can also come from the environment, which suits a
+container or a CI job where writing a file is awkward: `CRT_QUERY_HOST`,
+`CRT_QUERY_PORT`, `CRT_QUERY_DBNAME`, `CRT_QUERY_USER` and `CRT_QUERY_DB_URL`.
+An empty variable counts as unset. They are read only by the subcommands that
+connect, so a stray one cannot break `completions` or `cache`, and `--help`
+names them without printing their values.
+
+Precedence, highest first: command-line flag, environment variable, config
+file, built-in default. A missing file is fine. A file that exists but does not parse is an error — an
 unknown or misspelled key fails the run rather than being ignored, so a typo
 cannot quietly leave you querying somewhere you did not intend.
 

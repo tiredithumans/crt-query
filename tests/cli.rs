@@ -410,3 +410,103 @@ fn no_cache_and_refresh_cannot_be_combined() {
         stderr(&out)
     );
 }
+
+/// The binary with a clean environment for the `CRT_QUERY_*` tests: no config
+/// file can leak in from the developer's own home, and the cache is off so a
+/// previous run's entry cannot answer instead of the connection being tried.
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let home = std::env::temp_dir().join(format!("crt-query-env-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("create scratch config home");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_crt-query"));
+    cmd.arg("--no-cache")
+        .args(args)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home);
+    for var in [
+        "CRT_QUERY_HOST",
+        "CRT_QUERY_PORT",
+        "CRT_QUERY_DBNAME",
+        "CRT_QUERY_USER",
+        "CRT_QUERY_DB_URL",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.envs(env.iter().copied())
+        .output()
+        .expect("failed to run the crt-query binary")
+}
+
+/// The variables reach the connection, and a flag still beats them: the host
+/// and port in the error are the proof, since nothing listens on port 1.
+#[test]
+fn connection_settings_can_come_from_the_environment() {
+    let from_env = run_with_env(
+        &["search", "example.com"],
+        &[("CRT_QUERY_HOST", "127.0.0.1"), ("CRT_QUERY_PORT", "1")],
+    );
+    assert_eq!(code(&from_env), 1);
+    assert!(
+        stderr(&from_env).contains("could not connect to 127.0.0.1:1"),
+        "{}",
+        stderr(&from_env)
+    );
+
+    let flag_wins = run_with_env(
+        &["search", "example.com", "--port", "1"],
+        &[("CRT_QUERY_HOST", "127.0.0.1"), ("CRT_QUERY_PORT", "2")],
+    );
+    assert!(
+        stderr(&flag_wins).contains("could not connect to 127.0.0.1:1"),
+        "an explicit --port must beat CRT_QUERY_PORT:\n{}",
+        stderr(&flag_wins)
+    );
+}
+
+/// A bad `CRT_QUERY_DB_URL` is reported under its own name, before any
+/// connection is attempted, and never as a `--db-url` the caller did not type.
+#[test]
+fn a_bad_environment_db_url_names_the_variable_not_the_flag() {
+    let out = run_with_env(
+        &["search", "example.com"],
+        &[("CRT_QUERY_DB_URL", "not a url")],
+    );
+    let err = stderr(&out);
+    assert_eq!(code(&out), 1, "{err}");
+    assert!(err.contains("invalid CRT_QUERY_DB_URL"), "{err}");
+    assert!(
+        !err.contains("--db-url"),
+        "blamed a flag nobody typed:\n{err}"
+    );
+    assert!(!err.contains("could not connect"), "{err}");
+}
+
+/// The variables are read only when a connection is resolved, so a stray or
+/// empty one cannot break a subcommand that never connects.
+#[test]
+fn a_bad_or_empty_variable_does_not_break_subcommands_that_never_connect() {
+    for value in ["", "not-a-port"] {
+        let out = run_with_env(&["completions", "bash"], &[("CRT_QUERY_PORT", value)]);
+        assert_eq!(code(&out), 0, "CRT_QUERY_PORT={value:?}: {}", stderr(&out));
+    }
+}
+
+/// `--help` names the variables and never prints their values: a
+/// `CRT_QUERY_DB_URL` can carry a password, and `--help` output is what people
+/// paste into bug reports.
+#[test]
+fn help_names_the_variables_without_echoing_their_values() {
+    let out = run_with_env(
+        &["search", "--help"],
+        &[(
+            "CRT_QUERY_DB_URL",
+            "postgresql://u:hunter2@db.internal/certwatch",
+        )],
+    );
+    let help = stdout(&out);
+    assert!(help.contains("CRT_QUERY_DB_URL"), "{help}");
+    assert!(help.contains("CRT_QUERY_HOST"), "{help}");
+    assert!(
+        !help.contains("hunter2"),
+        "a password reached --help:\n{help}"
+    );
+}

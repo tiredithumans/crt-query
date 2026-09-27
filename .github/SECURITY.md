@@ -34,8 +34,9 @@ Things that are in scope:
   and before `PATH`. On a system that takes the fallback, a `curl.exe` sitting
   next to an unpacked `crt-query.exe` still wins, whether or not that directory
   is on `PATH`.
-- Credential disclosure through `--db-url` when pointing the tool at a private
-  database — for example a password reaching stderr, a log, or an error message.
+- Credential disclosure through `--db-url`, `CRT_QUERY_DB_URL` or the config
+  file's `db_url` when pointing the tool at a private database — for example a
+  password reaching stderr, a log, an error message, or `--help` output.
 - Injection into the SQL sent to the server. Every user value is bound as a
   typed parameter; a way to break out of that is a real finding.
 

@@ -26,27 +26,32 @@ pub struct Cli {
 }
 
 /// Connection flags. Every field is optional so that a value left unset on the
-/// command line can fall back to the config file, then to the built-in
-/// defaults — see `config::resolve`.
+/// command line can fall back to a `CRT_QUERY_*` environment variable, then to
+/// the config file, then to the built-in defaults — see `config::resolve`.
+///
+/// The variables are read by `config::EnvConfig` rather than through clap's
+/// `env` attribute (see there for why), so the help text names each one by
+/// hand. It names the variable, never its value, which may carry a password.
 #[derive(Args)]
 pub struct ConnOpts {
-    /// Database host (default: crt.sh)
+    /// Database host (default: crt.sh; env: CRT_QUERY_HOST)
     #[arg(long, global = true)]
     pub host: Option<String>,
 
-    /// Database port (default: 5432)
+    /// Database port (default: 5432; env: CRT_QUERY_PORT)
     #[arg(long, global = true)]
     pub port: Option<u16>,
 
-    /// Database name (default: certwatch)
+    /// Database name (default: certwatch; env: CRT_QUERY_DBNAME)
     #[arg(long, global = true)]
     pub dbname: Option<String>,
 
-    /// Database user (default: guest)
+    /// Database user (default: guest; env: CRT_QUERY_USER)
     #[arg(long, global = true)]
     pub user: Option<String>,
 
     /// Full postgres:// URL; overrides --host/--port/--dbname/--user
+    /// (env: CRT_QUERY_DB_URL)
     #[arg(long, global = true, value_name = "URL")]
     pub db_url: Option<String>,
 }

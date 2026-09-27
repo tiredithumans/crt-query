@@ -169,8 +169,9 @@ async fn run() -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Resolve the connection settings — CLI flags over config file over built-in
-/// defaults — and the cache that fronts them.
+/// Resolve the connection settings — CLI flags over `CRT_QUERY_*` environment
+/// variables over config file over built-in defaults — and the cache that
+/// fronts them.
 ///
 /// Called from inside the subcommand arms rather than once up front, so that
 /// `completions` and `check-update` neither read the config file nor open a
@@ -182,8 +183,9 @@ async fn run() -> Result<i32> {
 /// regularly refuses connections.
 fn open_source(cli: &Cli) -> Result<(Source, Cache)> {
     let file = config::load()?;
+    let env = config::EnvConfig::load()?;
     let cache = build_cache(&cli.cache, &file);
-    Ok((Source::new(config::resolve(&cli.conn, &file)), cache))
+    Ok((Source::new(config::resolve(&cli.conn, &env, &file)), cache))
 }
 
 /// Fold the cache flags and config file into a cache.
