@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::queries::cert::CertRef;
+
 /// Look-back that disables the `search` validity floor entirely.
 pub const ALL_HISTORY: i32 = 0;
 
@@ -148,10 +150,13 @@ pub enum Commands {
         no_dedupe: bool,
     },
 
-    /// Show full details for one certificate by crt.sh ID
+    /// Show full details for one certificate, by crt.sh ID or SHA-256
+    /// fingerprint
     Cert {
-        /// crt.sh certificate ID
-        id: i64,
+        /// crt.sh certificate ID, or the certificate's SHA-256 fingerprint
+        /// (64 hex digits; colons, as openssl prints them, are allowed)
+        #[arg(value_name = "ID|SHA256", value_parser = CertRef::parse)]
+        certificate: CertRef,
     },
 
     /// Report expired or soon-expiring certificates for one or more domains

@@ -43,6 +43,7 @@ use serde_json::{Value, json};
 const SEARCH_SQL: &str = include_str!("../src/queries/golden/search.sql");
 const CERT_SQL: &str = include_str!("../src/queries/golden/cert.sql");
 const EXPIRING_SQL: &str = include_str!("../src/queries/golden/expiring.sql");
+const CERT_SHA256_SQL: &str = include_str!("../src/queries/golden/cert_sha256.sql");
 
 /// `host:port/dbname` for `--host 127.0.0.1 --port 1` and the default
 /// database, as `Source::cache_identity` renders it.
@@ -107,6 +108,17 @@ impl Key {
             target: IDENTITY.to_string(),
             sql: CERT_SQL.to_string(),
             term: id.to_string(),
+            params: Vec::new(),
+        }
+    }
+
+    /// The key `cert <fingerprint>` builds: its own statement, and the
+    /// lowercase fingerprint behind a prefix no crt.sh ID can have.
+    fn cert_by_sha256(hex: &str) -> Self {
+        Self {
+            target: IDENTITY.to_string(),
+            sql: CERT_SHA256_SQL.to_string(),
+            term: format!("sha256:{hex}"),
             params: Vec::new(),
         }
     }
@@ -518,4 +530,32 @@ fn fail_on_expiring_keeps_exit_4_when_the_reader_goes_away() {
         Some(4),
         "the alert was lost to a closed pipe"
     );
+}
+
+/// A fingerprint lookup finds its own entries, in any spelling openssl or a
+/// browser would print, and never dials when the answer is on disk.
+#[test]
+fn a_certificate_looked_up_by_fingerprint_is_served_from_the_cache() {
+    let hex = "5c83f01af4edf38533f0da804bb740960120e9da1129216281a8542aea374bdd";
+    let sandbox = Sandbox::new("cert-sha256");
+    sandbox.seed(
+        CERT_PREFIX,
+        &Key::cert_by_sha256(hex),
+        cert_detail(22625564176),
+    );
+
+    let colons: String = hex
+        .to_uppercase()
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).unwrap())
+        .collect::<Vec<_>>()
+        .join(":");
+    for spelling in [hex.to_string(), colons] {
+        let out = sandbox.run(&["cert", &spelling, "--json"]);
+        assert_eq!(code(&out), 0, "{spelling}: {}", stderr(&out));
+        assert_never_dialled(&out);
+        let detail: Value = serde_json::from_str(&stdout(&out)).expect("--json prints JSON");
+        assert_eq!(detail["id"], 22625564176_i64);
+    }
 }

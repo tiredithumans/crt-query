@@ -35,7 +35,8 @@ $ crt-query search example.com --skip-expired --limit 10
 ```
 
 **What is inside one certificate.** Everything crt.sh holds for one ID, SANs
-included:
+included. The SHA-256 fingerprint works in place of the ID, bare or
+colon-separated as `openssl x509 -fingerprint -sha256` prints it:
 
 ```console
 $ crt-query cert 22625564176
@@ -200,8 +201,9 @@ crt-query search example.com --limit 100
 # Several names at once, and only certificates that are still valid
 crt-query search example.com example.org --skip-expired
 
-# Everything in one certificate, by crt.sh ID
+# Everything in one certificate, by crt.sh ID or SHA-256 fingerprint
 crt-query cert 22625564176
+crt-query cert 5c83f01af4edf38533f0da804bb740960120e9da1129216281a8542aea374bdd
 
 # What is expiring, or recently expired
 crt-query expiring example.com example.org --within 30

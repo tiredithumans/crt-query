@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,9 +13,15 @@ use crate::queries::{column, timestamp};
 /// Column index of the multi-valued SAN field within `cells()`.
 const SANS_COL: usize = 9;
 
-// ARRAY(SELECT ...) collapses the set-returning x509_altNames into a single
-// text[] column, so this stays one row per certificate.
-const CERT_SQL: &str = "\
+/// The projection and join both `cert` statements share; they differ only in
+/// their `WHERE`. A macro rather than a `const` so the two statements can be
+/// built with `concat!`, which takes literals only, and stay `&'static str`.
+///
+/// ARRAY(SELECT ...) collapses the set-returning x509_altNames into a single
+/// text[] column, so this stays one row per certificate.
+macro_rules! cert_select {
+    () => {
+        "\
 SELECT c.id, c.issuer_ca_id, ca.name AS issuer_name,
        x509_subjectName(c.certificate) AS subject,
        x509_commonName(c.certificate) AS common_name,
@@ -24,7 +32,103 @@ SELECT c.id, c.issuer_ca_id, ca.name AS issuer_name,
        ARRAY(SELECT x509_altNames(c.certificate)) AS sans
   FROM certificate c
   LEFT JOIN ca ON ca.id = c.issuer_ca_id
- WHERE c.id = $1";
+"
+    };
+}
+
+/// Look a certificate up by crt.sh ID. Byte-identical to the statement v0.5.x
+/// sent, which matters beyond the golden file: the statement text is part of
+/// every cache key, so changing it would orphan every cached certificate.
+const CERT_SQL: &str = concat!(cert_select!(), " WHERE c.id = $1");
+
+/// Look a certificate up by the SHA-256 of its DER encoding, bound as `bytea`.
+///
+/// The predicate is spelt exactly as crt.sh's expression index on the
+/// certificate table is (`digest(certificate, 'sha256')`), which is what keeps
+/// this an index lookup rather than a hash of every certificate ever logged;
+/// the crt.sh website's own `?sha256=` search goes the same way. Comparing on
+/// `encode(..., 'hex')` instead, or on the text form of the fingerprint, would
+/// not match the index and would run into the guest database's statement
+/// timeout.
+const CERT_BY_SHA256_SQL: &str = concat!(
+    cert_select!(),
+    " WHERE digest(c.certificate, 'sha256') = $1"
+);
+
+/// What `cert` was asked to look up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertRef {
+    /// A crt.sh certificate ID.
+    Id(i64),
+    /// The SHA-256 fingerprint of the certificate: what browsers, `openssl
+    /// x509 -fingerprint -sha256` and other CT tools show, and what a
+    /// certificate is known by before anyone has looked up its crt.sh ID.
+    Sha256([u8; 32]),
+}
+
+impl CertRef {
+    /// Parse a `cert` argument: a crt.sh ID, or a SHA-256 fingerprint as 64
+    /// hex digits, optionally colon-separated as `openssl` prints it.
+    ///
+    /// An ID is tried first and only up to 19 digits, the most an `i64` holds,
+    /// so a fingerprint that happens to be all decimal digits is still read as
+    /// a fingerprint. Anything else is a usage error, which clap reports with
+    /// exit 2 — the reason exit 3 means "no such certificate" and nothing else.
+    pub fn parse(arg: &str) -> Result<Self, String> {
+        if !arg.is_empty() && arg.len() <= 19 && arg.bytes().all(|b| b.is_ascii_digit()) {
+            return arg
+                .parse()
+                .map(Self::Id)
+                .map_err(|e| format!("not a crt.sh ID: {e}"));
+        }
+        let hex: String = arg.chars().filter(|c| *c != ':').collect();
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let mut digest = [0_u8; 32];
+            let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+            for (byte, pair) in digest.iter_mut().zip(pairs) {
+                // Both are ASCII hex digits, checked above.
+                let pair = std::str::from_utf8(pair).expect("ASCII");
+                *byte = u8::from_str_radix(pair, 16).expect("hex digits");
+            }
+            return Ok(Self::Sha256(digest));
+        }
+        Err(
+            "expected a crt.sh ID or a SHA-256 fingerprint (64 hex digits, colons allowed)"
+                .to_string(),
+        )
+    }
+
+    /// What goes in the cache key's `term`: the ID as v0.5.x wrote it, or the
+    /// fingerprint in lowercase hex with a prefix no ID can have.
+    fn term(&self) -> String {
+        match self {
+            Self::Id(id) => id.to_string(),
+            Self::Sha256(digest) => format!("sha256:{}", hex(digest)),
+        }
+    }
+}
+
+/// How the lookup is named on stderr: "No certificate with crt.sh ID 42.",
+/// "querying … for SHA-256 fingerprint 5c83…".
+impl fmt::Display for CertRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Id(id) => write!(f, "crt.sh ID {id}"),
+            Self::Sha256(digest) => write!(f, "SHA-256 fingerprint {}", hex(digest)),
+        }
+    }
+}
+
+/// Lowercase hex, the form crt.sh and this tool's `sha256_fingerprint` use.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CertDetail {
@@ -104,16 +208,25 @@ impl OutputRecord for CertDetail {
 /// full thirty days, and the lookup went on reporting "no such certificate"
 /// (exit 3) for a month after the certificate arrived. See [`recall`] and
 /// [`remember`] for which lifetime holds which answer.
-pub async fn run_cert(source: &mut Source, cache: &Cache, id: i64) -> Result<Option<CertDetail>> {
-    let key = cert_key(source.cache_identity()?, id);
+pub async fn run_cert(
+    source: &mut Source,
+    cache: &Cache,
+    cert: &CertRef,
+) -> Result<Option<CertDetail>> {
+    let key = cert_key(source.cache_identity()?, cert);
     if let Some(hit) = recall(cache, &key) {
         return Ok(hit);
     }
-    let rows = source
-        .db()
-        .await?
-        .query(&format!("crt.sh ID {id}"), CERT_SQL, &[(&id, Type::INT8)])
-        .await?;
+    let db = source.db().await?;
+    let subject = cert.to_string();
+    let rows = match cert {
+        CertRef::Id(id) => db.query(&subject, CERT_SQL, &[(id, Type::INT8)]).await?,
+        CertRef::Sha256(digest) => {
+            let digest: &[u8] = digest;
+            db.query(&subject, CERT_BY_SHA256_SQL, &[(&digest, Type::BYTEA)])
+                .await?
+        }
+    };
     let detail = match rows.first() {
         None => None,
         Some(row) => Some(CertDetail {
@@ -133,14 +246,24 @@ pub async fn run_cert(source: &mut Source, cache: &Cache, id: i64) -> Result<Opt
     Ok(detail)
 }
 
-/// What a `cert <ID>` lookup is cached under. Both lifetimes use the same key;
-/// the `cert-` filename prefix on the long-lived view is what keeps a found
+/// What a `cert` lookup is cached under. Both lifetimes use the same key; the
+/// `cert-` filename prefix on the long-lived view is what keeps a found
 /// certificate and a miss in separate files.
-fn cert_key(identity: String, id: i64) -> Key {
+///
+/// An ID lookup builds exactly the key v0.5.x did, so cached certificates
+/// survive the upgrade. A fingerprint lookup has its own statement and term, so
+/// the same certificate looked up both ways is two entries: correct, if
+/// slightly wasteful, and it keeps a miss by one spelling from answering for
+/// the other.
+fn cert_key(identity: String, cert: &CertRef) -> Key {
+    let sql = match cert {
+        CertRef::Id(_) => CERT_SQL,
+        CertRef::Sha256(_) => CERT_BY_SHA256_SQL,
+    };
     Key {
         target: identity,
-        sql: CERT_SQL.to_string(),
-        term: id.to_string(),
+        sql: sql.to_string(),
+        term: cert.term(),
         params: Vec::new(),
     }
 }
@@ -185,6 +308,12 @@ fn remember(cache: &Cache, key: &Key, detail: Option<&CertDetail>) {
 #[cfg(test)]
 pub(crate) fn sql() -> &'static str {
     CERT_SQL
+}
+
+/// The fingerprint statement, for its golden-file test.
+#[cfg(test)]
+pub(crate) fn sha256_sql() -> &'static str {
+    CERT_BY_SHA256_SQL
 }
 
 #[cfg(test)]
@@ -243,7 +372,7 @@ mod tests {
         }
 
         fn key_for(source: &Source, id: i64) -> Key {
-            cert_key(source.cache_identity().unwrap(), id)
+            cert_key(source.cache_identity().unwrap(), &CertRef::Id(id))
         }
 
         /// The found certificate, served from the long-lived view through
@@ -256,7 +385,7 @@ mod tests {
             let mut source = unreachable_source();
             remember(&cache, &key_for(&source, 42), Some(&detail(&[])));
 
-            let got = run_cert(&mut source, &cache, 42)
+            let got = run_cert(&mut source, &cache, &CertRef::Id(42))
                 .await
                 .expect("a cached certificate must not need a connection");
             assert_eq!(got.map(|d| d.id), Some(42));
@@ -272,7 +401,7 @@ mod tests {
             let mut source = unreachable_source();
             remember(&cache, &key_for(&source, 7), None);
 
-            let got = run_cert(&mut source, &cache, 7)
+            let got = run_cert(&mut source, &cache, &CertRef::Id(7))
                 .await
                 .expect("a cached miss must not need a connection");
             assert!(got.is_none(), "a cached miss must stay a miss");
@@ -328,7 +457,7 @@ mod tests {
             cache.for_certs().put(&key, &None::<CertDetail>);
             assert!(recall(&cache, &key).is_none());
 
-            let Err(err) = run_cert(&mut source, &cache, 7).await else {
+            let Err(err) = run_cert(&mut source, &cache, &CertRef::Id(7)).await else {
                 panic!("a long-lived miss was served instead of re-asking");
             };
             assert!(
@@ -369,6 +498,69 @@ mod tests {
             assert_eq!(recall(&cache, &key).flatten().map(|d| d.id), Some(42));
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    const FINGERPRINT: &str = "5c83f01af4edf38533f0da804bb740960120e9da1129216281a8542aea374bdd";
+
+    #[test]
+    fn a_cert_argument_is_an_id_or_a_fingerprint() {
+        assert_eq!(CertRef::parse("22625564176"), Ok(CertRef::Id(22625564176)));
+        let CertRef::Sha256(digest) = CertRef::parse(FINGERPRINT).unwrap() else {
+            panic!("64 hex digits are a fingerprint");
+        };
+        assert_eq!(hex(&digest), FINGERPRINT);
+        // openssl prints it upper-case and colon-separated.
+        let openssl: String = FINGERPRINT
+            .to_uppercase()
+            .as_bytes()
+            .chunks(2)
+            .map(|p| std::str::from_utf8(p).unwrap())
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(CertRef::parse(&openssl), CertRef::parse(FINGERPRINT));
+        // All decimal digits, but far too long for an ID: still a fingerprint.
+        let digits = "1".repeat(64);
+        assert!(matches!(CertRef::parse(&digits), Ok(CertRef::Sha256(_))));
+    }
+
+    /// A malformed argument is a usage error (exit 2 through clap), never a
+    /// lookup that comes back "no such certificate" (exit 3).
+    #[test]
+    fn anything_else_is_refused() {
+        for bad in [
+            "",
+            "notanumber",
+            "-1",
+            "12x",
+            &FINGERPRINT[..63],
+            &format!("{FINGERPRINT}0"),
+            &FINGERPRINT.replacen('5', "g", 1),
+            "99999999999999999999",
+        ] {
+            assert!(CertRef::parse(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    /// An ID lookup has to build exactly the key v0.5.x built, or every cached
+    /// certificate is orphaned by the upgrade; a fingerprint lookup must not
+    /// share it.
+    #[test]
+    fn an_id_keeps_its_old_key_and_a_fingerprint_gets_its_own() {
+        let id = cert_key("h:1/db".into(), &CertRef::Id(42));
+        assert_eq!(id.sql, sql());
+        assert_eq!(id.term, "42");
+        let by_digest = cert_key("h:1/db".into(), &CertRef::parse(FINGERPRINT).unwrap());
+        assert_eq!(by_digest.sql, sha256_sql());
+        assert_eq!(by_digest.term, format!("sha256:{FINGERPRINT}"));
+    }
+
+    #[test]
+    fn a_lookup_names_itself_the_way_the_messages_expect() {
+        assert_eq!(CertRef::Id(42).to_string(), "crt.sh ID 42");
+        assert_eq!(
+            CertRef::parse(FINGERPRINT).unwrap().to_string(),
+            format!("SHA-256 fingerprint {FINGERPRINT}")
+        );
     }
 
     #[test]

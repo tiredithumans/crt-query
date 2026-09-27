@@ -547,6 +547,17 @@ mod tests {
     }
 
     #[test]
+    fn the_cert_by_fingerprint_statement_matches_its_snapshot() {
+        assert_eq!(
+            crate::queries::cert::sha256_sql(),
+            include_str!("golden/cert_sha256.sql"),
+            "CERT_BY_SHA256_SQL changed; re-bless src/queries/golden/cert_sha256.sql \
+             and re-check that its predicate still matches crt.sh's \
+             digest(certificate, 'sha256') index"
+        );
+    }
+
+    #[test]
     fn the_identity_filter_disables_the_backslash_escape() {
         // Without `ESCAPE ''` every backslash is swallowed and the next
         // character taken literally, so `a\b` searches for `ab` and a trailing
