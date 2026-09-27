@@ -11,6 +11,100 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- **`cert` accepts a SHA-256 fingerprint as well as a crt.sh ID.**
+  `crt-query cert 5c83f01a…374bdd` takes the 64 hex digits bare, in either
+  case, or colon-separated as `openssl x509 -fingerprint -sha256` prints them.
+  The fingerprint is what browsers and other CT tools show, and what a
+  certificate is known by before anyone has found its crt.sh ID. The lookup
+  matches on `digest(certificate, 'sha256')`, the same expression crt.sh
+  indexes. A malformed argument is still a usage error (exit 2), never "no
+  such certificate" (exit 3).
+- **`expiring --fail-on-expiring` exits `4` when the report lists anything.**
+  A monitoring check or a cron job no longer has to parse the report to learn
+  whether a certificate is expiring. The report is printed in full either way,
+  an empty one still exits `0`, and the status survives a reader that stops
+  early, so piping the alert into `head` cannot turn it into a success.
+- **`--quiet` (`-q`) for scheduled runs.** cron mails whatever a job writes to
+  stderr, and a run that worked fine still wrote something: the empty-result
+  explanation, the `--limit` note, `wrote N CSV row(s)`, `cache clear`'s count,
+  `check-update`'s upgrade hint. `--quiet` drops all of them and keeps errors.
+- **Connection settings can come from the environment.** `CRT_QUERY_HOST`,
+  `CRT_QUERY_PORT`, `CRT_QUERY_DBNAME`, `CRT_QUERY_USER` and `CRT_QUERY_DB_URL`
+  sit between the command-line flags and the config file, so a container or CI
+  job can point the tool somewhere without writing a file. An empty variable
+  counts as unset, a bad one fails only the subcommands that connect, a bad
+  `CRT_QUERY_DB_URL` is reported under its own name, and `--help` names each
+  variable without printing its value.
+- **Statically linked musl archives for `x86_64` and `aarch64` Linux.** They run
+  on Alpine and other musl systems, and on glibc distributions older than the
+  2.34 floor of the glibc builds, all of which previously had to build from
+  source. `install.sh` picks them on musl hosts, and on glibc hosts older than
+  2.34, where the glibc build cannot start.
+- **A native Windows ARM64 archive** (`aarch64-pc-windows-msvc`). `install.ps1`
+  already preferred a native build when a release had one, and now finds it
+  instead of falling back to the emulated x86-64 build.
+
+### Fixed
+
+- **A `cert` lookup that finds nothing is no longer cached for thirty days.**
+  The guest database is a replica that lags the crt.sh website, so an ID
+  someone has just seen there is a miss here for a while and then is not. The
+  miss was kept for the thirty-day lifetime meant for found certificates, and
+  the lookup went on answering "no such certificate" (exit 3) for a month after
+  the certificate arrived. A miss now lasts as long as a `search` result
+  (`cache_ttl_secs`, an hour by default).
+- **The cache is keyed on the database as well as the host.** Two databases
+  behind one server (`--dbname`, or a `db_url` naming another) used to answer
+  for each other from the cache. Existing entries are keyed the old way and so
+  miss once after upgrading.
+- **Two runs writing the same cache entry at once can no longer corrupt it.**
+  Both wrote through one scratch file, so one could rename the other's
+  half-written file into place. Each writer now has its own, and scratch files
+  abandoned by an interrupted run are pruned instead of accumulating.
+- **`check-update` no longer uses GitHub's rate-limited API.** It asked
+  `api.github.com`, whose per-address limit on unauthenticated requests was the
+  one failure its own error message had to explain, and which other people's
+  traffic behind a shared address could already have spent. It now reads the
+  tag from the `releases/latest` redirect on github.com, as the install scripts
+  already did.
+- **On Windows, `check-update` runs `System32\curl.exe` by its full path.** A
+  bare `curl` is resolved by Rust's own search, which looks in the directory
+  holding `crt-query.exe` first, so a `curl.exe` unpacked next to it ran
+  instead. The bare name is now only a fallback for systems without
+  `System32\curl.exe` (Windows 10 before 1803).
+
+### Changed
+
+- The generated Homebrew formula is no longer committed. The release workflow
+  generates it and pushes it to the tap, so the copy here only ever went stale
+  (it still named v0.5.1 after v0.5.2 shipped).
+- The crate is marked `publish = false`, and crates.io-only metadata is gone.
+  It is not on crates.io and is installed from release binaries or with
+  `cargo install --git`.
+- `chrono` and `toml` no longer enable default features the tool never uses,
+  which takes `toml_writer`, `indexmap`, `hashbrown` and `equivalent` out of the
+  dependency tree. `whoami`, already in the tree through `tokio-postgres`, is
+  now named directly for the cache key.
+
+### Supply chain
+
+- CI gains a rustdoc gate (`just doc`, warnings denied) in place of a build step
+  that repeated what the test step had already built, and builds the musl
+  release binary on every change so a tag push is never the first time it is
+  compiled. `just verify` runs the same `doc` gate.
+- The release workflow checks that the musl archives are statically linked,
+  and applies the glibc floor check to the glibc archives only.
+- CI and CodeQL cancel a superseded run only on pull requests, so every commit
+  to `main` keeps a completed CI record.
+- `Cargo.toml` states the lint policy: unsafe code is forbidden, and a chosen
+  subset of `clippy::pedantic` is enforced. The lossy casts it found in the
+  retry jitter and the `--limit` check are fixed.
+- A test keeps the README's Rust badge and "Requires Rust" line in step with
+  `rust-version`, and end-to-end tests now prove the shipped binary finds cache
+  entries where it writes them, pinning the on-disk format.
+
 ## [0.5.2] - 2026-09-25
 
 ### Changed
