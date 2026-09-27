@@ -12,6 +12,23 @@
 //! [`crate::queries::fetch_by_term`] already loops at, so a multi-term run can
 //! hit on some terms and miss on others.
 //!
+//! # Lifetimes
+//!
+//! Two, told apart by filename so that pruning never has to open an entry:
+//!
+//! - **Short** (an hour by default, `cache_ttl_secs` in the config file):
+//!   `search` and `expiring` results, and a `cert` ID that was not found.
+//! - **Long** ([`CERT_TTL`], thirty days, `cert-` prefix): a certificate that
+//!   was found. The record at a crt.sh ID cannot change, so there is nothing
+//!   for a short lifetime to protect.
+//!
+//! A miss is short-lived because it is not the same kind of fact. The guest
+//! database is a replica that runs behind the crt.sh website, so an ID logged
+//! minutes ago is a miss there for a while and then stops being one. v0.5.x
+//! kept the miss for the full thirty days, and a user who looked a fresh ID up
+//! too early was told "no such certificate", with exit 3, for a month after it
+//! arrived.
+//!
 //! # Staleness
 //!
 //! `SEARCH_SQL` and `EXPIRING_SQL` evaluate their validity windows server-side
@@ -41,16 +58,24 @@ use crate::queries::RawRow;
 /// rather than to a failing run.
 const FORMAT_VERSION: u32 = 1;
 
-/// Default lifetime for `search` and `expiring` results.
+/// Default short lifetime: `search` and `expiring` results, and a `cert` ID
+/// that was not found.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Marks an entry as holding a `cert` lookup, so that pruning can apply the
-/// right lifetime without opening it.
+/// Marks an entry as holding a found certificate, so that pruning can apply
+/// the long lifetime without opening it.
+///
+/// A `cert` miss carries no prefix: it lives and is pruned under the short
+/// lifetime like any other entry. See the module docs on why.
 const CERT_PREFIX: &str = "cert-";
 
-/// Lifetime for a `cert <ID>` lookup. A certificate at a given crt.sh ID is
-/// immutable — the record cannot change under us — so the short TTL that exists
-/// to bound window drift buys nothing here.
+/// Lifetime for a certificate that `cert <ID>` found. A certificate at a given
+/// crt.sh ID is immutable — the record cannot change under us — so the short
+/// TTL that exists to bound window drift buys nothing here.
+///
+/// Only for a certificate that was found. An ID that was not found can start
+/// existing once the lagging replica catches up, which is why a miss gets the
+/// short lifetime instead.
 pub const CERT_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 
 /// What a cached entry is keyed on. Held in full inside the entry and compared
@@ -58,9 +83,15 @@ pub const CERT_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 /// collision is a miss, never a wrong answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
-    /// `host:port/dbname`. Pointing `--host` elsewhere must not read entries
-    /// written against crt.sh, or a private mirror and the public database
-    /// would answer for each other.
+    /// `host:port/dbname`, from [`crate::db::Source::cache_identity`].
+    /// Pointing `--host` elsewhere must not read entries written against
+    /// crt.sh, or a private mirror and the public database would answer for
+    /// each other, and the same goes for a second database behind one server.
+    ///
+    /// This field said `host:port/dbname` for a release while every caller
+    /// filled it with the user-facing `host:port`, so the database half of
+    /// that promise was never kept. The identity is a separate accessor now,
+    /// and the user-facing target is not something a key can be built from.
     pub target: String,
     /// The statement text itself. Editing `SEARCH_SQL` or `EXPIRING_SQL`
     /// invalidates every entry that came from the old one, which extends the
@@ -113,8 +144,16 @@ impl Mode {
 pub struct Cache {
     dir: Option<PathBuf>,
     mode: Mode,
+    /// The short lifetime, even on the long-lived view.
+    ///
+    /// [`Cache::for_certs`] used to overwrite this with [`CERT_TTL`], so a
+    /// prune that ran after writing a certificate judged every unprefixed
+    /// entry by thirty days and left dead search results and `cert` misses in
+    /// place. Keeping the short lifetime here and deriving the long one from
+    /// `long_lived` lets every prune apply both correctly — see
+    /// [`Cache::lifetime`].
     ttl: Duration,
-    /// Whether these entries are the long-lived `cert` kind.
+    /// Whether these entries are the long-lived kind: found certificates.
     ///
     /// Tracked rather than inferred from `ttl`, which is configurable: pruning
     /// has to tell the two apart by name, and comparing durations would make
@@ -155,15 +194,18 @@ impl Cache {
         }
     }
 
-    /// The same cache, holding `cert` lookups under their own long lifetime.
+    /// The same cache, holding found certificates under their own long
+    /// lifetime.
     ///
     /// Those entries are named apart from the rest so that pruning can apply
-    /// each lifetime to the entries it belongs to — see [`Cache::prune`].
+    /// each lifetime to the entries it belongs to — see [`Cache::prune`]. A
+    /// `cert` miss does not belong here: it goes through the ordinary cache,
+    /// under the short lifetime. See the module docs.
     pub fn for_certs(&self) -> Self {
         Self {
             dir: self.dir.clone(),
             mode: self.mode,
-            ttl: CERT_TTL,
+            ttl: self.ttl,
             long_lived: true,
         }
     }
@@ -178,7 +220,12 @@ impl Cache {
     /// How long an entry stays usable.
     #[cfg(test)]
     pub(crate) fn ttl(&self) -> Duration {
-        self.ttl
+        self.lifetime()
+    }
+
+    /// How long an entry written through this view stays usable.
+    fn lifetime(&self) -> Duration {
+        if self.long_lived { CERT_TTL } else { self.ttl }
     }
 
     /// Where entries live, if anywhere.
@@ -209,7 +256,7 @@ impl Cache {
             .signed_duration_since(entry.fetched_at)
             .to_std()
             .ok()?;
-        if age > self.ttl {
+        if age > self.lifetime() {
             return None;
         }
         Some((entry.payload, age))
@@ -290,7 +337,16 @@ impl Cache {
     /// Each lifetime is applied only to the entries it governs, which is what
     /// the `cert-` prefix is for. Pruning everything under the short one would
     /// discard still-valid certificate records; pruning everything under the
-    /// long one would leave a month of dead search results on disk.
+    /// long one would leave a month of dead search results on disk. Everything
+    /// unprefixed, `cert` misses included, is judged by the short lifetime
+    /// whichever view is doing the pruning.
+    ///
+    /// Scratch files go too, once they are older than the short lifetime and
+    /// [`SCRATCH_GRACE`]. A write that was interrupted between the scratch
+    /// file and the rename (a killed cron job, a full disk) leaves one behind,
+    /// and nothing else would ever remove it: `clear` counts entries, and a
+    /// scratch file is not one. Only names this module writes are touched —
+    /// see [`is_scratch`] — so anything else in the directory is left alone.
     fn prune(&self) {
         let Some(dir) = self.dir.as_deref() else {
             return;
@@ -301,11 +357,13 @@ impl Cache {
         let now = SystemTime::now();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.extension().is_some_and(|e| e == "json") {
-                continue;
-            }
             let name = entry.file_name();
-            let ttl = if name.to_string_lossy().starts_with(CERT_PREFIX) {
+            let name = name.to_string_lossy();
+            let ttl = if is_scratch(&name) {
+                self.ttl.max(SCRATCH_GRACE)
+            } else if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            } else if name.starts_with(CERT_PREFIX) {
                 CERT_TTL
             } else {
                 self.ttl
@@ -329,7 +387,8 @@ impl Cache {
         format!("{}{}.json", self.prefix(), digest(key))
     }
 
-    /// What marks an entry as belonging to the long-lived `cert` lifetime.
+    /// What marks an entry as belonging to the long lifetime: a found
+    /// certificate.
     fn prefix(&self) -> &'static str {
         if self.long_lived { CERT_PREFIX } else { "" }
     }
@@ -342,6 +401,11 @@ impl Cache {
 /// would silently orphan every user's cache. This is not a cryptographic hash
 /// and does not need to be — it names a file, and the full key inside the file
 /// is what decides a hit.
+///
+/// `tests/cache.rs` carries its own copy of this function and seeds entries
+/// with it for the real binary to find. The copy is deliberate: a change here
+/// orphans every user's cache just as a toolchain bump would have, so it has
+/// to fail a test and be made on purpose, not slip through as a refactor.
 fn digest(key: &Key) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -387,7 +451,7 @@ fn create_dir(dir: &Path) -> std::io::Result<()> {
 /// entry and an interrupted write leaves the previous one intact. Same approach
 /// as the CSV destination in `output.rs`.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let scratch = path.with_extension("tmp");
+    let scratch = scratch_path(path);
     std::fs::write(&scratch, text)?;
     match std::fs::rename(&scratch, path) {
         Ok(()) => Ok(()),
@@ -396,6 +460,55 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Where the entry at `path` is written before it is renamed into place:
+/// `[cert-]<digest>.<pid>.tmp`, beside it.
+///
+/// The process ID is there for the reason `output.rs`'s `scratch_beside` gives
+/// for CSV. The scratch file used to be `[cert-]<digest>.tmp`, shared by every
+/// process writing the same entry, and the README advertises `expiring --csv`
+/// on a schedule, where two runs finishing the same query together is
+/// ordinary. One run's rename could then move the other's half-written file
+/// into place, leaving a truncated entry for every later run to read as
+/// corrupt, and the other's rename failed on a file that had gone. With the
+/// process ID each run renames only what it wrote, and whichever renames last
+/// wins, which is no worse than one run replacing another's entry a moment
+/// later. One process never races itself: everything runs in sequence on a
+/// current-thread runtime.
+fn scratch_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", std::process::id()))
+}
+
+/// The youngest a scratch file can be and still be pruned, whatever the short
+/// lifetime says.
+///
+/// Scratch files are judged by the short lifetime, but `cache_ttl_secs` goes
+/// down to zero, and a zero lifetime would let one run's prune delete another
+/// run's scratch file between its write and its rename. No write this module
+/// makes takes more than a moment, so a scratch file this old was abandoned.
+const SCRATCH_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// Whether `name` is a scratch file this module wrote: `[cert-]<digest>.tmp`
+/// as v0.5.x named them, or `[cert-]<digest>.<pid>.tmp` as [`scratch_path`]
+/// names them now.
+///
+/// Matched exactly rather than by the `.tmp` extension, because pruning
+/// deletes what matches and the cache directory is not the only thing that
+/// might hold a file ending in `.tmp`.
+fn is_scratch(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let stem = stem.strip_prefix(CERT_PREFIX).unwrap_or(stem);
+    let (hash, pid) = match stem.split_once('.') {
+        Some((hash, pid)) => (hash, Some(pid)),
+        None => (stem, None),
+    };
+    let is_digest =
+        hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let is_pid = pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    is_digest && is_pid
 }
 
 /// Where entries are kept, or `None` if the environment names no absolute
@@ -659,6 +772,21 @@ mod tests {
         assert!(cache.get_rows(&edited).is_none());
     }
 
+    /// Every entry on every user's disk is named by this function, so its
+    /// output is a format, not an implementation detail: a different digest
+    /// for the same key is a cold cache for everyone who upgrades. The same
+    /// literal is asserted against the copy in `tests/cache.rs`, which seeds
+    /// entries for the real binary, so the two cannot drift apart unnoticed.
+    #[test]
+    fn the_digest_is_pinned() {
+        assert_eq!(
+            digest(&key("example.com")),
+            "7366c5f8c0d1e192",
+            "the filename digest changed; every existing cache entry is now \
+             orphaned. If that is intended, update tests/cache.rs to match"
+        );
+    }
+
     /// Length-prefixing each field. Without it the fields run together and
     /// ("ab", "c") hashes the same as ("a", "bc") — which for a (term, params)
     /// pair is a genuine reachable collision, not a theoretical one.
@@ -751,6 +879,128 @@ mod tests {
         let _ = std::fs::remove_file(&stray);
     }
 
+    /// Wind a file's mtime back, which is all pruning looks at.
+    fn backdate(path: &Path, by: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - by)
+            .unwrap();
+    }
+
+    /// A scratch file named for its entry alone was shared by every process
+    /// writing that entry, so two scheduled runs finishing the same query
+    /// together could rename each other's half-written file into place.
+    #[test]
+    fn the_scratch_file_is_named_for_the_process_writing_it() {
+        let cache = scratch("scratch-pid", Mode::Enabled, DEFAULT_TTL);
+        let k = key("example.com");
+        let entry = cache.path(&k).unwrap();
+        let scratch = scratch_path(&entry);
+        let stem = entry.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            scratch.file_name().unwrap().to_string_lossy(),
+            format!("{stem}.{}.tmp", std::process::id())
+        );
+        assert_eq!(
+            scratch.parent(),
+            entry.parent(),
+            "rename needs one directory"
+        );
+        assert!(is_scratch(&scratch.file_name().unwrap().to_string_lossy()));
+
+        // And a completed write leaves nothing of it behind.
+        cache.put(&k, &vec![row(1, Utc::now())]);
+        assert!(entry.exists());
+        assert!(
+            !scratch.exists(),
+            "the scratch file should have been renamed"
+        );
+    }
+
+    /// Only names this module writes are ever pruned as scratch files. The
+    /// match is exact because a match gets deleted.
+    #[test]
+    fn only_the_scratch_names_this_module_writes_count_as_scratch() {
+        let hash = "0123456789abcdef";
+        for name in [
+            format!("{hash}.tmp"),
+            format!("{hash}.4242.tmp"),
+            format!("{CERT_PREFIX}{hash}.tmp"),
+            format!("{CERT_PREFIX}{hash}.4242.tmp"),
+        ] {
+            assert!(is_scratch(&name), "{name} is a scratch name");
+        }
+        for name in [
+            "notes.tmp".to_string(),
+            format!("{hash}.json"),
+            format!("{CERT_PREFIX}{hash}.json"),
+            format!("{hash}.pid.tmp"),
+            format!("{hash}..tmp"),
+            format!("{hash}.1.2.tmp"),
+            "0123456789abcde.tmp".to_string(),
+            "0123456789ABCDEF.tmp".to_string(),
+            format!(".{hash}.1.tmp"),
+        ] {
+            assert!(!is_scratch(&name), "{name} is not a scratch name");
+        }
+    }
+
+    /// An interrupted write leaves its scratch file behind, and nothing else
+    /// ever removes it. Once it is older than the short lifetime it is
+    /// abandoned, whichever process or release left it.
+    #[test]
+    fn an_abandoned_scratch_file_is_pruned_once_older_than_the_short_lifetime() {
+        let cache = scratch("scratch-prune", Mode::Enabled, DEFAULT_TTL);
+        let dir = cache.dir.clone().unwrap();
+        let hash = digest(&key("abandoned.example"));
+        let abandoned = [
+            dir.join(format!("{hash}.999999.tmp")),
+            dir.join(format!("{hash}.tmp")),
+            dir.join(format!("{CERT_PREFIX}{hash}.12.tmp")),
+        ];
+        let recent = dir.join(format!("{hash}.888888.tmp"));
+        let foreign = dir.join("notes.tmp");
+        for path in abandoned.iter().chain([&recent, &foreign]) {
+            std::fs::write(path, "half-written").unwrap();
+            backdate(path, DEFAULT_TTL + Duration::from_secs(3600));
+        }
+        // Younger than the short lifetime, so possibly still some run's.
+        backdate(&recent, DEFAULT_TTL / 2);
+
+        // Any write prunes.
+        cache.put(&key("example.com"), &vec![row(1, Utc::now())]);
+
+        for path in &abandoned {
+            assert!(!path.exists(), "{} was left behind", path.display());
+        }
+        assert!(recent.exists(), "a scratch file inside the lifetime went");
+        assert!(foreign.exists(), "a file this module never writes went");
+    }
+
+    /// The lifetime is configurable down to zero, and one run's prune must not
+    /// delete another run's scratch file between its write and its rename.
+    #[test]
+    fn a_fresh_scratch_file_survives_a_prune_even_under_a_zero_lifetime() {
+        let cache = scratch("scratch-fresh", Mode::Enabled, Duration::ZERO);
+        let dir = cache.dir.clone().unwrap();
+        let hash = digest(&key("in-flight.example"));
+        let fresh = dir.join(format!("{hash}.999999.tmp"));
+        let old = dir.join(format!("{hash}.888888.tmp"));
+        std::fs::write(&fresh, "being written").unwrap();
+        std::fs::write(&old, "abandoned").unwrap();
+        backdate(&old, SCRATCH_GRACE + Duration::from_secs(60));
+
+        cache.put(&key("example.com"), &vec![row(1, Utc::now())]);
+
+        assert!(fresh.exists(), "a prune reached a write still in flight");
+        assert!(
+            !old.exists(),
+            "the grace period is a floor, not a reason to keep everything"
+        );
+    }
+
     #[cfg(not(windows))]
     mod root {
         use super::*;
@@ -820,6 +1070,37 @@ mod tests {
             left,
             vec![certs.filename(&cert_key)],
             "only the long-lived entry should survive a zero-lifetime search prune"
+        );
+    }
+
+    /// The other direction. `for_certs` used to replace the short lifetime
+    /// with the long one, so a prune that ran after a certificate write judged
+    /// every unprefixed entry by thirty days and kept dead search results and
+    /// `cert` misses around. It has to apply the short lifetime to those
+    /// whichever view is pruning.
+    #[test]
+    fn a_prune_after_a_certificate_write_still_applies_the_short_lifetime() {
+        // Written under the default lifetime, so its own prune keeps it.
+        let lenient = scratch("prune-certs", Mode::Enabled, DEFAULT_TTL);
+        let stale = key("example.com");
+        lenient.put(&stale, &vec![row(1, Utc::now())]);
+        assert!(lenient.path(&stale).unwrap().exists());
+
+        // The same directory under a zero short lifetime: writing a
+        // certificate through the long-lived view prunes as it goes.
+        let strict = Cache::at(lenient.dir.clone().unwrap(), Mode::Enabled, Duration::ZERO);
+        let certs = strict.for_certs();
+        let cert_key = key("12345");
+        certs.put(&cert_key, &Some(1i64));
+
+        assert!(
+            !lenient.path(&stale).unwrap().exists(),
+            "an unprefixed entry outlived the short lifetime because the prune \
+             came from the long-lived view"
+        );
+        assert!(
+            certs.get::<Option<i64>>(&cert_key).is_some(),
+            "the long lifetime still governs the certificate itself"
         );
     }
 
