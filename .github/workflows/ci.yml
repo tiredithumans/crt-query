@@ -22,10 +22,20 @@ on:
     # toolchain or dependency change that nothing in the repo triggered.
     - cron: "0 6 * * 1"
 
-# A new push to the same branch supersedes the in-flight run.
+# A new push to a pull request supersedes its in-flight run: nobody will merge
+# the older head, so its result is worth nothing. A push to main is different.
+# Every merge is a commit that stays in the history, and cancelling its run
+# when a second merge landed a minute later left the first with no completed
+# CI record at all — no way to tell afterwards whether it was ever green.
+#
+# So only pull_request runs cancel, and every other run gets a group of its
+# own. Turning cancel-in-progress off alone would not be enough: a group holds
+# one running and one pending run, and GitHub cancels the pending one when a
+# third arrives, so three quick merges would still lose the middle one's run.
+# Nothing here deploys, so there is nothing for runs on main to serialise.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege, declared explicitly so a change to the repo-level default
 # cannot silently re-broaden this workflow.
@@ -63,8 +73,14 @@ jobs:
       # CI must never add load to it.
       - name: Tests
         run: just test
-      - name: Build
-        run: just build
+      # There used to be a `just build` here, which only repeated work: the
+      # integration tests build the debug binary into target/debug themselves
+      # (they locate it through CARGO_BIN_EXE), so the step compiled nothing
+      # new. Rustdoc, on the other hand, had no gate, and a broken intra-doc
+      # link is a doc comment pointing at something that is not there. Run on
+      # every leg because some items exist only under a `#[cfg]` for one OS.
+      - name: Docs
+        run: just doc
 
       # The release profile (lto = "thin", strip = true) is otherwise compiled
       # for the first time by the tag push — after an annotated tag exists, and
@@ -74,11 +90,20 @@ jobs:
         if: runner.os == 'Linux'
         run: just build-release
 
+      # The same reasoning for the musl target the release now ships static
+      # Linux archives for: without this, the tag push is the first time it is
+      # compiled at all. x86-64 only: the aarch64 musl row differs in CPU, not
+      # in how it links, and the release checks both rows for static linking.
+      - name: Static musl build
+        if: runner.os == 'Linux'
+        run: just build-musl
+
       # install.ps1 confirms a good install by running the binary it just
       # copied. `lint-scripts` only parses that file, so a runtime fault in the
       # check itself passes every gate and then breaks every Windows install --
-      # which is exactly what happened. Run the real shape against the binary
-      # built above; keep it in lockstep with the block in install.ps1.
+      # which is exactly what happened. Run the real shape against the debug
+      # binary the Tests step built into target/debug for the integration
+      # tests; keep it in lockstep with the block in install.ps1.
       - name: install.ps1 verification shape runs clean
         if: runner.os == 'Windows'
         shell: pwsh

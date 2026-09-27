@@ -97,7 +97,7 @@ $ crt-query expiring example.com --within 60
 | --- | --- |
 | macOS · Linux (x86-64 · ARM64) | `brew install tiredithumans/tap/crt-query` |
 | macOS · Linux | `curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \| sh` |
-| Windows (x86-64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
+| Windows (x86-64 · ARM64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
 | From source | `cargo install --locked --git https://github.com/tiredithumans/crt-query` |
 
 Every prebuilt route resolves the newest release, verifies the archive against
@@ -105,9 +105,12 @@ that release's `SHA256SUMS`, and stages the new binary beside the installed one
 so it only replaces it once it has been shown to run. **Re-run the same command
 to upgrade.**
 
-The prebuilt Linux binaries are glibc builds and need **glibc 2.34 or newer** —
-RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later. On
-an older distribution, or on a musl system such as Alpine, build from source.
+Linux has two prebuilt flavours. The glibc build needs **glibc 2.34 or newer**
+— RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later.
+The musl build is statically linked and needs nothing from the system, so it
+runs on Alpine and other musl distributions, and on a glibc older than 2.34.
+`install.sh` checks which one the machine needs and says which it chose;
+Homebrew installs the glibc build.
 
 <details>
 <summary>Script options, and installing by hand</summary>
@@ -141,13 +144,17 @@ options, the script has to become a scriptblock first:
 ```
 
 **Manual download.** Releases ship archives for `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
-`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them. Both Linux
-archives are glibc builds requiring **glibc 2.34 or newer**; there is no musl
-archive, so Alpine and other musl systems build from source:
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, plus one `SHA256SUMS`
+covering all of them. The `-linux-gnu` archives are glibc builds requiring
+**glibc 2.34 or newer** (`getconf GNU_LIBC_VERSION` prints yours). The
+`-linux-musl` archives are static and run on any Linux: take one of those on
+Alpine or another musl system, or on an older glibc.
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu        # Apple Silicon: aarch64-apple-darwin
+                                       # Alpine, or glibc < 2.34: x86_64-unknown-linux-musl
 # `latest` redirects to the newest release, so there is no version to keep
 # up to date here. The tag is in the archive name once it lands.
 BASE=https://github.com/tiredithumans/crt-query/releases/latest/download
@@ -430,12 +437,16 @@ Requires Rust 1.98+ (pinned via `rust-toolchain.toml`) and
 
 ```sh
 just build-release   # binary lands in target/release/crt-query
-just verify          # fmt-check · lint · test · msrv · lint-scripts · build — offline
+just build-musl      # Linux only: static binary in target/<cpu>-unknown-linux-musl/release/
+just verify          # fmt-check · lint · test · msrv · lint-scripts · doc — offline
 just verify-full     # adds cargo-audit + cargo-deny (needs network)
 ```
 
-`just --list` shows every recipe. `lint-scripts` covers `install.sh` and
-`install.ps1`; it needs `shellcheck` and `pwsh` on PATH.
+`just --list` shows every recipe. `lint-scripts` covers `install.sh`,
+`install.ps1` and the Homebrew formula generator; it needs `shellcheck` and
+`pwsh` on PATH. `doc` runs rustdoc over every item, private ones included,
+with warnings as errors, so a doc comment linking to an item that does not
+exist fails the gate.
 
 Every test is offline and never contacts crt.sh — it is a shared public service
 on donated infrastructure, and a test suite pointed at it would be both flaky

@@ -19,6 +19,19 @@ build:
 build-release:
     cargo build --locked --release
 
+# The release ships statically linked musl archives beside the glibc ones, and
+# without this the tag push would be the first time anything compiled for a
+# musl target: the same trap `build-release` exists to close for the release
+# profile. Builds for this machine's own CPU, since the host's cc drives the
+# link and cannot link for another architecture. No musl-tools needed: rustc
+# carries musl's CRT objects and libc.a for the target itself, and nothing in
+# the dependency tree compiles C on Linux. Linux-only, so absent elsewhere.
+# Static musl release build; the binary lands in target/<cpu>-unknown-linux-musl/release/crt-query.
+[linux]
+build-musl:
+    rustup target add {{ arch() }}-unknown-linux-musl
+    cargo build --locked --release --target {{ arch() }}-unknown-linux-musl
+
 # Run the CLI, e.g. `just run search example.com --limit 20`.
 run *ARGS:
     cargo run --locked -- {{ARGS}}
@@ -41,6 +54,17 @@ lint:
 # Test gate (offline: crt.sh is shared, so no test ever contacts it).
 test:
     cargo test --locked
+
+# Took the place of a `build` gate that only repeated `test`, whose integration
+# tests already build the binary into target/debug (see the Docs step in
+# ci.yml). The doc comments here carry the history behind the code, and an
+# intra-doc link to an item that was renamed or is private is a reference
+# nobody can follow; nothing checked for one until this. --document-private-items
+# because this is a binary crate: almost nothing in it is public, so without the
+# flag rustdoc would skip nearly every comment worth checking.
+# Docs gate: rustdoc with every warning, broken intra-doc links included, an error.
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 
 # Fast inner-loop type check; fails in seconds where `verify` takes minutes.
 check:
@@ -98,24 +122,26 @@ deny:
 # --- Aggregates ------------------------------------------------------------
 
 # Every offline CI gate, in CI order. Run this before opening a PR.
-verify: fmt-check lint test msrv lint-scripts build
+verify: fmt-check lint test msrv lint-scripts doc
     @echo ""
     @echo "verify OK — NOT run (needs network): audit, deny."
     @echo "  just verify-full adds the dependency gates"
 
-# Full CI parity for everything that can run locally: the offline gates plus
-# both dependency-policy scans.
-#
 # Two required checks have no local counterpart and are not covered here:
 # `actionlint`, which CI installs from a pinned tarball rather than a recipe,
-# and CodeQL's Analyze, which only runs on GitHub. `build-release` is a CI step
-# too — left out for the same reason `audit` and `deny` were until now, that it
-# costs minutes for a profile nothing else here exercises. Run it by hand when
-# touching the release profile.
-verify-full: fmt-check lint test msrv lint-scripts build audit deny
+# and CodeQL's Analyze, which only runs on GitHub. `build-release` and
+# `build-musl` are CI steps too — left out for the same reason `audit` and
+# `deny` were until now, that they cost minutes for a profile nothing else here
+# exercises. Run them by hand when touching the release profile or the release
+# targets.
+#
+# (`just --list` shows only the comment line directly above a recipe, which is
+# why the summary sits last rather than first.)
+# Full CI parity for what can run locally: every offline gate plus both dependency-policy scans.
+verify-full: fmt-check lint test msrv lint-scripts doc audit deny
     @echo ""
     @echo "verify-full OK — the gates that can run locally all pass."
-    @echo "  CI additionally runs: actionlint, CodeQL Analyze, build-release."
+    @echo "  CI additionally runs: actionlint, CodeQL Analyze, build-release, build-musl."
 
 # --- Release helpers -------------------------------------------------------
 
@@ -123,7 +149,9 @@ verify-full: fmt-check lint test msrv lint-scripts build audit deny
 version:
     @sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1
 
-# Regenerate the Homebrew formula from a release (default: latest). See packaging/homebrew/README.md.
+# The output is gitignored: release.yml's `tap` job generates the formula in CI
+# and pushes it to the tap, never back here, so a committed copy only goes stale.
+# Generate the Homebrew formula from a release (default: latest), for inspection. See packaging/homebrew/README.md.
 homebrew-formula VERSION="":
     ./packaging/homebrew/generate.sh {{VERSION}}
 
