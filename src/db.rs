@@ -255,14 +255,27 @@ fn target(config: &Config) -> String {
 /// `postgresql://me@db.internal/` and `postgresql://me@db.internal/me` share
 /// entries, correctly, because they reach the same database. With no user
 /// either, tokio-postgres falls back to the operating-system account running
-/// the process, and the database follows it. That account is fixed for a
-/// given per-user cache directory, so the identity leaves the name empty:
-/// `host:port/`. PostgreSQL has no database with an empty name, so that can
-/// never be mistaken for one that was named.
+/// the process (`whoami::username`), and the database follows it, so the
+/// identity asks the same function. It used to leave the name empty on the
+/// grounds that the account is fixed for a per-user cache directory, which is
+/// not so once a directory is shared: `sudo` keeping `HOME`, or an
+/// `XDG_CACHE_HOME` pointed at a shared folder, has two accounts reaching two
+/// databases through one cache. Only if the account cannot be read at all is
+/// the name left empty; tokio-postgres then fails to connect, so nothing it
+/// answered can be stored under that key. PostgreSQL has no database with an
+/// empty name, so `host:port/` is never mistaken for one that was named.
 fn cache_identity(config: &Config) -> String {
+    cache_identity_with(config, || whoami::username().ok())
+}
+
+/// [`cache_identity`] with the operating-system account supplied, so tests can
+/// fix it.
+fn cache_identity_with(config: &Config, os_user: impl FnOnce() -> Option<String>) -> String {
     let dbname = config
         .get_dbname()
         .or_else(|| config.get_user())
+        .map(str::to_string)
+        .or_else(os_user)
         .unwrap_or_default();
     format!("{}/{dbname}", target(config))
 }
@@ -658,8 +671,9 @@ mod tests {
 
     /// PostgreSQL connects to the database named after the user when none is
     /// given, so that is what the identity names. A URL without a user either
-    /// falls back to the operating-system account, which a per-user cache
-    /// directory already pins, and gets an empty name no real database has.
+    /// falls back to the operating-system account, exactly as tokio-postgres
+    /// does, so two accounts sharing one cache directory stay apart; only an
+    /// account that cannot be read gets the empty name no real database has.
     #[test]
     fn a_db_url_without_a_database_is_keyed_on_the_database_it_reaches() {
         let identity = |url: &str| cache_identity(&build_config(&conn(Some(url))).unwrap());
@@ -677,7 +691,17 @@ mod tests {
             identity("postgresql://you@db.internal"),
             "two users' default databases are two databases"
         );
-        assert_eq!(identity("postgresql://db.internal"), "db.internal:5432/");
+        let no_user = build_config(&conn(Some("postgresql://db.internal"))).unwrap();
+        assert_eq!(
+            cache_identity_with(&no_user, || Some("alice".to_string())),
+            "db.internal:5432/alice"
+        );
+        assert_ne!(
+            cache_identity_with(&no_user, || Some("alice".to_string())),
+            cache_identity_with(&no_user, || Some("bob".to_string())),
+            "two accounts sharing a cache directory reach two databases"
+        );
+        assert_eq!(cache_identity_with(&no_user, || None), "db.internal:5432/");
         assert!(
             !identity("postgresql://me:hunter2@db.internal").contains("hunter2"),
             "the user-name fallback must not drag the password in with it"

@@ -26,9 +26,9 @@ pub struct FileConfig {
     pub db_url: Option<String>,
     /// Whether to use the local result cache at all. `--no-cache` still wins.
     pub cache: Option<bool>,
-    /// How long a cached `search`/`expiring` result stays usable, in seconds.
-    /// `cert` lookups keep their own much longer lifetime — the record they
-    /// cache cannot change.
+    /// How long a cached `search`/`expiring` result, or a `cert` lookup that
+    /// found nothing, stays usable, in seconds. A found certificate keeps its
+    /// own much longer lifetime — the record it caches cannot change.
     pub cache_ttl_secs: Option<u64>,
 }
 

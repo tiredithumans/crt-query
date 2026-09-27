@@ -48,6 +48,10 @@ tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4"] }
 # enough to keep toml_writer, indexmap, hashbrown and equivalent in Cargo.lock
 # with `display` already off. Adding `std` back brings them back.
 toml = { version = "1.1.6", default-features = false, features = ["parse", "serde"] }
+# Named directly only for `whoami::username`, the account tokio-postgres falls
+# back to when a db_url names no user; see `cache_identity` in src/db.rs. The
+# crate is already in the tree through tokio-postgres, at this version.
+whoami = "2.1.3"
 
 [profile.release]
 lto = "thin"

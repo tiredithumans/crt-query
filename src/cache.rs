@@ -477,7 +477,22 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 /// later. One process never races itself: everything runs in sequence on a
 /// current-thread runtime.
 fn scratch_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("{}.tmp", std::process::id()))
+    path.with_extension(format!("{}.tmp", scratch_tag()))
+}
+
+/// `<pid>-<nanoseconds>`: what makes one writer's scratch file its own.
+///
+/// The process ID alone is not enough everywhere. Containers sharing a cache
+/// volume each run their entrypoint as PID 1, so two of them finishing the same
+/// query together would share `<digest>.1.tmp` and bring back the truncation
+/// the process ID was added to prevent. The wall clock's nanoseconds separate
+/// them; the process ID still separates two processes on one host that read
+/// the same clock tick.
+fn scratch_tag() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!("{}-{nanos}", std::process::id())
 }
 
 /// The youngest a scratch file can be and still be pruned, whatever the short
@@ -490,8 +505,8 @@ fn scratch_path(path: &Path) -> PathBuf {
 const SCRATCH_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// Whether `name` is a scratch file this module wrote: `[cert-]<digest>.tmp`
-/// as v0.5.x named them, or `[cert-]<digest>.<pid>.tmp` as [`scratch_path`]
-/// names them now.
+/// as v0.5.x named them, `[cert-]<digest>.<pid>.tmp` as the next version did,
+/// or `[cert-]<digest>.<pid>-<nanos>.tmp` as [`scratch_path`] names them now.
 ///
 /// Matched exactly rather than by the `.tmp` extension, because pruning
 /// deletes what matches and the cache directory is not the only thing that
@@ -507,7 +522,12 @@ fn is_scratch(name: &str) -> bool {
     };
     let is_digest =
         hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    let is_pid = pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let is_tag = |tag: &str| {
+        let (pid, nanos) = tag.split_once('-').unwrap_or((tag, "0"));
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        digits(pid) && digits(nanos)
+    };
+    let is_pid = pid.is_none_or(is_tag);
     is_digest && is_pid
 }
 
@@ -899,9 +919,18 @@ mod tests {
         let entry = cache.path(&k).unwrap();
         let scratch = scratch_path(&entry);
         let stem = entry.file_stem().unwrap().to_string_lossy().into_owned();
-        assert_eq!(
-            scratch.file_name().unwrap().to_string_lossy(),
-            format!("{stem}.{}.tmp", std::process::id())
+        let name = scratch.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(&format!("{stem}.{}-", std::process::id())) && name.ends_with(".tmp"),
+            "the scratch name must carry this process's ID and a tick: {name}"
+        );
+        // Containers sharing a cache volume each run as PID 1, so the process
+        // ID alone cannot keep two writers apart; the tick has to differ.
+        std::thread::sleep(Duration::from_millis(1));
+        assert_ne!(
+            scratch_path(&entry),
+            scratch,
+            "two writes, one scratch name"
         );
         assert_eq!(
             scratch.parent(),
@@ -929,6 +958,8 @@ mod tests {
             format!("{hash}.4242.tmp"),
             format!("{CERT_PREFIX}{hash}.tmp"),
             format!("{CERT_PREFIX}{hash}.4242.tmp"),
+            format!("{hash}.4242-1758900000123456789.tmp"),
+            format!("{CERT_PREFIX}{hash}.1-42.tmp"),
         ] {
             assert!(is_scratch(&name), "{name} is a scratch name");
         }
@@ -942,6 +973,9 @@ mod tests {
             "0123456789abcde.tmp".to_string(),
             "0123456789ABCDEF.tmp".to_string(),
             format!(".{hash}.1.tmp"),
+            format!("{hash}.1-.tmp"),
+            format!("{hash}.-1.tmp"),
+            format!("{hash}.1-x.tmp"),
         ] {
             assert!(!is_scratch(&name), "{name} is not a scratch name");
         }

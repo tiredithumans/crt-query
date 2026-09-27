@@ -342,6 +342,19 @@ mod tests {
         /// win over the miss, which is still sitting in the short-lived view
         /// until it ages out.
         #[test]
+        fn a_certificate_in_the_short_lived_view_is_not_trusted() {
+            // Nothing writes one there, so one found there came from somewhere
+            // else, and serving it would give a certificate the short lifetime
+            // meant for misses, or worse, one nobody fetched.
+            let dir = scratch("short-found");
+            let cache = Cache::at(dir.clone(), Mode::Enabled, DEFAULT_TTL);
+            let key = key_for(&unreachable_source(), 42);
+            cache.put(&key, &Some(detail(&[])));
+            assert_eq!(recall(&cache, &key).map(|d| d.is_some()), None);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn a_certificate_found_after_a_cached_miss_wins() {
             let dir = scratch("supersede");
             let cache = Cache::at(dir.clone(), Mode::Enabled, DEFAULT_TTL);
