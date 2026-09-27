@@ -337,14 +337,14 @@ mod tests {
         certs: usize,
         raw_rows: usize,
     ) -> String {
-        let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+        let terms: Vec<String> = terms.iter().map(ToString::to_string).collect();
         saturation_note(
             limit,
             &terms,
             &Report {
                 rows: vec![(); certs],
                 raw_rows,
-                saturated: saturated.iter().map(|t| t.to_string()).collect(),
+                saturated: saturated.iter().map(ToString::to_string).collect(),
             },
         )
     }

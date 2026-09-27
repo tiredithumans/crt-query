@@ -222,7 +222,7 @@ fn a_failed_run_leaves_no_empty_report_behind() {
     assert!(
         !path.exists(),
         "left a {}-byte placeholder at {}",
-        std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+        std::fs::metadata(&path).map_or(0, |m| m.len()),
         path.display()
     );
 }
@@ -305,7 +305,7 @@ fn a_dangling_report_symlink_survives_the_writability_check() {
     assert!(
         !target.exists(),
         "left a {}-byte placeholder at {}, which is the empty report precheck_csv exists to prevent",
-        std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
+        std::fs::metadata(&target).map_or(0, |m| m.len()),
         target.display()
     );
 }

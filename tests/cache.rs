@@ -191,12 +191,12 @@ impl Sandbox {
 
     /// Write an entry exactly as `Cache::put` would, returning its path.
     fn seed(&self, prefix: &str, key: &Key, payload: Value) -> PathBuf {
-        let entry = json!({
+        let mut entry = json!({
             "version": FORMAT_VERSION,
             "key": key.to_json(),
             "fetched_at": chrono::Utc::now(),
-            "payload": payload,
         });
+        entry["payload"] = payload;
         let dir = self.cache_dir();
         std::fs::create_dir_all(&dir).expect("create the cache directory");
         let path = dir.join(format!("{prefix}{}.json", key.digest()));

@@ -665,8 +665,8 @@ mod tests {
     fn an_explicit_width_is_honoured_exactly() {
         // --width is an instruction, not a hint: it overrides the readability
         // constraints above rather than being clamped by them.
-        for width in [60usize, 100, 200] {
-            let rendered = build_table(&[wide_row()], &opts(Some(width as u16))).to_string();
+        for width in [60_u16, 100, 200] {
+            let rendered = build_table(&[wide_row()], &opts(Some(width))).to_string();
             let widest = rendered
                 .lines()
                 .map(str::chars)
@@ -674,7 +674,8 @@ mod tests {
                 .max()
                 .unwrap();
             assert_eq!(
-                widest, width,
+                widest,
+                usize::from(width),
                 "--width {width} produced a {widest}-column table:\n{rendered}"
             );
         }

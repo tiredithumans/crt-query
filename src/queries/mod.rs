@@ -182,7 +182,7 @@ pub async fn fetch_by_term(
         if let Some(hit) = cache.get_rows(&key) {
             // The limit is part of the key, so a hit was written under this
             // same cap and its length means what a fresh fetch's would.
-            if hit.len() as i64 >= limit {
+            if fills(hit.len(), limit) {
                 saturated.push(term.clone());
             }
             raw.extend(hit);
@@ -203,7 +203,7 @@ pub async fn fetch_by_term(
             fetched.push(RawRow::from_pg(row)?);
         }
         cache.put(&key, &fetched);
-        if fetched.len() as i64 >= limit {
+        if fills(fetched.len(), limit) {
             saturated.push(term.clone());
         }
         raw.extend(fetched);
@@ -212,6 +212,16 @@ pub async fn fetch_by_term(
         rows: raw,
         saturated,
     })
+}
+
+/// Whether `len` rows filled a window of `limit`.
+///
+/// Compared in `usize` rather than by casting the length to `i64`, which could
+/// wrap on paper. `limit` is range-checked by clap to 1..=100000, so the
+/// conversion only fails for a limit that could never have been bound, and a
+/// window nothing could fill is not full.
+fn fills(len: usize, limit: i64) -> bool {
+    usize::try_from(limit).is_ok_and(|limit| len >= limit)
 }
 
 /// Collapse raw identity rows into one row per certificate.
@@ -571,6 +581,7 @@ mod tests {
     }
     use crate::testutil::utc;
 
+    #[derive(Clone, Copy)]
     struct Raw {
         id: i64,
         serial: Option<&'static str>,

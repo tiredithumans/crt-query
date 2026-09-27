@@ -689,7 +689,7 @@ mod tests {
 
         // Same directory, a TTL short enough that the entry just written is
         // already too old.
-        let strict = Cache::at(cache.dir.clone().unwrap(), Mode::Enabled, Duration::ZERO);
+        let strict = Cache::at(cache.dir.unwrap(), Mode::Enabled, Duration::ZERO);
         assert!(
             strict.get_rows(&key("example.com")).is_none(),
             "an entry older than the TTL must not be served"
@@ -921,7 +921,8 @@ mod tests {
         let stem = entry.file_stem().unwrap().to_string_lossy().into_owned();
         let name = scratch.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            name.starts_with(&format!("{stem}.{}-", std::process::id())) && name.ends_with(".tmp"),
+            name.starts_with(&format!("{stem}.{}-", std::process::id()))
+                && Path::new(&name).extension().is_some_and(|e| e == "tmp"),
             "the scratch name must carry this process's ID and a tick: {name}"
         );
         // Containers sharing a cache volume each run as PID 1, so the process
@@ -1098,7 +1099,7 @@ mod tests {
         let left: Vec<String> = std::fs::read_dir(searches.dir().unwrap())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".json"))
+            .filter(|n| Path::new(n).extension().is_some_and(|e| e == "json"))
             .collect();
         assert_eq!(
             left,

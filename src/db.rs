@@ -169,10 +169,12 @@ fn explain_context(
              wait a moment and retry"
                 .to_string(),
         ),
-        Some(&SqlState::ADMIN_SHUTDOWN)
-        | Some(&SqlState::CRASH_SHUTDOWN)
-        | Some(&SqlState::CONNECTION_FAILURE)
-        | Some(&SqlState::CONNECTION_DOES_NOT_EXIST) => Some(format!(
+        Some(
+            &SqlState::ADMIN_SHUTDOWN
+            | &SqlState::CRASH_SHUTDOWN
+            | &SqlState::CONNECTION_FAILURE
+            | &SqlState::CONNECTION_DOES_NOT_EXIST,
+        ) => Some(format!(
             "{target} closed the connection mid-query; retry in a moment"
         )),
         // No SQLSTATE: the server never answered. If the connection task
@@ -425,9 +427,11 @@ fn jittered(base: Duration, nanos: u32) -> Duration {
     const NANOS_MAX: u64 = 999_999_999;
     let step = u64::from(nanos).min(NANOS_MAX);
     // `base` is capped at MAX_RETRY_DELAY, so a quarter of it is at most 5e8ns
-    // and the product below stays four orders of magnitude inside u64.
-    let quarter = (base.as_nanos() as u64) / 4;
-    base + Duration::from_nanos(quarter * step / NANOS_MAX)
+    // and the product below stays four orders of magnitude inside u64. The
+    // conversion and the multiplication saturate anyway rather than trusting
+    // that cap, which lives in another function.
+    let quarter = u64::try_from(base.as_nanos() / 4).unwrap_or(u64::MAX);
+    base + Duration::from_nanos(quarter.saturating_mul(step) / NANOS_MAX)
 }
 
 /// A jitter source that costs no dependency: the sub-second part of the wall
@@ -479,25 +483,23 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
         // Wrapped in a timeout because `connect_timeout` in the config bounds
         // only the TCP connect: a host that accepts the socket and never
         // completes the startup exchange would otherwise hang here forever.
-        let attempted = match tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await {
-            Ok(result) => result,
-            Err(_) => {
-                // Not "connected, but the startup exchange never completed":
-                // this bound also spans name resolution and every TCP connect
-                // the host resolves to, so naming one phase asserts something
-                // the timeout cannot distinguish.
-                let stalled = anyhow::anyhow!(
-                    "no response from {target} within {}s (name resolution, connect \
+        let Ok(attempted) = tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await
+        else {
+            // Not "connected, but the startup exchange never completed":
+            // this bound also spans name resolution and every TCP connect
+            // the host resolves to, so naming one phase asserts something
+            // the timeout cannot distinguish.
+            let stalled = anyhow::anyhow!(
+                "no response from {target} within {}s (name resolution, connect \
                      or the startup exchange did not complete)",
-                    CONNECT_TIMEOUT.as_secs()
-                );
-                causes.push(stalled.to_string());
-                last_err = Some(stalled);
-                if !wait_before_retry(attempt, started).await {
-                    break;
-                }
-                continue;
+                CONNECT_TIMEOUT.as_secs()
+            );
+            causes.push(stalled.to_string());
+            last_err = Some(stalled);
+            if !wait_before_retry(attempt, started).await {
+                break;
             }
+            continue;
         };
         match attempted {
             Ok((client, connection)) => {
@@ -715,6 +717,9 @@ mod tests {
 
     #[test]
     fn the_query_deadline_sits_above_the_servers_own_statement_timeout() {
+        // What the three-attempt, two-second schedule this replaced could
+        // spend; see the last assertion below.
+        const PREVIOUS_WORST_CASE: Duration = Duration::from_secs(49);
         // crt.sh cancels at roughly 120s and says so in a way that names the
         // fix. If this bound dropped below that, every too-broad query would
         // surface as our generic "did not answer" instead of the server's
@@ -736,7 +741,6 @@ mod tests {
         // Nothing is printed during the phase any more, so every second of it
         // is silence a caller cannot tell from a hang — this is the one bound
         // that got stricter when the per-attempt lines went away.
-        const PREVIOUS_WORST_CASE: Duration = Duration::from_secs(49);
         assert!(
             worst_case < PREVIOUS_WORST_CASE,
             "a silent connect phase ({worst_case:?}) may not outlast the narrated \
