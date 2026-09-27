@@ -211,15 +211,15 @@ impl OutputRecord for CertDetail {
 pub async fn run_cert(
     source: &mut Source,
     cache: &Cache,
-    cert: &CertRef,
+    lookup: &CertRef,
 ) -> Result<Option<CertDetail>> {
-    let key = cert_key(source.cache_identity()?, cert);
+    let key = cert_key(source.cache_identity()?, lookup);
     if let Some(hit) = recall(cache, &key) {
         return Ok(hit);
     }
     let db = source.db().await?;
-    let subject = cert.to_string();
-    let rows = match cert {
+    let subject = lookup.to_string();
+    let rows = match lookup {
         CertRef::Id(id) => db.query(&subject, CERT_SQL, &[(id, Type::INT8)]).await?,
         CertRef::Sha256(digest) => {
             let digest: &[u8] = digest;
@@ -255,15 +255,15 @@ pub async fn run_cert(
 /// the same certificate looked up both ways is two entries: correct, if
 /// slightly wasteful, and it keeps a miss by one spelling from answering for
 /// the other.
-fn cert_key(identity: String, cert: &CertRef) -> Key {
-    let sql = match cert {
+fn cert_key(identity: String, lookup: &CertRef) -> Key {
+    let sql = match lookup {
         CertRef::Id(_) => CERT_SQL,
         CertRef::Sha256(_) => CERT_BY_SHA256_SQL,
     };
     Key {
         target: identity,
         sql: sql.to_string(),
-        term: cert.term(),
+        term: lookup.term(),
         params: Vec::new(),
     }
 }

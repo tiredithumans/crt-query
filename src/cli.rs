@@ -156,7 +156,7 @@ pub enum Commands {
         /// crt.sh certificate ID, or the certificate's SHA-256 fingerprint
         /// (64 hex digits; colons, as openssl prints them, are allowed)
         #[arg(value_name = "ID|SHA256", value_parser = CertRef::parse)]
-        certificate: CertRef,
+        lookup: CertRef,
     },
 
     /// Report expired or soon-expiring certificates for one or more domains

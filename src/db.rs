@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(identity, "db.internal:6432/certwatch");
         assert!(
             !identity.contains("hunter2"),
-            "password leaked into {identity}"
+            "a db_url password leaked into the cache identity"
         );
     }
 

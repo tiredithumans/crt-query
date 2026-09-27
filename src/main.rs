@@ -112,12 +112,12 @@ async fn run() -> Result<i32> {
             // --csv still owes a file, or a stale one is silently reused.
             output::emit(&report.rows, &cli.out)?;
         }
-        Commands::Cert { certificate } => {
+        Commands::Cert { lookup } => {
             let (mut source, cache) = open_source(&cli)?;
-            match queries::cert::run_cert(&mut source, &cache, certificate).await? {
+            match queries::cert::run_cert(&mut source, &cache, lookup).await? {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
-                    notice!("No certificate with {certificate}.");
+                    notice!("No certificate with {lookup}.");
                     output::emit_missing::<CertDetail>(&cli.out, EXIT_NOT_FOUND)?;
                     return Ok(EXIT_NOT_FOUND);
                 }
