@@ -346,11 +346,21 @@ certificates in it are public, but the list of names you searched for is not.
 `crt-query check-update` reports whether a newer release exists, and exits `0`
 either way — being out of date is a report, not a failure. It is the only
 subcommand that contacts anything other than crt.sh, and only when you ask;
-nothing checks in the background. It shells out to the system `curl`, so that
-has to be on `PATH` — the only path in this tool that runs an external program.
-On Windows the search is Rust's, not `PATH` alone: it looks in the directory
-holding `crt-query.exe` before `System32` and before `PATH`. `--json` gives `current`, `latest`,
-`update_available` and `release_url` for a scheduled check.
+nothing checks in the background. It reads which release
+`github.com/tiredithumans/crt-query/releases/latest` redirects to — the
+redirect the install scripts rely on too — rather than asking GitHub's API,
+whose per-IP limit on unauthenticated requests a shared address can use up.
+
+It shells out to the system `curl` — the only path in this tool that runs an
+external program. On Windows it runs `%SystemRoot%\System32\curl.exe` by its
+full path, which ships with Windows 10 1803 and later and with Windows 11. Only
+if that file is missing, or `SystemRoot` is unset or not an absolute drive path
+(`C:\…`), does it fall back to a bare `curl`, and Rust resolves that name by
+looking in the directory holding `crt-query.exe` before `System32` and before
+`PATH` — so on such a system a `curl.exe` beside `crt-query.exe` is the one
+that runs. Everywhere else `curl` has to be on `PATH`. `--json` gives
+`current`, `latest`, `update_available` and `release_url` for a scheduled
+check.
 
 To upgrade, re-run whatever you installed with: `brew upgrade crt-query`,
 `install.sh`, `install.ps1`, or `cargo install --locked --git … --force`.
