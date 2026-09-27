@@ -62,6 +62,12 @@ pub struct OutputOpts {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Print nothing on stderr but errors: no progress line, no notes, no
+    /// "wrote N CSV row(s)". For scheduled runs, where every line of stderr
+    /// becomes mail
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
     /// Additionally write results as CSV to this file
     #[arg(long, global = true, value_name = "PATH")]
     pub csv: Option<PathBuf>,

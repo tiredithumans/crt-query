@@ -11,6 +11,7 @@ use comfy_table::{ColumnConstraint, ContentArrangement, Table, Width};
 use serde::Serialize;
 
 use crate::cli::OutputOpts;
+use crate::notice::notice;
 use sanitise::{csv_safe, display_safe_row};
 
 mod sanitise;
@@ -384,7 +385,7 @@ fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Resu
     if let Some(path) = &out.csv {
         let written = replace_file(path, |file| write_csv(rows, file))
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
-        eprintln!("wrote {written} CSV row(s) to {}", path.display());
+        notice!("wrote {written} CSV row(s) to {}", path.display());
     }
     Ok(())
 }
@@ -541,6 +542,7 @@ mod tests {
     fn opts(width: Option<u16>) -> OutputOpts {
         OutputOpts {
             json: false,
+            quiet: false,
             csv: None,
             width,
         }
@@ -724,6 +726,7 @@ mod tests {
         let path = dir.join("report.csv");
         let opts = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(path.clone()),
             width: None,
         };
@@ -751,6 +754,7 @@ mod tests {
     fn precheck_still_fails_on_an_unwritable_destination() {
         let opts = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(std::path::PathBuf::from(
                 "/crt-query-no-such-directory/report.csv",
             )),
@@ -905,6 +909,7 @@ mod tests {
         let modes_enforced = File::create(dir.join("probe")).is_err();
         let opts = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(path.clone()),
             width: None,
         };
@@ -1047,6 +1052,7 @@ mod tests {
 
         let out = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(path.clone()),
             width: None,
         };

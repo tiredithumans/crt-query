@@ -10,6 +10,7 @@ use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Config, NoTls, Row};
 
 use crate::config::Conn;
+use crate::notice::notice;
 
 /// How many times a connection is dialled before the run gives up.
 ///
@@ -121,7 +122,7 @@ impl Db {
     /// never lands in a piped table or JSON document.
     fn hint(&self, subject: &str) {
         if std::io::stderr().is_terminal() {
-            eprintln!("querying {} for {subject}…", self.target);
+            notice!("querying {} for {subject}…", self.target);
         }
     }
 

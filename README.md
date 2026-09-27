@@ -274,7 +274,10 @@ would begin `=`, `+`, `@`, tab or carriage return is prefixed with `'` so a
 spreadsheet treats it as text — certificate subjects come from a public log and
 are chosen by whoever got the certificate issued. Negative numbers are never
 prefixed. While a query is in flight, `querying crt.sh:5432 for "example.com"…` goes to stderr —
-suppressed when stderr is not a terminal, so scheduled runs keep clean logs.
+suppressed when stderr is not a terminal, so scheduled runs keep clean logs. For
+cron, which mails anything a job writes to stderr, `--quiet` (`-q`) drops every
+informational line — the progress line, empty-result explanations, the
+`--limit` note, `wrote N CSV row(s)` — and keeps errors.
 Piping into `head`, or quitting `less` early, ends output cleanly.
 
 ## Configuration

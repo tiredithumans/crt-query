@@ -2,6 +2,7 @@ mod cache;
 mod cli;
 mod config;
 mod db;
+mod notice;
 mod output;
 mod queries;
 #[cfg(test)]
@@ -16,6 +17,7 @@ use clap::Parser;
 use crate::cache::Cache;
 use crate::cli::{CacheAction, Cli, Commands};
 use crate::db::Source;
+use crate::notice::notice;
 use crate::queries::Report;
 use crate::queries::cert::CertDetail;
 
@@ -49,6 +51,8 @@ async fn main() {
 
 async fn run() -> Result<i32> {
     let cli = Cli::parse();
+    // Before anything can print: every informational line checks this.
+    notice::set_quiet(cli.out.quiet);
     // Check the CSV destination before any real work: before a connection is
     // spent on the shared guest database, which is a genuinely scarce
     // resource, and before check-update's network round trip.
@@ -85,17 +89,17 @@ async fn run() -> Result<i32> {
             if report.rows.is_empty() {
                 let names = quoted(&terms);
                 if *skip_expired {
-                    eprintln!("No unexpired certificates found for {names}.");
+                    notice!("No unexpired certificates found for {names}.");
                 } else if lookback == cli::ALL_HISTORY {
-                    eprintln!("No certificates found for {names}.");
+                    notice!("No certificates found for {names}.");
                 } else {
-                    eprintln!(
+                    notice!(
                         "No certificates found for {names} valid within the last \
                          {lookback} day(s); widen with --valid-since or --all-history."
                     );
                 }
             } else if report.window_hid_certificates() {
-                eprintln!("{}", saturation_note(*limit, &terms, &report));
+                notice!("{}", saturation_note(*limit, &terms, &report));
             }
             // Emitted even when empty: --json still owes the caller `[]`, and
             // --csv still owes a file, or a stale one is silently reused.
@@ -106,7 +110,7 @@ async fn run() -> Result<i32> {
             match queries::cert::run_cert(&mut source, &cache, *id).await? {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
-                    eprintln!("No certificate with crt.sh ID {id}.");
+                    notice!("No certificate with crt.sh ID {id}.");
                     output::emit_missing::<CertDetail>(&cli.out, EXIT_NOT_FOUND)?;
                     return Ok(EXIT_NOT_FOUND);
                 }
@@ -137,18 +141,18 @@ async fn run() -> Result<i32> {
                 let names = quoted(&domains);
                 let limit_note = limit_note(&domains);
                 if lookback == 0 {
-                    eprintln!(
+                    notice!(
                         "No unexpired certificates for {names} expiring within \
                          {within} day(s) ({limit_note})."
                     );
                 } else {
-                    eprintln!(
+                    notice!(
                         "No certificates for {names} expiring within {within} day(s) \
                          or expired in the last {lookback} day(s) ({limit_note})."
                     );
                 }
             } else if report.window_hid_certificates() {
-                eprintln!("{}", saturation_note(*limit, &domains, &report));
+                notice!("{}", saturation_note(*limit, &domains, &report));
             }
             output::emit(&report.rows, &cli.out)?;
         }
@@ -224,7 +228,7 @@ fn run_cache(action: CacheAction) -> Result<()> {
         // No absolute cache directory in this environment, so there is nowhere
         // for entries to be — see `cache::cache_root` for why relative is
         // refused rather than resolved.
-        eprintln!("No cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path.");
+        notice!("No cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path.");
         return Ok(());
     };
     match action {
@@ -233,7 +237,7 @@ fn run_cache(action: CacheAction) -> Result<()> {
             let removed = cache
                 .clear()
                 .with_context(|| format!("clearing the cache in {}", dir.display()))?;
-            eprintln!("Cleared {removed} cached result(s) from {}.", dir.display());
+            notice!("Cleared {removed} cached result(s) from {}.", dir.display());
         }
     }
     Ok(())

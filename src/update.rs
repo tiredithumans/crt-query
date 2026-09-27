@@ -32,6 +32,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::cli::OutputOpts;
+use crate::notice::notice;
 use crate::output::{self, UpdateStatus};
 
 /// This repository's releases page, as a macro rather than a `const` so the
@@ -393,7 +394,7 @@ pub fn run_check_update(out: &OutputOpts) -> Result<()> {
     let status = check()?;
     output::emit_update_status(&status, out)?;
     if status.update_available {
-        eprintln!("{}", upgrade_hint());
+        notice!("{}", upgrade_hint());
     }
     Ok(())
 }

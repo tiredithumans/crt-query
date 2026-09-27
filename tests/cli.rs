@@ -510,3 +510,27 @@ fn help_names_the_variables_without_echoing_their_values() {
         "a password reached --help:\n{help}"
     );
 }
+
+/// `--quiet` removes informational lines, never errors: a failed run under
+/// cron still has to say why.
+#[test]
+fn quiet_still_reports_errors() {
+    let out = run_with_env(
+        &[
+            "--quiet",
+            "search",
+            "example.com",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1",
+        ],
+        &[],
+    );
+    assert_eq!(code(&out), 1);
+    assert!(
+        stderr(&out).contains("could not connect to 127.0.0.1:1"),
+        "{}",
+        stderr(&out)
+    );
+}

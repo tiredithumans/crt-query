@@ -66,6 +66,11 @@ impl Key {
     /// `--valid-since 365` (an `i32`), no `--skip-expired`, `--limit 100` (an
     /// `i64`). Rendered with `Debug`, as `fetch_by_term` renders them.
     fn search(term: &str) -> Self {
+        Self::search_with_limit(term, 100)
+    }
+
+    /// [`Key::search`] with `--limit <limit>`, which is part of the key.
+    fn search_with_limit(term: &str, limit: i64) -> Self {
         Self {
             target: IDENTITY.to_string(),
             sql: SEARCH_SQL.to_string(),
@@ -73,7 +78,7 @@ impl Key {
             params: vec![
                 format!("{:?}", 365i32),
                 format!("{:?}", false),
-                format!("{:?}", 100i64),
+                format!("{:?}", limit),
             ],
         }
     }
@@ -385,4 +390,54 @@ fn the_sandbox_is_where_the_binary_looks() {
         .expect("failed to run the crt-query binary");
     assert_eq!(code(&out), 0, "stderr was:\n{}", stderr(&out));
     assert_eq!(Path::new(stdout(&out).trim()), sandbox.cache_dir());
+}
+
+/// `--quiet` is for cron, which mails whatever a job writes to stderr. A run
+/// that filled its `--limit` window and wrote a CSV prints two informational
+/// lines; with `--quiet` it prints none, and still writes the report.
+///
+/// The unquiet run is the control: without it this would pass for a build
+/// that never printed those lines at all.
+#[test]
+fn quiet_silences_every_informational_line_but_keeps_the_output() {
+    let sandbox = Sandbox::new("quiet");
+    // Two identity rows of one certificate against --limit 2: the window is
+    // full and collapses to one certificate, which is what prints the note.
+    sandbox.seed(
+        "",
+        &Key::search_with_limit("example.com", 2),
+        json!([raw_row(1, "example.com"), raw_row(1, "www.example.com")]),
+    );
+    let csv = sandbox.root.join("report.csv");
+    let args = [
+        "search",
+        "example.com",
+        "--limit",
+        "2",
+        "--csv",
+        csv.to_str().unwrap(),
+    ];
+
+    let loud = sandbox.run(&args);
+    assert_eq!(code(&loud), 0, "stderr was:\n{}", stderr(&loud));
+    let err = stderr(&loud);
+    assert!(err.contains("filled the server-side row window"), "{err}");
+    assert!(err.contains("CSV row(s)"), "{err}");
+
+    std::fs::remove_file(&csv).expect("the unquiet run wrote the report");
+    let quiet = sandbox.run(&[&["--quiet"][..], &args[..]].concat());
+    assert_eq!(code(&quiet), 0, "stderr was:\n{}", stderr(&quiet));
+    assert_eq!(
+        stderr(&quiet),
+        "",
+        "--quiet printed something that is not an error"
+    );
+    assert!(
+        stdout(&quiet).contains("example.com"),
+        "the table itself is output, not noise"
+    );
+    assert!(
+        csv.exists(),
+        "--quiet must not skip the report it was asked for"
+    );
 }
