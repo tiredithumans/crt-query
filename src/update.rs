@@ -294,7 +294,7 @@ fn is_windows_drive_absolute(path: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
-/// The curl this build runs: see [`windows_curl`] for why Windows names one by
+/// The curl this build runs: see `windows_curl` for why Windows names one by
 /// its full path. Everywhere else the bare name, resolved through `PATH` like
 /// any other command.
 ///
