@@ -11,6 +11,7 @@ use comfy_table::{ColumnConstraint, ContentArrangement, Table, Width};
 use serde::Serialize;
 
 use crate::cli::OutputOpts;
+use crate::notice::notice;
 use sanitise::{csv_safe, display_safe_row};
 
 mod sanitise;
@@ -215,15 +216,17 @@ fn resolve_destination(path: &Path) -> PathBuf {
 /// The scratch path a report is written to before it is renamed over `target`.
 ///
 /// In the same directory, because rename is atomic only within a filesystem.
-/// The process ID keeps two runs pointed at one destination from sharing a
-/// scratch file; whichever renames last wins, which is no worse than before.
+/// The process ID and a clock tick keep two runs pointed at one destination
+/// from sharing a scratch file, including two containers that are both PID 1
+/// on a shared volume; see `cache::scratch_tag`. Whichever renames last wins,
+/// which is no worse than before.
 fn scratch_beside(target: &Path) -> io::Result<PathBuf> {
     let name = target
         .file_name()
         .ok_or_else(|| io::Error::other("destination has no file name"))?;
     let mut scratch = OsString::from(".");
     scratch.push(name);
-    scratch.push(format!(".{}.tmp", std::process::id()));
+    scratch.push(format!(".{}.tmp", crate::cache::scratch_tag()));
     Ok(target.with_file_name(scratch))
 }
 
@@ -267,15 +270,29 @@ fn replace_file<T>(path: &Path, write: impl FnOnce(&File) -> Result<T>) -> Resul
 /// a script depends on, and skipping the CSV write would leave a stale file
 /// from a previous run in place.
 pub fn emit<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
+    emit_exiting(rows, out, crate::EXIT_OK)
+}
+
+/// [`emit`], for a run that has already decided on an exit status other than
+/// success: a reader that goes away mid-write ends the run with
+/// `broken_pipe_exit` rather than 0, for the reason [`on_stdout_with`] gives.
+/// `expiring --fail-on-expiring` is the caller, and piping its alert into
+/// `head` must not turn "certificates are expiring" into "all clear".
+pub fn emit_exiting<T: OutputRecord>(
+    rows: &[T],
+    out: &OutputOpts,
+    broken_pipe_exit: i32,
+) -> Result<()> {
     write_csv_if_requested(rows, out)?;
     if out.json {
-        return write_json(rows);
+        return on_stdout_with(broken_pipe_exit, |w| json_to(w, rows));
     }
     if rows.is_empty() {
         // The caller has already explained the empty result on stderr.
         return Ok(());
     }
-    print_table(&build_table(rows, out))
+    let table = build_table(rows, out);
+    on_stdout_with(broken_pipe_exit, |w| writeln!(w, "{table}"))
 }
 
 /// Render a single record as a key/value detail table, a JSON object,
@@ -384,7 +401,7 @@ fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Resu
     if let Some(path) = &out.csv {
         let written = replace_file(path, |file| write_csv(rows, file))
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
-        eprintln!("wrote {written} CSV row(s) to {}", path.display());
+        notice!("wrote {written} CSV row(s) to {}", path.display());
     }
     Ok(())
 }
@@ -458,10 +475,14 @@ pub fn emit_raw(bytes: &[u8]) -> Result<()> {
 }
 
 fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
-    on_stdout(|w| {
-        serde_json::to_writer_pretty(&mut *w, value).map_err(io::Error::from)?;
-        writeln!(w)
-    })
+    on_stdout(|w| json_to(w, value))
+}
+
+/// Pretty-printed JSON and a trailing newline, the one shape every JSON
+/// document this tool prints takes.
+fn json_to<T: Serialize + ?Sized>(w: &mut dyn Write, value: &T) -> io::Result<()> {
+    serde_json::to_writer_pretty(&mut *w, value).map_err(io::Error::from)?;
+    writeln!(w)
 }
 
 /// Run a write against stdout, treating a reader that has gone away
@@ -541,6 +562,7 @@ mod tests {
     fn opts(width: Option<u16>) -> OutputOpts {
         OutputOpts {
             json: false,
+            quiet: false,
             csv: None,
             width,
         }
@@ -645,8 +667,8 @@ mod tests {
     fn an_explicit_width_is_honoured_exactly() {
         // --width is an instruction, not a hint: it overrides the readability
         // constraints above rather than being clamped by them.
-        for width in [60usize, 100, 200] {
-            let rendered = build_table(&[wide_row()], &opts(Some(width as u16))).to_string();
+        for width in [60_u16, 100, 200] {
+            let rendered = build_table(&[wide_row()], &opts(Some(width))).to_string();
             let widest = rendered
                 .lines()
                 .map(str::chars)
@@ -654,7 +676,8 @@ mod tests {
                 .max()
                 .unwrap();
             assert_eq!(
-                widest, width,
+                widest,
+                usize::from(width),
                 "--width {width} produced a {widest}-column table:\n{rendered}"
             );
         }
@@ -724,6 +747,7 @@ mod tests {
         let path = dir.join("report.csv");
         let opts = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(path.clone()),
             width: None,
         };
@@ -751,6 +775,7 @@ mod tests {
     fn precheck_still_fails_on_an_unwritable_destination() {
         let opts = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(std::path::PathBuf::from(
                 "/crt-query-no-such-directory/report.csv",
             )),
@@ -905,6 +930,7 @@ mod tests {
         let modes_enforced = File::create(dir.join("probe")).is_err();
         let opts = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(path.clone()),
             width: None,
         };
@@ -1047,6 +1073,7 @@ mod tests {
 
         let out = OutputOpts {
             json: false,
+            quiet: false,
             csv: Some(path.clone()),
             width: None,
         };

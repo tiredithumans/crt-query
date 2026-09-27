@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Regenerate packaging/homebrew/crt-query.rb from a published release.
+# Generate packaging/homebrew/crt-query.rb from a published release.
 #
 #   packaging/homebrew/generate.sh [vX.Y.Z]   (default: the latest release)
 #
 # Release.yml's `tap` job runs this on `release: published` and pushes the
 # result to the tap, so a normal release needs no manual run. This stays the
 # fallback, and the way to inspect what the formula will say before a release.
+#
+# The output is gitignored rather than committed. The tap job never writes it
+# back to this repository, so a tracked copy could only fall behind the tap it
+# was generated for — which is what happened, until it named a release that had
+# already been superseded. The tap is the one copy `brew install` reads.
 #
 # Every checksum in the formula is copied straight out of the release's
 # SHA256SUMS, so the formula cannot drift from the archives it points at, and

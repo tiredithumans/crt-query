@@ -10,6 +10,7 @@ use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Config, NoTls, Row};
 
 use crate::config::Conn;
+use crate::notice::notice;
 
 /// How many times a connection is dialled before the run gives up.
 ///
@@ -121,7 +122,7 @@ impl Db {
     /// never lands in a piped table or JSON document.
     fn hint(&self, subject: &str) {
         if std::io::stderr().is_terminal() {
-            eprintln!("querying {} for {subject}…", self.target);
+            notice!("querying {} for {subject}…", self.target);
         }
     }
 
@@ -168,10 +169,12 @@ fn explain_context(
              wait a moment and retry"
                 .to_string(),
         ),
-        Some(&SqlState::ADMIN_SHUTDOWN)
-        | Some(&SqlState::CRASH_SHUTDOWN)
-        | Some(&SqlState::CONNECTION_FAILURE)
-        | Some(&SqlState::CONNECTION_DOES_NOT_EXIST) => Some(format!(
+        Some(
+            &SqlState::ADMIN_SHUTDOWN
+            | &SqlState::CRASH_SHUTDOWN
+            | &SqlState::CONNECTION_FAILURE
+            | &SqlState::CONNECTION_DOES_NOT_EXIST,
+        ) => Some(format!(
             "{target} closed the connection mid-query; retry in a moment"
         )),
         // No SQLSTATE: the server never answered. If the connection task
@@ -226,9 +229,57 @@ fn host_of(config: &Config) -> String {
 }
 
 /// Host and port for user-facing messages.
+///
+/// Not a cache key: two databases on one server share it. See
+/// [`cache_identity`].
 fn target(config: &Config) -> String {
     let port = config.get_ports().first().copied().unwrap_or(5432);
     format!("{}:{port}", host_of(config))
+}
+
+/// Host, port and database: what a cache entry is keyed on.
+///
+/// Kept apart from [`target`] because the two answer different questions.
+/// `target` names a server for a person reading an error, and the database
+/// name is noise there. The cache has to name the database the rows came
+/// from, and the cache key used to be `target` alone, so `--dbname` against
+/// one host read entries another database had written. No private mirror is
+/// needed for that to bite: two databases behind one server are enough.
+///
+/// Built from the parsed config, like `target`, so a password in a `db_url`
+/// never reaches it. That matters here as much as on stderr: the identity is
+/// written in full into every cache entry, and the cache would otherwise hold
+/// a credential in a file nobody thinks of as holding one.
+///
+/// A `db_url` that names no database, such as `postgresql://me@db.internal/`,
+/// connects to the database PostgreSQL defaults to, which is the one named
+/// after the user. The identity says so by using the user name, which makes
+/// `postgresql://me@db.internal/` and `postgresql://me@db.internal/me` share
+/// entries, correctly, because they reach the same database. With no user
+/// either, tokio-postgres falls back to the operating-system account running
+/// the process (`whoami::username`), and the database follows it, so the
+/// identity asks the same function. It used to leave the name empty on the
+/// grounds that the account is fixed for a per-user cache directory, which is
+/// not so once a directory is shared: `sudo` keeping `HOME`, or an
+/// `XDG_CACHE_HOME` pointed at a shared folder, has two accounts reaching two
+/// databases through one cache. Only if the account cannot be read at all is
+/// the name left empty; tokio-postgres then fails to connect, so nothing it
+/// answered can be stored under that key. PostgreSQL has no database with an
+/// empty name, so `host:port/` is never mistaken for one that was named.
+fn cache_identity(config: &Config) -> String {
+    cache_identity_with(config, || whoami::username().ok())
+}
+
+/// [`cache_identity`] with the operating-system account supplied, so tests can
+/// fix it.
+fn cache_identity_with(config: &Config, os_user: impl FnOnce() -> Option<String>) -> String {
+    let dbname = config
+        .get_dbname()
+        .or_else(|| config.get_user())
+        .map(str::to_string)
+        .or_else(os_user)
+        .unwrap_or_default();
+    format!("{}/{dbname}", target(config))
 }
 
 /// Full `source` chain of a connection error. `tokio_postgres::Error` renders
@@ -376,9 +427,11 @@ fn jittered(base: Duration, nanos: u32) -> Duration {
     const NANOS_MAX: u64 = 999_999_999;
     let step = u64::from(nanos).min(NANOS_MAX);
     // `base` is capped at MAX_RETRY_DELAY, so a quarter of it is at most 5e8ns
-    // and the product below stays four orders of magnitude inside u64.
-    let quarter = (base.as_nanos() as u64) / 4;
-    base + Duration::from_nanos(quarter * step / NANOS_MAX)
+    // and the product below stays four orders of magnitude inside u64. The
+    // conversion and the multiplication saturate anyway rather than trusting
+    // that cap, which lives in another function.
+    let quarter = u64::try_from(base.as_nanos() / 4).unwrap_or(u64::MAX);
+    base + Duration::from_nanos(quarter.saturating_mul(step) / NANOS_MAX)
 }
 
 /// A jitter source that costs no dependency: the sub-second part of the wall
@@ -430,25 +483,23 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
         // Wrapped in a timeout because `connect_timeout` in the config bounds
         // only the TCP connect: a host that accepts the socket and never
         // completes the startup exchange would otherwise hang here forever.
-        let attempted = match tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await {
-            Ok(result) => result,
-            Err(_) => {
-                // Not "connected, but the startup exchange never completed":
-                // this bound also spans name resolution and every TCP connect
-                // the host resolves to, so naming one phase asserts something
-                // the timeout cannot distinguish.
-                let stalled = anyhow::anyhow!(
-                    "no response from {target} within {}s (name resolution, connect \
+        let Ok(attempted) = tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await
+        else {
+            // Not "connected, but the startup exchange never completed":
+            // this bound also spans name resolution and every TCP connect
+            // the host resolves to, so naming one phase asserts something
+            // the timeout cannot distinguish.
+            let stalled = anyhow::anyhow!(
+                "no response from {target} within {}s (name resolution, connect \
                      or the startup exchange did not complete)",
-                    CONNECT_TIMEOUT.as_secs()
-                );
-                causes.push(stalled.to_string());
-                last_err = Some(stalled);
-                if !wait_before_retry(attempt, started).await {
-                    break;
-                }
-                continue;
+                CONNECT_TIMEOUT.as_secs()
+            );
+            causes.push(stalled.to_string());
+            last_err = Some(stalled);
+            if !wait_before_retry(attempt, started).await {
+                break;
             }
+            continue;
         };
         match attempted {
             Ok((client, connection)) => {
@@ -525,9 +576,19 @@ impl Source {
         Ok(self.db.as_ref().expect("just connected"))
     }
 
-    /// Host and port for user-facing messages, without dialling anything.
-    pub fn target(&self) -> Result<String> {
-        Ok(target(&build_config(&self.conn)?))
+    /// Host, port and database, for keying the cache, without dialling
+    /// anything. Never printed: user-facing messages name the server through
+    /// [`target`], which stays `host:port`.
+    ///
+    /// Every [`crate::cache::Key`] is built from this. There used to be a
+    /// `Source::target` returning `host:port` alone, and the keys were built
+    /// from that, so two databases on one host answered for each other. It
+    /// had no caller left outside the tests once the keys moved here, and it
+    /// is gone rather than kept as the tempting wrong answer. See
+    /// [`cache_identity`] for what stands in when a `db_url` names no
+    /// database.
+    pub fn cache_identity(&self) -> Result<String> {
+        Ok(cache_identity(&build_config(&self.conn)?))
     }
 }
 
@@ -563,6 +624,92 @@ mod tests {
         assert!(!shown.contains("hunter2"), "password leaked into {shown}");
     }
 
+    /// The cache key used to be `host:port` alone, so pointing `--dbname` at a
+    /// second database on the same server was served whatever the first had
+    /// cached. The identity has to tell them apart, and the user-facing target
+    /// has to carry on not caring: it names a server in an error message.
+    #[test]
+    fn two_databases_on_one_host_have_different_cache_identities() {
+        let mut other = conn(None);
+        other.dbname = "other".to_string();
+        let certwatch = build_config(&conn(None)).unwrap();
+        let other = build_config(&other).unwrap();
+
+        assert_eq!(cache_identity(&certwatch), "crt.sh:5432/certwatch");
+        assert_eq!(cache_identity(&other), "crt.sh:5432/other");
+        assert_eq!(
+            target(&certwatch),
+            target(&other),
+            "the user-facing target is host:port and must stay that way"
+        );
+
+        // And so the keys differ. `Key` is compared in full on every read, so
+        // two keys that differ can never answer for each other, whatever
+        // their filenames hash to.
+        let key = |identity: String| crate::cache::Key {
+            target: identity,
+            sql: "SELECT 1".to_string(),
+            term: "example.com".to_string(),
+            params: vec!["365".to_string()],
+        };
+        assert_ne!(key(cache_identity(&certwatch)), key(cache_identity(&other)));
+    }
+
+    /// The identity is written in full into every cache entry, so a password
+    /// that reached it would sit in a file nobody thinks of as holding one.
+    #[test]
+    fn a_db_url_password_never_reaches_the_cache_identity() {
+        let config = build_config(&conn(Some(
+            "postgresql://me:hunter2@db.internal:6432/certwatch",
+        )))
+        .unwrap();
+        let identity = cache_identity(&config);
+        assert_eq!(identity, "db.internal:6432/certwatch");
+        assert!(
+            !identity.contains("hunter2"),
+            "a db_url password leaked into the cache identity"
+        );
+    }
+
+    /// PostgreSQL connects to the database named after the user when none is
+    /// given, so that is what the identity names. A URL without a user either
+    /// falls back to the operating-system account, exactly as tokio-postgres
+    /// does, so two accounts sharing one cache directory stay apart; only an
+    /// account that cannot be read gets the empty name no real database has.
+    #[test]
+    fn a_db_url_without_a_database_is_keyed_on_the_database_it_reaches() {
+        let identity = |url: &str| cache_identity(&build_config(&conn(Some(url))).unwrap());
+        assert_eq!(
+            identity("postgresql://me@db.internal"),
+            "db.internal:5432/me"
+        );
+        assert_eq!(
+            identity("postgresql://me@db.internal"),
+            identity("postgresql://me@db.internal/me"),
+            "the same database under two spellings should share entries"
+        );
+        assert_ne!(
+            identity("postgresql://me@db.internal"),
+            identity("postgresql://you@db.internal"),
+            "two users' default databases are two databases"
+        );
+        let no_user = build_config(&conn(Some("postgresql://db.internal"))).unwrap();
+        assert_eq!(
+            cache_identity_with(&no_user, || Some("alice".to_string())),
+            "db.internal:5432/alice"
+        );
+        assert_ne!(
+            cache_identity_with(&no_user, || Some("alice".to_string())),
+            cache_identity_with(&no_user, || Some("bob".to_string())),
+            "two accounts sharing a cache directory reach two databases"
+        );
+        assert_eq!(cache_identity_with(&no_user, || None), "db.internal:5432/");
+        assert!(
+            !identity("postgresql://me:hunter2@db.internal").contains("hunter2"),
+            "the user-name fallback must not drag the password in with it"
+        );
+    }
+
     #[test]
     fn invalid_db_url_is_rejected_before_connecting() {
         assert!(build_config(&conn(Some("not a url"))).is_err());
@@ -570,6 +717,9 @@ mod tests {
 
     #[test]
     fn the_query_deadline_sits_above_the_servers_own_statement_timeout() {
+        // What the three-attempt, two-second schedule this replaced could
+        // spend; see the last assertion below.
+        const PREVIOUS_WORST_CASE: Duration = Duration::from_secs(49);
         // crt.sh cancels at roughly 120s and says so in a way that names the
         // fix. If this bound dropped below that, every too-broad query would
         // surface as our generic "did not answer" instead of the server's
@@ -591,7 +741,6 @@ mod tests {
         // Nothing is printed during the phase any more, so every second of it
         // is silence a caller cannot tell from a hang — this is the one bound
         // that got stricter when the per-attempt lines went away.
-        const PREVIOUS_WORST_CASE: Duration = Duration::from_secs(49);
         assert!(
             worst_case < PREVIOUS_WORST_CASE,
             "a silent connect phase ({worst_case:?}) may not outlast the narrated \

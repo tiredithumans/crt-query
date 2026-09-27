@@ -9,24 +9,27 @@ readme = "README.md"
 repository = "https://github.com/tiredithumans/crt-query"
 homepage = "https://github.com/tiredithumans/crt-query"
 documentation = "https://github.com/tiredithumans/crt-query#readme"
-keywords = ["certificate", "transparency", "crtsh", "x509", "tls"]
-categories = ["command-line-utilities"]
-# Keep the published crate to what a consumer needs: sources, manifest, docs
-# and licences. Everything else is repo scaffolding.
-exclude = [
-    ".github/",
-    ".claude/",
-    ".cargo/",
-    "install.ps1",
-    "install.sh",
-    "justfile",
-    "deny.toml",
-    "packaging/",
-]
+# Shipped as release binaries (directly, through Homebrew or the install
+# scripts) or built from source with `cargo install --git`. It is not on
+# crates.io, and the README never offers `cargo install crt-query`. This keeps a
+# stray `cargo publish` from putting it there by accident, and it is why the
+# manifest carries no keywords, categories or exclude list: those only shape a
+# crates.io listing and a packaged tarball that do not exist.
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"
-chrono = { version = "0.4.45", features = ["serde"] }
+# Default features off: `wasmbind` only matters on a wasm32 target this tool is
+# never built for, and `oldtime` no longer does anything. `now` (which brings in
+# `std`, and with it `alloc`) covers `Utc::now`, formatting and
+# `to_rfc3339_opts`; `serde` is for the --json output and the cache file.
+#
+# This trims less than it looks. tokio-postgres's `with-chrono-0_4` turns on
+# chrono's `clock` whatever this line says, so iana-time-zone and windows-link
+# stay; and wasm-bindgen and js-sys stay in the lockfile, because
+# iana-time-zone and whoami (through web-sys) still name them for wasm32. What
+# goes is chrono asking for them itself.
+chrono = { version = "0.4.45", default-features = false, features = ["now", "serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
 comfy-table = "8.0.1"
@@ -37,8 +40,51 @@ serde_json = "1.0.151"
 # whole requirement, so the multi-threaded worker pool is not pulled in.
 tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
 tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4"] }
-toml = "1.1.6"
+# The config file is only ever read, through `toml::from_str` into a serde
+# struct, so the default `display` feature (and the toml_writer crate behind
+# it) is left out. `std` is left out too, and that is load-bearing rather than
+# tidiness: in this toml stack it gates nothing but tests and a HashMap
+# conversion, yet its weak `toml_writer?/std` and `indexmap?/std` entries were
+# enough to keep toml_writer, indexmap, hashbrown and equivalent in Cargo.lock
+# with `display` already off. Adding `std` back brings them back.
+toml = { version = "1.1.6", default-features = false, features = ["parse", "serde"] }
+# Named directly only for `whoami::username`, the account tokio-postgres falls
+# back to when a db_url names no user; see `cache_identity` in src/db.rs. The
+# crate is already in the tree through tokio-postgres, at this version.
+whoami = "2.1.3"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+# The lint policy, stated here rather than left to whatever clippy's defaults
+# are next release. CI runs clippy with -D warnings, so "warn" is a gate.
+#
+# No unsafe code, ever: nothing here needs it, and `forbid` means a future
+# `#[allow]` cannot quietly reintroduce it.
+[lints.rust]
+unsafe_code = "forbid"
+
+# A chosen subset of clippy::pedantic, not the whole group. These catch real
+# defects: lossy or wrapping numeric casts (the retry jitter and the --limit
+# comparison both had one), extension checks that miss `.JSON`, clones and
+# by-value arguments that do nothing, and items declared after statements. The
+# rest of pedantic is mostly taste, and in a codebase this heavily commented
+# (doc_markdown alone flags every "crt.sh") it would be noise.
+[lints.clippy]
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+case_sensitive_file_extension_comparisons = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+items_after_statements = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"

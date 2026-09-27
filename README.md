@@ -35,7 +35,8 @@ $ crt-query search example.com --skip-expired --limit 10
 ```
 
 **What is inside one certificate.** Everything crt.sh holds for one ID, SANs
-included:
+included. The SHA-256 fingerprint works in place of the ID, bare or
+colon-separated as `openssl x509 -fingerprint -sha256` prints it:
 
 ```console
 $ crt-query cert 22625564176
@@ -97,7 +98,7 @@ $ crt-query expiring example.com --within 60
 | --- | --- |
 | macOS · Linux (x86-64 · ARM64) | `brew install tiredithumans/tap/crt-query` |
 | macOS · Linux | `curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh \| sh` |
-| Windows (x86-64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
+| Windows (x86-64 · ARM64) | `irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 \| iex` |
 | From source | `cargo install --locked --git https://github.com/tiredithumans/crt-query` |
 
 Every prebuilt route resolves the newest release, verifies the archive against
@@ -105,9 +106,12 @@ that release's `SHA256SUMS`, and stages the new binary beside the installed one
 so it only replaces it once it has been shown to run. **Re-run the same command
 to upgrade.**
 
-The prebuilt Linux binaries are glibc builds and need **glibc 2.34 or newer** —
-RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later. On
-an older distribution, or on a musl system such as Alpine, build from source.
+Linux has two prebuilt flavours. The glibc build needs **glibc 2.34 or newer**
+— RHEL/Rocky 9, Ubuntu 22.04, Debian 12, Amazon Linux 2023 and anything later.
+The musl build is statically linked and needs nothing from the system, so it
+runs on Alpine and other musl distributions, and on a glibc older than 2.34.
+`install.sh` checks which one the machine needs and says which it chose;
+Homebrew installs the glibc build.
 
 <details>
 <summary>Script options, and installing by hand</summary>
@@ -141,13 +145,17 @@ options, the script has to become a scriptblock first:
 ```
 
 **Manual download.** Releases ship archives for `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin` and
-`x86_64-pc-windows-msvc`, plus one `SHA256SUMS` covering all of them. Both Linux
-archives are glibc builds requiring **glibc 2.34 or newer**; there is no musl
-archive, so Alpine and other musl systems build from source:
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, plus one `SHA256SUMS`
+covering all of them. The `-linux-gnu` archives are glibc builds requiring
+**glibc 2.34 or newer** (`getconf GNU_LIBC_VERSION` prints yours). The
+`-linux-musl` archives are static and run on any Linux: take one of those on
+Alpine or another musl system, or on an older glibc.
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu        # Apple Silicon: aarch64-apple-darwin
+                                       # Alpine, or glibc < 2.34: x86_64-unknown-linux-musl
 # `latest` redirects to the newest release, so there is no version to keep
 # up to date here. The tag is in the archive name once it lands.
 BASE=https://github.com/tiredithumans/crt-query/releases/latest/download
@@ -193,11 +201,15 @@ crt-query search example.com --limit 100
 # Several names at once, and only certificates that are still valid
 crt-query search example.com example.org --skip-expired
 
-# Everything in one certificate, by crt.sh ID
+# Everything in one certificate, by crt.sh ID or SHA-256 fingerprint
 crt-query cert 22625564176
+crt-query cert 5c83f01af4edf38533f0da804bb740960120e9da1129216281a8542aea374bdd
 
 # What is expiring, or recently expired
 crt-query expiring example.com example.org --within 30
+
+# The same as a monitoring check: exit 4 when anything is listed
+crt-query --quiet expiring example.com --skip-expired --within 14 --fail-on-expiring
 ```
 
 `--json` writes JSON to stdout instead of a table, and `--csv <path>`
@@ -216,8 +228,8 @@ matched identities. An empty or whitespace-only name — usually an unset shell
 variable — is a usage error (exit 2) rather than a query that finds nothing.
 
 Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
-`--db-url postgresql://…`. Set them once in a [config file](#configuration)
-rather than on every run.
+`--db-url postgresql://…`. Set them once in a [config file](#configuration) or
+in the environment rather than on every run.
 
 ## The search window
 
@@ -251,7 +263,7 @@ anything close to renewal.
 | `completions` | Emits a shell script rather than a record, so it ignores both `--json` and `--csv` and never creates the CSV destination |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
 | Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |
-| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
+| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID · `4` `expiring --fail-on-expiring` found certificates to report. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
 
 Left to size itself, the table keeps atomic columns — an ID, a hex serial, a
 timestamp — off the wrapping list, and holds a floor under the free-text ones so
@@ -267,7 +279,10 @@ would begin `=`, `+`, `@`, tab or carriage return is prefixed with `'` so a
 spreadsheet treats it as text — certificate subjects come from a public log and
 are chosen by whoever got the certificate issued. Negative numbers are never
 prefixed. While a query is in flight, `querying crt.sh:5432 for "example.com"…` goes to stderr —
-suppressed when stderr is not a terminal, so scheduled runs keep clean logs.
+suppressed when stderr is not a terminal, so scheduled runs keep clean logs. For
+cron, which mails anything a job writes to stderr, `--quiet` (`-q`) drops every
+informational line — the progress line, empty-result explanations, the
+`--limit` note, `wrote N CSV row(s)` — and keeps errors.
 Piping into `head`, or quitting `less` early, ends output cleanly.
 
 ## Configuration
@@ -288,8 +303,19 @@ user = "guest"
 # db_url = "postgresql://guest@crt.sh:5432/certwatch"
 ```
 
-Precedence, highest first: command-line flag, config file, built-in default. A
-missing file is fine. A file that exists but does not parse is an error — an
+Each connection setting can also come from the environment, which suits a
+container or a CI job where writing a file is awkward: `CRT_QUERY_HOST`,
+`CRT_QUERY_PORT`, `CRT_QUERY_DBNAME`, `CRT_QUERY_USER` and `CRT_QUERY_DB_URL`.
+An empty variable counts as unset. They are read only by the subcommands that
+connect, so a stray one cannot break `completions` or `cache`, and `--help`
+names them without printing their values.
+
+Precedence, highest first: command-line flag, environment variable, config
+file, built-in default. A `db_url` sets the whole connection, so it replaces
+the host, port, database and user from its own layer and every layer below it.
+One given *above* it — `--port` with a `db_url` in the config file, say, or
+`CRT_QUERY_HOST` with one there — is an error naming both, rather than a silent
+guess at which you meant. A missing file is fine. A file that exists but does not parse is an error — an
 unknown or misspelled key fails the run rather than being ignored, so a typo
 cannot quietly leave you querying somewhere you did not intend.
 
@@ -307,7 +333,7 @@ survives an outage, because it never opens a connection at all.
 | | |
 |---|---|
 | Where | `$XDG_CACHE_HOME/crt-query`, else `~/.cache/crt-query` (`%LOCALAPPDATA%\crt-query\cache` on Windows) |
-| Lifetime | one hour for `search` and `expiring`; 30 days for `cert` |
+| Lifetime | one hour for `search`, `expiring` and a `cert` ID that was not found; 30 days for a certificate that `cert` found |
 | Inspect | `crt-query cache path` |
 | Empty it | `crt-query cache clear` |
 
@@ -318,18 +344,29 @@ crt-query search example.com --refresh    # re-asks, then re-caches
 crt-query search example.com --no-cache   # ignores the cache entirely
 ```
 
-`cert` gets the long lifetime because a certificate at a given crt.sh ID cannot
-change. `search` and `expiring` get the short one because their validity windows
-— `--valid-since`, `--within`, `--since-expired` — are evaluated by the server
+A certificate that `cert` found gets the long lifetime, because the record at a
+given crt.sh ID cannot change. An ID it did not find gets the short one: the
+guest database is a replica that runs behind the crt.sh website, so an ID you
+have just seen there can be missing from it for a while, and a miss remembered
+for a month would go on answering exit `3` long after the certificate arrived.
+`--refresh` re-asks straight away.
+
+`search` and `expiring` get the short lifetime because their validity windows —
+`--valid-since`, `--within`, `--since-expired` — are evaluated by the server
 when the query runs, so **a cached result carries the window as it stood when it
 was written**. The drift is bounded by the lifetime above and stays well inside
 the day granularity those flags work in, but `--refresh` is there when you need
 the window recomputed now.
 
+Entries are keyed on the host, port and database they came from, so pointing
+`--host`, `--dbname` or `--db-url` somewhere else never serves what another
+database answered.
+
 Configure it alongside the connection:
 
 ```toml
-# Turn it off entirely, or change how long a search stays usable.
+# Turn it off entirely, or change the short lifetime: how long a search, or a
+# cert ID that was not found, stays usable.
 cache = true
 cache_ttl_secs = 3600
 ```
@@ -346,11 +383,21 @@ certificates in it are public, but the list of names you searched for is not.
 `crt-query check-update` reports whether a newer release exists, and exits `0`
 either way — being out of date is a report, not a failure. It is the only
 subcommand that contacts anything other than crt.sh, and only when you ask;
-nothing checks in the background. It shells out to the system `curl`, so that
-has to be on `PATH` — the only path in this tool that runs an external program.
-On Windows the search is Rust's, not `PATH` alone: it looks in the directory
-holding `crt-query.exe` before `System32` and before `PATH`. `--json` gives `current`, `latest`,
-`update_available` and `release_url` for a scheduled check.
+nothing checks in the background. It reads which release
+`github.com/tiredithumans/crt-query/releases/latest` redirects to — the
+redirect the install scripts rely on too — rather than asking GitHub's API,
+whose per-IP limit on unauthenticated requests a shared address can use up.
+
+It shells out to the system `curl` — the only path in this tool that runs an
+external program. On Windows it runs `%SystemRoot%\System32\curl.exe` by its
+full path, which ships with Windows 10 1803 and later and with Windows 11. Only
+if that file is missing, or `SystemRoot` is unset or not an absolute drive path
+(`C:\…`), does it fall back to a bare `curl`, and Rust resolves that name by
+looking in the directory holding `crt-query.exe` before `System32` and before
+`PATH` — so on such a system a `curl.exe` beside `crt-query.exe` is the one
+that runs. Everywhere else `curl` has to be on `PATH`. `--json` gives
+`current`, `latest`, `update_available` and `release_url` for a scheduled
+check.
 
 To upgrade, re-run whatever you installed with: `brew upgrade crt-query`,
 `install.sh`, `install.ps1`, or `cargo install --locked --git … --force`.
@@ -409,12 +456,16 @@ Requires Rust 1.98+ (pinned via `rust-toolchain.toml`) and
 
 ```sh
 just build-release   # binary lands in target/release/crt-query
-just verify          # fmt-check · lint · test · msrv · lint-scripts · build — offline
+just build-musl      # Linux only: static binary in target/<cpu>-unknown-linux-musl/release/
+just verify          # fmt-check · lint · test · msrv · lint-scripts · doc — offline
 just verify-full     # adds cargo-audit + cargo-deny (needs network)
 ```
 
-`just --list` shows every recipe. `lint-scripts` covers `install.sh` and
-`install.ps1`; it needs `shellcheck` and `pwsh` on PATH.
+`just --list` shows every recipe. `lint-scripts` covers `install.sh`,
+`install.ps1` and the Homebrew formula generator; it needs `shellcheck` and
+`pwsh` on PATH. `doc` runs rustdoc over every item, private ones included,
+with warnings as errors, so a doc comment linking to an item that does not
+exist fails the gate.
 
 Every test is offline and never contacts crt.sh — it is a shared public service
 on donated infrastructure, and a test suite pointed at it would be both flaky

@@ -2,6 +2,7 @@ mod cache;
 mod cli;
 mod config;
 mod db;
+mod notice;
 mod output;
 mod queries;
 #[cfg(test)]
@@ -16,6 +17,7 @@ use clap::Parser;
 use crate::cache::Cache;
 use crate::cli::{CacheAction, Cli, Commands};
 use crate::db::Source;
+use crate::notice::notice;
 use crate::queries::Report;
 use crate::queries::cert::CertDetail;
 
@@ -35,6 +37,13 @@ const EXIT_ERROR: i32 = 1;
 /// false "the certificate is gone" alert, which is the exact confusion this
 /// code exists to prevent.
 const EXIT_NOT_FOUND: i32 = 3;
+/// `expiring --fail-on-expiring` found something to report: a certificate
+/// expiring inside `--within`, or one already expired inside the look-back.
+///
+/// Not EXIT_ERROR, because nothing failed, and not 2 or 3, which already mean
+/// "you typed it wrong" and "no such certificate". A monitoring check has to be
+/// able to tell "act on this" from "the check itself broke".
+const EXIT_EXPIRING: i32 = 4;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -49,6 +58,8 @@ async fn main() {
 
 async fn run() -> Result<i32> {
     let cli = Cli::parse();
+    // Before anything can print: every informational line checks this.
+    notice::set_quiet(cli.out.quiet);
     // Check the CSV destination before any real work: before a connection is
     // spent on the shared guest database, which is a genuinely scarce
     // resource, and before check-update's network round trip.
@@ -85,28 +96,28 @@ async fn run() -> Result<i32> {
             if report.rows.is_empty() {
                 let names = quoted(&terms);
                 if *skip_expired {
-                    eprintln!("No unexpired certificates found for {names}.");
+                    notice!("No unexpired certificates found for {names}.");
                 } else if lookback == cli::ALL_HISTORY {
-                    eprintln!("No certificates found for {names}.");
+                    notice!("No certificates found for {names}.");
                 } else {
-                    eprintln!(
+                    notice!(
                         "No certificates found for {names} valid within the last \
                          {lookback} day(s); widen with --valid-since or --all-history."
                     );
                 }
             } else if report.window_hid_certificates() {
-                eprintln!("{}", saturation_note(*limit, &terms, &report));
+                notice!("{}", saturation_note(*limit, &terms, &report));
             }
             // Emitted even when empty: --json still owes the caller `[]`, and
             // --csv still owes a file, or a stale one is silently reused.
             output::emit(&report.rows, &cli.out)?;
         }
-        Commands::Cert { id } => {
+        Commands::Cert { lookup } => {
             let (mut source, cache) = open_source(&cli)?;
-            match queries::cert::run_cert(&mut source, &cache, *id).await? {
+            match queries::cert::run_cert(&mut source, &cache, lookup).await? {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
-                    eprintln!("No certificate with crt.sh ID {id}.");
+                    notice!("No certificate with {lookup}.");
                     output::emit_missing::<CertDetail>(&cli.out, EXIT_NOT_FOUND)?;
                     return Ok(EXIT_NOT_FOUND);
                 }
@@ -119,6 +130,7 @@ async fn run() -> Result<i32> {
             skip_expired,
             limit,
             no_dedupe,
+            fail_on_expiring,
         } => {
             let domains = Commands::unique_terms(domain);
             let lookback = Commands::expiring_lookback(*since_expired, *skip_expired);
@@ -137,20 +149,28 @@ async fn run() -> Result<i32> {
                 let names = quoted(&domains);
                 let limit_note = limit_note(&domains);
                 if lookback == 0 {
-                    eprintln!(
+                    notice!(
                         "No unexpired certificates for {names} expiring within \
                          {within} day(s) ({limit_note})."
                     );
                 } else {
-                    eprintln!(
+                    notice!(
                         "No certificates for {names} expiring within {within} day(s) \
                          or expired in the last {lookback} day(s) ({limit_note})."
                     );
                 }
             } else if report.window_hid_certificates() {
-                eprintln!("{}", saturation_note(*limit, &domains, &report));
+                notice!("{}", saturation_note(*limit, &domains, &report));
             }
-            output::emit(&report.rows, &cli.out)?;
+            // Decided before writing, so a reader that goes away mid-report
+            // cannot turn the alert into a success; see `emit_exiting`.
+            let code = if *fail_on_expiring && !report.rows.is_empty() {
+                EXIT_EXPIRING
+            } else {
+                EXIT_OK
+            };
+            output::emit_exiting(&report.rows, &cli.out, code)?;
+            return Ok(code);
         }
         // None of the following needs the database.
         Commands::Cache { action } => run_cache(*action)?,
@@ -169,8 +189,9 @@ async fn run() -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Resolve the connection settings — CLI flags over config file over built-in
-/// defaults — and the cache that fronts them.
+/// Resolve the connection settings — CLI flags over `CRT_QUERY_*` environment
+/// variables over config file over built-in defaults — and the cache that
+/// fronts them.
 ///
 /// Called from inside the subcommand arms rather than once up front, so that
 /// `completions` and `check-update` neither read the config file nor open a
@@ -182,8 +203,9 @@ async fn run() -> Result<i32> {
 /// regularly refuses connections.
 fn open_source(cli: &Cli) -> Result<(Source, Cache)> {
     let file = config::load()?;
+    let env = config::EnvConfig::load()?;
     let cache = build_cache(&cli.cache, &file);
-    Ok((Source::new(config::resolve(&cli.conn, &file)), cache))
+    Ok((Source::new(config::resolve(&cli.conn, &env, &file)?), cache))
 }
 
 /// Fold the cache flags and config file into a cache.
@@ -222,8 +244,20 @@ fn run_cache(action: CacheAction) -> Result<()> {
         // No absolute cache directory in this environment, so there is nowhere
         // for entries to be — see `cache::cache_root` for why relative is
         // refused rather than resolved.
-        eprintln!("No cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path.");
-        return Ok(());
+        //
+        // `cache path` cannot answer, and says so as an error: exiting 0 with
+        // nothing on stdout let `$(crt-query cache path)` read as an empty
+        // path, and under `--quiet` there was not even a note to say why.
+        // `cache clear` has genuinely nothing to do, so it stays a success.
+        const WHY: &str =
+            "no cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path";
+        return match action {
+            CacheAction::Path => Err(anyhow::anyhow!(WHY)),
+            CacheAction::Clear => {
+                notice!("Nothing to clear: {WHY}.");
+                Ok(())
+            }
+        };
     };
     match action {
         CacheAction::Path => println!("{}", dir.display()),
@@ -231,7 +265,7 @@ fn run_cache(action: CacheAction) -> Result<()> {
             let removed = cache
                 .clear()
                 .with_context(|| format!("clearing the cache in {}", dir.display()))?;
-            eprintln!("Cleared {removed} cached result(s) from {}.", dir.display());
+            notice!("Cleared {removed} cached result(s) from {}.", dir.display());
         }
     }
     Ok(())
@@ -315,14 +349,14 @@ mod tests {
         certs: usize,
         raw_rows: usize,
     ) -> String {
-        let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+        let terms: Vec<String> = terms.iter().map(ToString::to_string).collect();
         saturation_note(
             limit,
             &terms,
             &Report {
                 rows: vec![(); certs],
                 raw_rows,
-                saturated: saturated.iter().map(|t| t.to_string()).collect(),
+                saturated: saturated.iter().map(ToString::to_string).collect(),
             },
         )
     }
@@ -412,6 +446,7 @@ mod tests {
             ("EXIT_OK", EXIT_OK),
             ("EXIT_ERROR", EXIT_ERROR),
             ("EXIT_NOT_FOUND", EXIT_NOT_FOUND),
+            ("EXIT_EXPIRING", EXIT_EXPIRING),
         ] {
             assert_ne!(code, CLAP_USAGE_ERROR, "{name} collides with clap's exit 2");
         }
@@ -423,7 +458,11 @@ mod tests {
             EXIT_NOT_FOUND, 3,
             "README documents exit 3 for a missing certificate"
         );
-        let mut codes = [EXIT_OK, EXIT_ERROR, EXIT_NOT_FOUND];
+        assert_eq!(
+            EXIT_EXPIRING, 4,
+            "README documents exit 4 for expiring --fail-on-expiring"
+        );
+        let mut codes = [EXIT_OK, EXIT_ERROR, EXIT_NOT_FOUND, EXIT_EXPIRING];
         codes.sort_unstable();
         let distinct = codes.windows(2).all(|w| w[0] != w[1]);
         assert!(distinct, "exit codes must stay distinguishable: {codes:?}");

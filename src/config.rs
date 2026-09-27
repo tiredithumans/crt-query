@@ -14,7 +14,8 @@ pub const DEFAULT_DBNAME: &str = "certwatch";
 pub const DEFAULT_USER: &str = "guest";
 
 /// Connection settings read from the config file. Every field is optional;
-/// absent fields fall back to CLI flags, then to the built-in defaults.
+/// absent fields fall back to the built-in defaults, and a CLI flag or a
+/// `CRT_QUERY_*` environment variable overrides any of them.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
@@ -25,9 +26,9 @@ pub struct FileConfig {
     pub db_url: Option<String>,
     /// Whether to use the local result cache at all. `--no-cache` still wins.
     pub cache: Option<bool>,
-    /// How long a cached `search`/`expiring` result stays usable, in seconds.
-    /// `cert` lookups keep their own much longer lifetime — the record they
-    /// cache cannot change.
+    /// How long a cached `search`/`expiring` result, or a `cert` lookup that
+    /// found nothing, stays usable, in seconds. A found certificate keeps its
+    /// own much longer lifetime — the record it caches cannot change.
     pub cache_ttl_secs: Option<u64>,
 }
 
@@ -40,24 +41,101 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DbUrlSource {
     Flag,
+    /// `CRT_QUERY_DB_URL`. Named apart from `Flag` for the same reason
+    /// `ConfigFile` is: blaming `--db-url` for a variable sends the reader to
+    /// a command line that holds nothing wrong.
+    Env,
     ConfigFile,
 }
 
 impl DbUrlSource {
     /// How to describe a `db_url` that failed to parse.
     pub fn describe(self) -> String {
+        format!("invalid {}", self.name())
+    }
+
+    /// Where the URL was set, as the reader would go and find it.
+    fn name(self) -> String {
         match self {
-            Self::Flag => "invalid --db-url".to_string(),
+            Self::Flag => "--db-url".to_string(),
+            Self::Env => ENV_DB_URL.to_string(),
             Self::ConfigFile => match config_path() {
-                Some(path) => format!("invalid `db_url` in {}", path.display()),
-                None => "invalid `db_url` in the config file".to_string(),
+                Some(path) => format!("`db_url` in {}", path.display()),
+                None => "`db_url` in the config file".to_string(),
             },
         }
     }
 }
 
-/// Fully resolved connection settings, after CLI flags and the config file
-/// have been folded into the built-in defaults.
+/// The environment variables that can stand in for the connection flags.
+pub const ENV_HOST: &str = "CRT_QUERY_HOST";
+pub const ENV_PORT: &str = "CRT_QUERY_PORT";
+pub const ENV_DBNAME: &str = "CRT_QUERY_DBNAME";
+pub const ENV_USER: &str = "CRT_QUERY_USER";
+pub const ENV_DB_URL: &str = "CRT_QUERY_DB_URL";
+
+/// Connection settings read from `CRT_QUERY_*` environment variables.
+///
+/// They sit between the command line and the config file: a container or a CI
+/// job can point the tool somewhere without writing a file, and an explicit
+/// flag still wins.
+///
+/// Read here rather than through clap's `env` attribute, which was tried and
+/// had two faults. clap parses every global argument for every subcommand, so
+/// an exported-but-empty `CRT_QUERY_PORT` made even `completions` exit 2; and
+/// it treats an empty variable as a value, where `export CRT_QUERY_HOST=` is
+/// how a shell user says "unset". Reading them only when a connection is
+/// resolved, with empty meaning absent, avoids both — and knowing the source
+/// directly is what lets a bad `CRT_QUERY_DB_URL` be reported under its own
+/// name.
+#[derive(Debug, Default)]
+pub struct EnvConfig {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub dbname: Option<String>,
+    pub user: Option<String>,
+    pub db_url: Option<String>,
+}
+
+impl EnvConfig {
+    /// Read the variables from the process environment.
+    pub fn load() -> Result<Self> {
+        Self::from_lookup(|name| std::env::var_os(name))
+    }
+
+    /// Read the variables through `lookup`, so tests need not touch the
+    /// process environment (`std::env::set_var` is `unsafe` under edition
+    /// 2024, and racy across parallel tests besides).
+    fn from_lookup(lookup: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
+        let text = |name: &str| -> Result<Option<String>> {
+            match lookup(name) {
+                None => Ok(None),
+                Some(value) if value.is_empty() => Ok(None),
+                Some(value) => value
+                    .into_string()
+                    .map(Some)
+                    .map_err(|_| anyhow::anyhow!("{name} is not valid UTF-8")),
+            }
+        };
+        let port = match text(ENV_PORT)? {
+            None => None,
+            Some(port) => Some(port.trim().parse::<u16>().with_context(|| {
+                format!("invalid {ENV_PORT} {port:?}: expected a port number from 0 to 65535")
+            })?),
+        };
+        Ok(Self {
+            host: text(ENV_HOST)?,
+            port,
+            dbname: text(ENV_DBNAME)?,
+            user: text(ENV_USER)?,
+            db_url: text(ENV_DB_URL)?,
+        })
+    }
+}
+
+/// Fully resolved connection settings, after CLI flags, `CRT_QUERY_*`
+/// environment variables and the config file have been folded into the
+/// built-in defaults.
 #[derive(Debug, Clone)]
 pub struct Conn {
     pub host: String,
@@ -136,45 +214,96 @@ pub fn load() -> Result<FileConfig> {
     Ok(cfg)
 }
 
-/// Fold CLI flags, the config file and built-in defaults into one connection.
+/// Fold CLI flags, environment variables, the config file and built-in
+/// defaults into one connection.
 ///
-/// Precedence, highest first: CLI flag, config file, built-in default. A
-/// `db_url` from either source overrides the individual host/port/dbname/user
-/// settings entirely, mirroring what `--db-url` does on the command line.
-pub fn resolve(cli: &ConnOpts, file: &FileConfig) -> Conn {
+/// Precedence, highest first: CLI flag, `CRT_QUERY_*` environment variable,
+/// config file, built-in default. A `db_url` sets the whole connection, so it
+/// replaces the individual host/port/dbname/user settings from its own layer
+/// and every layer below it, mirroring what `--db-url` does on the command
+/// line.
+///
+/// An individual setting from a layer *above* the `db_url` is an error rather
+/// than something to resolve silently either way. Letting the URL win, as a
+/// config-file `db_url` used to over `--host`, broke the stated precedence and
+/// sent the query somewhere the caller had explicitly said not to; the
+/// environment layer made that easy to hit, with a CI job exporting
+/// `CRT_QUERY_DB_URL` and someone adding `--port`. Letting the setting win
+/// instead would mean splicing a port into a URL the caller wrote as a whole,
+/// or dropping the URL and falling back to crt.sh for everything else. Neither
+/// is what anyone typing both meant, so the run stops and names the two.
+pub fn resolve(cli: &ConnOpts, env: &EnvConfig, file: &FileConfig) -> Result<Conn> {
     let db_url = cli
         .db_url
         .clone()
         .map(|url| (url, DbUrlSource::Flag))
+        .or_else(|| env.db_url.clone().map(|url| (url, DbUrlSource::Env)))
         .or_else(|| {
             file.db_url
                 .clone()
                 .map(|url| (url, DbUrlSource::ConfigFile))
         });
-    Conn {
-        host: cli
-            .host
-            .clone()
-            .or_else(|| file.host.clone())
-            .unwrap_or_else(|| DEFAULT_HOST.into()),
-        port: cli.port.or(file.port).unwrap_or(DEFAULT_PORT),
-        dbname: cli
-            .dbname
-            .clone()
-            .or_else(|| file.dbname.clone())
-            .unwrap_or_else(|| DEFAULT_DBNAME.into()),
-        user: cli
-            .user
-            .clone()
-            .or_else(|| file.user.clone())
-            .unwrap_or_else(|| DEFAULT_USER.into()),
-        db_url,
+    if let Some((_, source)) = &db_url
+        && let Some(higher) = setting_above(*source, cli, env)
+    {
+        anyhow::bail!(
+            "{higher} conflicts with {url}: a db_url sets the whole connection, so it \
+                 cannot be combined with a host, port, database or user given with higher \
+                 precedence; put everything in --db-url, or remove {url}",
+            url = source.name()
+        );
     }
+    let text =
+        |flag: &Option<String>, env: &Option<String>, file: &Option<String>, default: &str| {
+            flag.clone()
+                .or_else(|| env.clone())
+                .or_else(|| file.clone())
+                .unwrap_or_else(|| default.to_string())
+        };
+    Ok(Conn {
+        host: text(&cli.host, &env.host, &file.host, DEFAULT_HOST),
+        port: cli.port.or(env.port).or(file.port).unwrap_or(DEFAULT_PORT),
+        dbname: text(&cli.dbname, &env.dbname, &file.dbname, DEFAULT_DBNAME),
+        user: text(&cli.user, &env.user, &file.user, DEFAULT_USER),
+        db_url,
+    })
+}
+
+/// The first individual connection setting given in a layer above the one the
+/// `db_url` came from, named as the caller wrote it.
+fn setting_above(url_from: DbUrlSource, cli: &ConnOpts, env: &EnvConfig) -> Option<String> {
+    let flags = [
+        ("--host", cli.host.is_some()),
+        ("--port", cli.port.is_some()),
+        ("--dbname", cli.dbname.is_some()),
+        ("--user", cli.user.is_some()),
+    ];
+    let vars = [
+        (ENV_HOST, env.host.is_some()),
+        (ENV_PORT, env.port.is_some()),
+        (ENV_DBNAME, env.dbname.is_some()),
+        (ENV_USER, env.user.is_some()),
+    ];
+    let above: &[(&str, bool)] = match url_from {
+        DbUrlSource::Flag => &[],
+        DbUrlSource::Env => &flags,
+        DbUrlSource::ConfigFile => &[flags, vars].concat(),
+    };
+    above
+        .iter()
+        .find(|(_, set)| *set)
+        .map(|(name, _)| (*name).to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `resolve` with no `CRT_QUERY_*` variables set: the flag-versus-file
+    /// cases below predate the environment layer and are about that pair.
+    fn without_env(cli: &ConnOpts, file: &FileConfig) -> Conn {
+        resolve(cli, &EnvConfig::default(), file).expect("no conflicting layers")
+    }
 
     #[cfg(not(windows))]
     fn root(xdg: Option<&str>, home: Option<&str>) -> Option<String> {
@@ -255,7 +384,7 @@ mod tests {
 
     #[test]
     fn defaults_apply_when_nothing_is_set() {
-        let conn = resolve(&cli(None, None), &FileConfig::default());
+        let conn = without_env(&cli(None, None), &FileConfig::default());
         assert_eq!(conn.host, DEFAULT_HOST);
         assert_eq!(conn.port, DEFAULT_PORT);
         assert_eq!(conn.dbname, DEFAULT_DBNAME);
@@ -265,7 +394,7 @@ mod tests {
 
     #[test]
     fn cli_beats_the_config_file() {
-        let conn = resolve(
+        let conn = without_env(
             &cli(Some("cli.example"), None),
             &file(Some("file.example"), None),
         );
@@ -274,13 +403,13 @@ mod tests {
 
     #[test]
     fn config_file_beats_the_defaults() {
-        let conn = resolve(&cli(None, None), &file(Some("file.example"), None));
+        let conn = without_env(&cli(None, None), &file(Some("file.example"), None));
         assert_eq!(conn.host, "file.example");
     }
 
     #[test]
     fn a_cli_db_url_overrides_everything_else() {
-        let conn = resolve(
+        let conn = without_env(
             &cli(
                 Some("ignored.example"),
                 Some("postgresql://u@cli.example/db"),
@@ -294,10 +423,10 @@ mod tests {
     }
 
     #[test]
-    fn a_config_file_db_url_overrides_the_individual_fields() {
-        let conn = resolve(
-            &cli(Some("ignored.example"), None),
-            &file(None, Some("postgresql://u@f.example/db")),
+    fn a_config_file_db_url_overrides_the_file_s_own_fields() {
+        let conn = without_env(
+            &cli(None, None),
+            &file(Some("ignored.example"), Some("postgresql://u@f.example/db")),
         );
         assert_eq!(
             url_of(&conn),
@@ -307,9 +436,173 @@ mod tests {
         );
     }
 
+    /// A `db_url` from a lower layer and a host, port, database or user from a
+    /// higher one used to resolve silently in the URL's favour: a stale
+    /// config.toml, or an exported CRT_QUERY_DB_URL, overrode an explicit
+    /// `--port`, and the query went where the caller had said not to. Every
+    /// such pairing is now an error naming both.
+    #[test]
+    fn a_lower_db_url_under_a_higher_setting_is_a_conflict_not_a_guess() {
+        let file_url = file(None, Some("postgresql://u@f.example/db"));
+        let env_url = env_of(&[(ENV_DB_URL, "postgresql://u@env.example/db")]).unwrap();
+        let env_host = env_of(&[(ENV_HOST, "env.example")]).unwrap();
+        let mut port_flag = cli(None, None);
+        port_flag.port = Some(2);
+
+        for (what, cli_opts, env, file_cfg, higher, lower) in [
+            (
+                "--port over a file URL",
+                &port_flag,
+                &EnvConfig::default(),
+                &file_url,
+                "--port",
+                "db_url",
+            ),
+            (
+                "an env host over a file URL",
+                &cli(None, None),
+                &env_host,
+                &file_url,
+                ENV_HOST,
+                "db_url",
+            ),
+            (
+                "--port over an env URL",
+                &port_flag,
+                &env_url,
+                &FileConfig::default(),
+                "--port",
+                ENV_DB_URL,
+            ),
+        ] {
+            let err = resolve(cli_opts, env, file_cfg)
+                .expect_err(what)
+                .to_string();
+            assert!(err.contains(higher) && err.contains(lower), "{what}: {err}");
+        }
+
+        // A setting *below* the URL's layer is simply replaced, as documented.
+        let env_url_over_file_host = resolve(
+            &cli(None, None),
+            &env_url,
+            &file(Some("file.example"), None),
+        )
+        .expect("a lower layer's host is replaced, not a conflict");
+        assert_eq!(
+            url_of(&env_url_over_file_host).map(|(_, s)| s),
+            Some(DbUrlSource::Env)
+        );
+        // And --db-url alongside --host is one layer: the URL wins, as before.
+        assert!(
+            resolve(
+                &cli(Some("h.example"), Some("postgresql://u@cli.example/db")),
+                &env_host,
+                &file_url
+            )
+            .is_ok()
+        );
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> Result<EnvConfig> {
+        let pairs: Vec<(String, OsString)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), OsString::from(*v)))
+            .collect();
+        EnvConfig::from_lookup(|name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        })
+    }
+
+    /// The environment sits between the two: it beats the file and loses to
+    /// the flag, field by field.
+    #[test]
+    fn the_environment_beats_the_file_and_loses_to_the_flag() {
+        let env = env_of(&[
+            (ENV_HOST, "env.example"),
+            (ENV_PORT, "7"),
+            (ENV_DBNAME, "env-db"),
+            (ENV_USER, "env-user"),
+        ])
+        .unwrap();
+        let file = FileConfig {
+            host: Some("file.example".to_string()),
+            port: Some(2),
+            dbname: Some("file-db".to_string()),
+            user: Some("file-user".to_string()),
+            ..FileConfig::default()
+        };
+        let over_file = resolve(&cli(None, None), &env, &file).unwrap();
+        assert_eq!(over_file.host, "env.example");
+        assert_eq!(over_file.port, 7);
+        assert_eq!(over_file.dbname, "env-db");
+        assert_eq!(over_file.user, "env-user");
+
+        let flag = resolve(&cli(Some("cli.example"), None), &env, &file).unwrap();
+        assert_eq!(
+            flag.host, "cli.example",
+            "an explicit flag must beat the environment"
+        );
+    }
+
+    /// A URL from `CRT_QUERY_DB_URL` has to be reported as coming from there,
+    /// beats the file's, and loses to `--db-url`.
+    #[test]
+    fn an_environment_db_url_is_named_as_such() {
+        let env = env_of(&[(ENV_DB_URL, "postgresql://u@env.example/db")]).unwrap();
+        let file = file(None, Some("postgresql://u@f.example/db"));
+        assert_eq!(
+            url_of(&resolve(&cli(None, None), &env, &file).unwrap()),
+            Some(("postgresql://u@env.example/db", DbUrlSource::Env))
+        );
+        assert_eq!(
+            url_of(
+                &resolve(
+                    &cli(None, Some("postgresql://u@cli.example/db")),
+                    &env,
+                    &file
+                )
+                .unwrap()
+            ),
+            Some(("postgresql://u@cli.example/db", DbUrlSource::Flag))
+        );
+        assert_eq!(DbUrlSource::Env.describe(), "invalid CRT_QUERY_DB_URL");
+    }
+
+    /// `export CRT_QUERY_HOST=` is how a shell user unsets a variable for one
+    /// command; treating it as a host named "" would send the connection
+    /// nowhere rather than to the next layer down.
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        let env = env_of(&[(ENV_HOST, ""), (ENV_PORT, ""), (ENV_DB_URL, "")]).unwrap();
+        assert!(env.host.is_none() && env.port.is_none() && env.db_url.is_none());
+    }
+
+    #[test]
+    fn a_bad_port_variable_is_an_error_that_names_it() {
+        for bad in ["abc", "70000", "-1"] {
+            let err = format!("{:#}", env_of(&[(ENV_PORT, bad)]).unwrap_err());
+            assert!(err.contains(ENV_PORT), "{err}");
+        }
+        assert_eq!(env_of(&[(ENV_PORT, " 6432 ")]).unwrap().port, Some(6432));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_non_utf8_variable_is_an_error_that_names_it() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(vec![0x66, 0xff]);
+        let err = EnvConfig::from_lookup(|name| (name == ENV_HOST).then(|| bad.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(ENV_HOST), "{err}");
+    }
+
     #[test]
     fn a_cli_db_url_beats_a_config_file_db_url() {
-        let conn = resolve(
+        let conn = without_env(
             &cli(None, Some("postgresql://u@cli.example/db")),
             &file(None, Some("postgresql://u@f.example/db")),
         );
@@ -343,17 +636,17 @@ mod tests {
             db_url: None,
         };
 
-        let both = resolve(&from_cli, &from_file());
+        let both = resolve(&from_cli, &EnvConfig::default(), &from_file()).unwrap();
         assert_eq!(both.port, 1, "an explicit --port must beat the config file");
         assert_eq!(both.dbname, "cli-db");
         assert_eq!(both.user, "cli-user");
 
-        let file_only = resolve(&cli(None, None), &from_file());
+        let file_only = without_env(&cli(None, None), &from_file());
         assert_eq!(file_only.port, 2);
         assert_eq!(file_only.dbname, "file-db");
         assert_eq!(file_only.user, "file-user");
 
-        let neither = resolve(&cli(None, None), &FileConfig::default());
+        let neither = without_env(&cli(None, None), &FileConfig::default());
         assert_eq!(neither.port, DEFAULT_PORT);
         assert_eq!(neither.dbname, DEFAULT_DBNAME);
         assert_eq!(neither.user, DEFAULT_USER);

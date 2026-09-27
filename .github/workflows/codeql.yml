@@ -16,9 +16,13 @@ on:
 permissions:
   contents: read
 
+# Cancel only superseded pull-request runs, and give every other run a group
+# of its own, for the reasons given beside the same block in ci.yml: a merge to
+# main is a commit that stays in the history, and a second merge landing
+# minutes later must not leave it unanalysed.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:

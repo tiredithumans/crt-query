@@ -8,7 +8,7 @@ changes is that they keep it small and focused.
 ```sh
 git clone https://github.com/tiredithumans/crt-query
 cd crt-query
-just verify        # fmt-check · lint · test · msrv · lint-scripts · build
+just verify        # fmt-check · lint · test · msrv · lint-scripts · doc
 ```
 
 `rust-toolchain.toml` pins the toolchain, so rustup provisions the right Rust

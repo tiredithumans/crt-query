@@ -222,7 +222,7 @@ fn a_failed_run_leaves_no_empty_report_behind() {
     assert!(
         !path.exists(),
         "left a {}-byte placeholder at {}",
-        std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+        std::fs::metadata(&path).map_or(0, |m| m.len()),
         path.display()
     );
 }
@@ -265,6 +265,10 @@ fn exit_code_documentation_is_present_for_the_case_this_suite_cannot_reach() {
         "README no longer documents exit 3; the only offline record of the \
          not-found contract is this line plus the constant in src/main.rs"
     );
+    assert!(
+        readme.contains("`4` `expiring --fail-on-expiring`"),
+        "README no longer documents exit 4 for expiring --fail-on-expiring"
+    );
 }
 
 /// `precheck_csv` creates the destination to prove it is writable, then removes
@@ -301,7 +305,7 @@ fn a_dangling_report_symlink_survives_the_writability_check() {
     assert!(
         !target.exists(),
         "left a {}-byte placeholder at {}, which is the empty report precheck_csv exists to prevent",
-        std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
+        std::fs::metadata(&target).map_or(0, |m| m.len()),
         target.display()
     );
 }
@@ -372,27 +376,41 @@ fn the_cache_lives_where_the_environment_says_and_clears_from_there() {
 }
 
 /// A relative `$XDG_CACHE_HOME` must not be resolved against the working
-/// directory — see `cache::cache_root`. The run still has to succeed, because a
-/// cache that cannot find a home is a missing optimisation, not a failure.
+/// directory — see `cache::cache_root`. A query still works without a cache,
+/// but `cache path` has no answer to give, and says so as an error rather than
+/// exiting 0 with an empty stdout that `$(crt-query cache path)` would read as
+/// a path. `cache clear` has nothing to do, which is a success.
 #[cfg(not(windows))]
 #[test]
 fn a_relative_cache_home_yields_no_cache_rather_than_a_local_one() {
-    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
-        .args(["cache", "path"])
-        .env("XDG_CACHE_HOME", "relative/path")
-        .env_remove("HOME")
-        .output()
-        .expect("failed to run the crt-query binary");
-    assert_eq!(code(&out), 0, "cache path exited {}", code(&out));
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_crt-query"))
+            .args(args)
+            .env("XDG_CACHE_HOME", "relative/path")
+            .env_remove("HOME")
+            .output()
+            .expect("failed to run the crt-query binary")
+    };
+    for args in [&["cache", "path"][..], &["--quiet", "cache", "path"][..]] {
+        let out = run(args);
+        assert_eq!(code(&out), 1, "{args:?} exited {}", code(&out));
+        assert!(
+            stdout(&out).trim().is_empty(),
+            "a relative cache home must name no directory, got: {}",
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains("no cache directory"),
+            "{args:?}: expected the reason on stderr even under --quiet, got: {}",
+            stderr(&out)
+        );
+    }
+    let clear = run(&["cache", "clear"]);
+    assert_eq!(code(&clear), 0, "{}", stderr(&clear));
     assert!(
-        stdout(&out).trim().is_empty(),
-        "a relative cache home must name no directory, got: {}",
-        stdout(&out)
-    );
-    assert!(
-        stderr(&out).contains("No cache directory"),
-        "expected the reason on stderr, got: {}",
-        stderr(&out)
+        stderr(&clear).contains("Nothing to clear"),
+        "{}",
+        stderr(&clear)
     );
 }
 
@@ -409,4 +427,165 @@ fn no_cache_and_refresh_cannot_be_combined() {
         code(&out),
         stderr(&out)
     );
+}
+
+/// The binary with a clean environment for the `CRT_QUERY_*` tests: no config
+/// file can leak in from the developer's own home, and the cache is off so a
+/// previous run's entry cannot answer instead of the connection being tried.
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let home = std::env::temp_dir().join(format!("crt-query-env-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("create scratch config home");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_crt-query"));
+    cmd.arg("--no-cache")
+        .args(args)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home);
+    for var in [
+        "CRT_QUERY_HOST",
+        "CRT_QUERY_PORT",
+        "CRT_QUERY_DBNAME",
+        "CRT_QUERY_USER",
+        "CRT_QUERY_DB_URL",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.envs(env.iter().copied())
+        .output()
+        .expect("failed to run the crt-query binary")
+}
+
+/// The variables reach the connection, and a flag still beats them: the host
+/// and port in the error are the proof, since nothing listens on port 1.
+#[test]
+fn connection_settings_can_come_from_the_environment() {
+    let from_env = run_with_env(
+        &["search", "example.com"],
+        &[("CRT_QUERY_HOST", "127.0.0.1"), ("CRT_QUERY_PORT", "1")],
+    );
+    assert_eq!(code(&from_env), 1);
+    assert!(
+        stderr(&from_env).contains("could not connect to 127.0.0.1:1"),
+        "{}",
+        stderr(&from_env)
+    );
+
+    let flag_wins = run_with_env(
+        &["search", "example.com", "--port", "1"],
+        &[("CRT_QUERY_HOST", "127.0.0.1"), ("CRT_QUERY_PORT", "2")],
+    );
+    assert!(
+        stderr(&flag_wins).contains("could not connect to 127.0.0.1:1"),
+        "an explicit --port must beat CRT_QUERY_PORT:\n{}",
+        stderr(&flag_wins)
+    );
+}
+
+/// A bad `CRT_QUERY_DB_URL` is reported under its own name, before any
+/// connection is attempted, and never as a `--db-url` the caller did not type.
+#[test]
+fn a_bad_environment_db_url_names_the_variable_not_the_flag() {
+    let out = run_with_env(
+        &["search", "example.com"],
+        &[("CRT_QUERY_DB_URL", "not a url")],
+    );
+    let err = stderr(&out);
+    assert_eq!(code(&out), 1, "{err}");
+    assert!(err.contains("invalid CRT_QUERY_DB_URL"), "{err}");
+    assert!(
+        !err.contains("--db-url"),
+        "blamed a flag nobody typed:\n{err}"
+    );
+    assert!(!err.contains("could not connect"), "{err}");
+}
+
+/// The variables are read only when a connection is resolved, so a stray or
+/// empty one cannot break a subcommand that never connects.
+#[test]
+fn a_bad_or_empty_variable_does_not_break_subcommands_that_never_connect() {
+    for value in ["", "not-a-port"] {
+        let out = run_with_env(&["completions", "bash"], &[("CRT_QUERY_PORT", value)]);
+        assert_eq!(code(&out), 0, "CRT_QUERY_PORT={value:?}: {}", stderr(&out));
+    }
+}
+
+/// `--help` names the variables and never prints their values: a
+/// `CRT_QUERY_DB_URL` can carry a password, and `--help` output is what people
+/// paste into bug reports.
+#[test]
+fn help_names_the_variables_without_echoing_their_values() {
+    let out = run_with_env(
+        &["search", "--help"],
+        &[(
+            "CRT_QUERY_DB_URL",
+            "postgresql://u:hunter2@db.internal/certwatch",
+        )],
+    );
+    let help = stdout(&out);
+    assert!(help.contains("CRT_QUERY_DB_URL"), "{help}");
+    assert!(help.contains("CRT_QUERY_HOST"), "{help}");
+    assert!(
+        !help.contains("hunter2"),
+        "a password reached --help:\n{help}"
+    );
+}
+
+/// `--quiet` removes informational lines, never errors: a failed run under
+/// cron still has to say why.
+#[test]
+fn quiet_still_reports_errors() {
+    let out = run_with_env(
+        &[
+            "--quiet",
+            "search",
+            "example.com",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1",
+        ],
+        &[],
+    );
+    assert_eq!(code(&out), 1);
+    assert!(
+        stderr(&out).contains("could not connect to 127.0.0.1:1"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A `db_url` from a lower layer used to beat a setting from a higher one, so an
+/// exported CRT_QUERY_DB_URL silently overrode an explicit `--port`. It is now
+/// a conflict, caught before any connection is attempted.
+#[test]
+fn a_flag_under_an_environment_db_url_is_a_conflict() {
+    let out = run_with_env(
+        &["search", "example.com", "--port", "2"],
+        &[(
+            "CRT_QUERY_DB_URL",
+            "postgresql://guest@127.0.0.1:1/certwatch",
+        )],
+    );
+    let err = stderr(&out);
+    assert_eq!(code(&out), 1, "{err}");
+    assert!(
+        err.contains("--port conflicts with CRT_QUERY_DB_URL"),
+        "{err}"
+    );
+    assert!(!err.contains("could not connect"), "{err}");
+}
+
+/// `cache clear`'s count is informational, so `--quiet` drops it.
+#[cfg(not(windows))]
+#[test]
+fn quiet_silences_cache_clear() {
+    let home = std::env::temp_dir().join(format!("crt-query-quiet-clear-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("create scratch XDG_CACHE_HOME");
+    let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+        .args(["--quiet", "cache", "clear"])
+        .env("XDG_CACHE_HOME", &home)
+        .output()
+        .expect("failed to run the crt-query binary");
+    assert_eq!(code(&out), 0);
+    assert_eq!(stderr(&out), "", "--quiet printed an informational line");
+    let _ = std::fs::remove_dir_all(&home);
 }

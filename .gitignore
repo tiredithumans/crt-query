@@ -6,6 +6,13 @@
 # Local Claude Code overrides (the skills in .claude/skills/ ARE committed)
 .claude/settings.local.json
 
+# The Homebrew formula is generated, and the tap it is published to is the only
+# copy anyone installs from. release.yml's `tap` job regenerates it in CI and
+# pushes it to tiredithumans/homebrew-tap, never back here, so a committed copy
+# only ever went stale: it still named v0.5.1 after v0.5.2 was published.
+# `just homebrew-formula` writes it here for inspection.
+/packaging/homebrew/crt-query.rb
+
 # Editor and OS noise
 .DS_Store
 *.swp

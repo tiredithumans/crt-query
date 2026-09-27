@@ -25,12 +25,18 @@ Things that are in scope:
 - Anything that could execute code or write outside a path the user specified.
   Note that `check-update` shells out to the system `curl` — the only external
   process this tool starts. On Unix that resolves through `PATH`. On Windows it
-  does not resolve through `PATH` alone: Rust's standard library implements its
-  own search, which looks in the directory containing `crt-query.exe` *before*
-  `System32` and before `PATH`. So a `curl.exe` sitting next to an unpacked
-  `crt-query.exe` wins, whether or not that directory is on `PATH`.
-- Credential disclosure through `--db-url` when pointing the tool at a private
-  database — for example a password reaching stderr, a log, or an error message.
+  runs `%SystemRoot%\System32\curl.exe` by its full path, so no search is
+  involved, whenever `SystemRoot` is an absolute drive path (`C:\…`) and that
+  file exists — as it does on Windows 10 1803 and later and on Windows 11.
+  Otherwise it falls back to the bare name `curl`, which does not resolve
+  through `PATH` alone: Rust's standard library implements its own search,
+  which looks in the directory containing `crt-query.exe` *before* `System32`
+  and before `PATH`. On a system that takes the fallback, a `curl.exe` sitting
+  next to an unpacked `crt-query.exe` still wins, whether or not that directory
+  is on `PATH`.
+- Credential disclosure through `--db-url`, `CRT_QUERY_DB_URL` or the config
+  file's `db_url` when pointing the tool at a private database — for example a
+  password reaching stderr, a log, an error message, or `--help` output.
 - Injection into the SQL sent to the server. Every user value is bound as a
   typed parameter; a way to break out of that is a real finding.
 

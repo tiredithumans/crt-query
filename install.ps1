@@ -53,10 +53,12 @@ try {
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
 
-# Windows on ARM runs x64 binaries under emulation, so an ARM64 machine has a
-# working fallback rather than no install at all. No 'x86' case: crt-query has
-# never shipped a 32-bit build, so that branch could only ever have resolved to
-# an archive that does not exist.
+# ARM64 takes the native aarch64 build, which the release now ships. The x64
+# build stays in the list behind it for a release that predates the native one
+# (reachable with -Version): Windows on ARM runs x64 binaries under emulation,
+# so such a pin still installs something that works rather than nothing. No
+# 'x86' case: crt-query has never shipped a 32-bit build, so that branch could
+# only ever have resolved to an archive that does not exist.
 switch ($arch) {
     'AMD64' { $targets = @('x86_64-pc-windows-msvc') }
     'ARM64' { $targets = @('aarch64-pc-windows-msvc', 'x86_64-pc-windows-msvc') }
@@ -98,15 +100,16 @@ try {
         }
     }
 
-    # Take the first target this release actually ships. On ARM64 that means a
-    # native build when one exists and the emulated x64 build when it does not.
+    # Take the first target this release actually ships. On ARM64 that is the
+    # native build, and the emulated x64 build only for an older release that
+    # has no native one.
     $target = $null
     $entry = @()
     foreach ($candidate in $targets) {
         $match = @($entries | Where-Object { $_.Name.EndsWith("-$candidate.zip") })
         if ($match.Count -gt 0) {
             if ($candidate -ne $targets[0]) {
-                Write-Host "No native $($targets[0]) build in this release; installing the $candidate build, which Windows runs under emulation."
+                Write-Host "The $label release has no native $($targets[0]) build; installing the $candidate build, which Windows runs under emulation."
             }
             $target = $candidate
             $entry = $match

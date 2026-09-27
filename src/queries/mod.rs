@@ -168,13 +168,13 @@ pub async fn fetch_by_term(
     // The bind parameters past `$1` are identical for every term, so they are
     // rendered once and shared by every key built below.
     let params_key: Vec<String> = extra.iter().map(|(v, _)| format!("{v:?}")).collect();
-    let target = source.target()?;
+    let identity = source.cache_identity()?;
 
     let mut raw = Vec::new();
     let mut saturated = Vec::new();
     for term in terms {
         let key = Key {
-            target: target.clone(),
+            target: identity.clone(),
             sql: sql.to_string(),
             term: term.clone(),
             params: params_key.clone(),
@@ -182,7 +182,7 @@ pub async fn fetch_by_term(
         if let Some(hit) = cache.get_rows(&key) {
             // The limit is part of the key, so a hit was written under this
             // same cap and its length means what a fresh fetch's would.
-            if hit.len() as i64 >= limit {
+            if fills(hit.len(), limit) {
                 saturated.push(term.clone());
             }
             raw.extend(hit);
@@ -203,7 +203,7 @@ pub async fn fetch_by_term(
             fetched.push(RawRow::from_pg(row)?);
         }
         cache.put(&key, &fetched);
-        if fetched.len() as i64 >= limit {
+        if fills(fetched.len(), limit) {
             saturated.push(term.clone());
         }
         raw.extend(fetched);
@@ -212,6 +212,16 @@ pub async fn fetch_by_term(
         rows: raw,
         saturated,
     })
+}
+
+/// Whether `len` rows filled a window of `limit`.
+///
+/// Compared in `usize` rather than by casting the length to `i64`, which could
+/// wrap on paper. `limit` is range-checked by clap to 1..=100000, so the
+/// conversion only fails for a limit that could never have been bound, and a
+/// window nothing could fill is not full.
+fn fills(len: usize, limit: i64) -> bool {
+    usize::try_from(limit).is_ok_and(|limit| len >= limit)
 }
 
 /// Collapse raw identity rows into one row per certificate.
@@ -281,13 +291,17 @@ mod tests {
     /// fails fast and locally, which is what makes "did it dial?" testable
     /// offline — the same address `tests/cli.rs` uses for the connect path.
     fn unreachable_source() -> Source {
-        Source::new(Conn {
+        Source::new(unreachable_conn())
+    }
+
+    fn unreachable_conn() -> Conn {
+        Conn {
             host: "127.0.0.1".into(),
             port: 1,
             dbname: DEFAULT_DBNAME.into(),
             user: "guest".into(),
             db_url: None,
-        })
+        }
     }
 
     fn cached_row(term: &str) -> RawRow {
@@ -321,11 +335,11 @@ mod tests {
         let sql = "SELECT 1";
         let terms = vec!["a.example".to_string(), "b.example".to_string()];
         let mut source = unreachable_source();
-        let target = source.target().unwrap();
+        let identity = source.cache_identity().unwrap();
         for term in &terms {
             cache.put(
                 &Key {
-                    target: target.clone(),
+                    target: identity.clone(),
                     sql: sql.to_string(),
                     term: term.clone(),
                     params: vec!["365".to_string()],
@@ -385,6 +399,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The key used to carry `host:port` and no database, so a second database
+    /// behind the same server was answered from the first one's entries. Seed
+    /// an entry against one database, ask the same host for another, and the
+    /// run has to reach for a connection rather than serve what it found.
+    #[tokio::test]
+    async fn another_database_on_the_same_host_does_not_read_this_ones_entries() {
+        let dir =
+            std::env::temp_dir().join(format!("crt-query-cache-dbname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::at(dir.clone(), Mode::Enabled, crate::cache::DEFAULT_TTL);
+
+        let sql = "SELECT 1";
+        let term = "example.com".to_string();
+        cache.put(
+            &Key {
+                target: unreachable_source().cache_identity().unwrap(),
+                sql: sql.to_string(),
+                term: term.clone(),
+                params: vec!["365".to_string()],
+            },
+            &vec![cached_row(&term)],
+        );
+
+        let mut elsewhere = Source::new(Conn {
+            dbname: "some_other_database".into(),
+            ..unreachable_conn()
+        });
+        let limit: i32 = 365;
+        let err = fetch_by_term(
+            &mut elsewhere,
+            &cache,
+            &[term],
+            sql,
+            &[(&limit, Type::INT4)],
+            100,
+        )
+        .await
+        .expect_err("another database's entry must not answer for this one");
+        assert!(
+            format!("{err:#}").contains("could not connect"),
+            "expected the run to reach for a connection, got: {err:#}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The note exists because a full window and a genuinely small result look
     /// identical in the output, so both halves of the condition carry weight.
     /// All three cases are pinned: dropping either half of the `&&` leaves one
@@ -425,7 +485,7 @@ mod tests {
         let mut source = unreachable_source();
         cache.put(
             &Key {
-                target: source.target().unwrap(),
+                target: source.cache_identity().unwrap(),
                 sql: sql.to_string(),
                 term: "example.com".to_string(),
                 params: vec!["365".to_string()],
@@ -497,6 +557,17 @@ mod tests {
     }
 
     #[test]
+    fn the_cert_by_fingerprint_statement_matches_its_snapshot() {
+        assert_eq!(
+            crate::queries::cert::sha256_sql(),
+            include_str!("golden/cert_sha256.sql"),
+            "CERT_BY_SHA256_SQL changed; re-bless src/queries/golden/cert_sha256.sql \
+             and re-check that its predicate still matches crt.sh's \
+             digest(certificate, 'sha256') index"
+        );
+    }
+
+    #[test]
     fn the_identity_filter_disables_the_backslash_escape() {
         // Without `ESCAPE ''` every backslash is swallowed and the next
         // character taken literally, so `a\b` searches for `ab` and a trailing
@@ -510,6 +581,7 @@ mod tests {
     }
     use crate::testutil::utc;
 
+    #[derive(Clone, Copy)]
     struct Raw {
         id: i64,
         serial: Option<&'static str>,

@@ -17,7 +17,8 @@ ignore = []
 
 [licenses]
 version = 2
-# Surveyed with `cargo metadata` over the full 137-crate graph. Every entry is
+# Surveyed with `cargo metadata` over the full 141-crate graph (every target
+# platform and build dependency, crt-query itself not counted). Every entry is
 # permissive and compatible with this project's own `MIT OR Apache-2.0`. Add to
 # this list deliberately when a new dependency introduces a new license — the
 # point of the gate is that the addition is a decision, not a surprise.

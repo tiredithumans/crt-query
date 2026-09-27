@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::queries::cert::CertRef;
+
 /// Look-back that disables the `search` validity floor entirely.
 pub const ALL_HISTORY: i32 = 0;
 
@@ -26,27 +28,32 @@ pub struct Cli {
 }
 
 /// Connection flags. Every field is optional so that a value left unset on the
-/// command line can fall back to the config file, then to the built-in
-/// defaults — see `config::resolve`.
+/// command line can fall back to a `CRT_QUERY_*` environment variable, then to
+/// the config file, then to the built-in defaults — see `config::resolve`.
+///
+/// The variables are read by `config::EnvConfig` rather than through clap's
+/// `env` attribute (see there for why), so the help text names each one by
+/// hand. It names the variable, never its value, which may carry a password.
 #[derive(Args)]
 pub struct ConnOpts {
-    /// Database host (default: crt.sh)
+    /// Database host (default: crt.sh; env: CRT_QUERY_HOST)
     #[arg(long, global = true)]
     pub host: Option<String>,
 
-    /// Database port (default: 5432)
+    /// Database port (default: 5432; env: CRT_QUERY_PORT)
     #[arg(long, global = true)]
     pub port: Option<u16>,
 
-    /// Database name (default: certwatch)
+    /// Database name (default: certwatch; env: CRT_QUERY_DBNAME)
     #[arg(long, global = true)]
     pub dbname: Option<String>,
 
-    /// Database user (default: guest)
+    /// Database user (default: guest; env: CRT_QUERY_USER)
     #[arg(long, global = true)]
     pub user: Option<String>,
 
     /// Full postgres:// URL; overrides --host/--port/--dbname/--user
+    /// (env: CRT_QUERY_DB_URL)
     #[arg(long, global = true, value_name = "URL")]
     pub db_url: Option<String>,
 }
@@ -56,6 +63,12 @@ pub struct OutputOpts {
     /// Emit JSON to stdout instead of a table
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Print nothing on stderr but errors: no progress line, no notes, no
+    /// "wrote N CSV row(s)". For scheduled runs, where every line of stderr
+    /// becomes mail
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
 
     /// Additionally write results as CSV to this file
     #[arg(long, global = true, value_name = "PATH")]
@@ -137,10 +150,13 @@ pub enum Commands {
         no_dedupe: bool,
     },
 
-    /// Show full details for one certificate by crt.sh ID
+    /// Show full details for one certificate, by crt.sh ID or SHA-256
+    /// fingerprint
     Cert {
-        /// crt.sh certificate ID
-        id: i64,
+        /// crt.sh certificate ID, or the certificate's SHA-256 fingerprint
+        /// (64 hex digits; colons, as openssl prints them, are allowed)
+        #[arg(value_name = "ID|SHA256", value_parser = CertRef::parse)]
+        lookup: CertRef,
     },
 
     /// Report expired or soon-expiring certificates for one or more domains
@@ -186,6 +202,12 @@ pub enum Commands {
         /// pairs not collapsed
         #[arg(long)]
         no_dedupe: bool,
+
+        /// Exit 4 instead of 0 when the report lists any certificate, so cron
+        /// or a monitoring check can act on the status alone. The report is
+        /// printed in full either way
+        #[arg(long)]
+        fail_on_expiring: bool,
     },
 
     /// Inspect or clear the local result cache
