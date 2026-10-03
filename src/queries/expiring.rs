@@ -226,12 +226,11 @@ mod tests {
         }
     }
 
-    /// `expiring` over several domains sends one statement per domain, each
-    /// stamping its own `now()`. Labelling against anything but the *earliest*
-    /// of those clocks can mark a row EXPIRED that its own query accepted as
-    /// live — which is exactly what `--skip-expired` promises cannot happen.
-    /// This is the one non-obvious rule in this module and it was previously
-    /// unreachable from a test.
+    /// `expiring` sends one statement per domain, each stamping its own
+    /// `now()`; labelling against anything but the *earliest* can mark a row
+    /// EXPIRED that its own query accepted as live — what `--skip-expired`
+    /// promises cannot happen. The module's one non-obvious rule, and it was
+    /// previously unreachable from a test.
     #[test]
     fn labels_come_from_the_earliest_server_clock_across_statements() {
         let early = now();

@@ -1,29 +1,19 @@
 //! The `check-update` subcommand: ask GitHub for the newest release and
 //! compare it against the running build.
 //!
-//! The answer is read from a redirect, not from the REST API. A request for
-//! `github.com/<repo>/releases/latest` is answered with a 302 whose `Location`
-//! is `/releases/tag/<tag>`, so the tag is in a header and the body can be
-//! thrown away unread. This used to ask
-//! `api.github.com/repos/<repo>/releases/latest` instead, and that endpoint's
-//! per-IP limit on unauthenticated requests was the one failure its own error
-//! message had to explain — to someone behind a shared address, a limit other
-//! people's traffic had already spent. The install scripts already avoided
-//! the API for exactly that reason, downloading through
-//! `/releases/latest/download/<asset>`; this reads the redirect one level up.
+//! The answer is read from a redirect, not the REST API:
+//! `releases/latest` answers with a 302 whose `Location` names the tag. This
+//! used to call `api.github.com` instead, whose unauthenticated per-IP limit
+//! was the one failure its error message had to explain — and the install
+//! scripts already avoided the API for that reason.
 //!
-//! Two deliberate omissions.
-//!
-//! It is a subcommand rather than a check that runs alongside every query.
-//! Every other subcommand talks to exactly one host, crt.sh, and a silent
-//! call to a second one would add a network round trip — and a beacon — to a
-//! tool people run from cron.
-//!
-//! There is no self-update counterpart. Fetching a binary and executing it is
-//! the one operation where a compromised release channel gets code execution
-//! for free, and the alternatives cost a user a single line: re-run the
-//! install script, which verifies the release's SHA256SUMS before it replaces
-//! anything, or rebuild from source.
+//! Two deliberate omissions. It is a subcommand, not a check alongside every
+//! query: every other subcommand talks to exactly one host, and a silent call
+//! to a second one would add a round trip — and a beacon — to a tool people
+//! run from cron. And there is no self-update: fetching and executing a binary
+//! is where a compromised release channel gets code execution for free, while
+//! the alternatives cost one line (re-run the verifying install script, or
+//! rebuild from source).
 
 #[cfg(any(windows, test))]
 use std::path::Path;
@@ -35,12 +25,10 @@ use crate::cli::OutputOpts;
 use crate::notice::notice;
 use crate::output::{self, UpdateStatus};
 
-/// This repository's releases page, as a macro rather than a `const` so the
-/// URLs below can be built from it with `concat!`, which takes literals only.
-/// The repository is named once, so a rename or a transfer cannot update the
-/// URL that is fetched and leave behind the prefix its answer is checked
-/// against — a mismatch that would fail every check with a message blaming
-/// GitHub.
+/// This repository's releases page, a macro (not a `const`) so the URLs below
+/// can be built from it with `concat!`. The repository is named once, so a
+/// rename cannot update the fetched URL and leave its check-prefix behind —
+/// which would fail every check with a message blaming GitHub.
 macro_rules! releases_page {
     () => {
         "https://github.com/tiredithumans/crt-query/releases"
@@ -77,29 +65,19 @@ const NULL_DEVICE: &str = "/dev/null";
 /// platform's own search to resolve.
 const CURL: &str = "curl";
 
-/// The prebuilt install routes available on the platform this binary was built
-/// for, ordered as the README's install table orders them.
+/// The prebuilt install routes for the platform this binary was built for, in
+/// the README's order.
 ///
-/// Only this platform's. A Windows build used to print the `install.sh` line
-/// and nothing else: a shell pipeline the user has no `sh` for, naming a script
-/// that refuses to run on Windows anyway and could not install the binary they
-/// are holding. Listing every platform instead would put lines that do not
-/// apply in front of the one that does, on a message whose whole job is to be
-/// actionable.
+/// Only this platform's: a Windows build used to print the `install.sh` line
+/// and nothing else — a pipeline that host has no `sh` for, naming a script
+/// that would refuse to run there.
 ///
-/// Homebrew is listed first where it runs — macOS and Linux both — because a
-/// Homebrew install is upgraded with `brew upgrade`, and re-running
-/// `install.sh` would instead drop a second, unmanaged copy in
-/// `/usr/local/bin` for Homebrew's own to shadow or be shadowed by. It does not
-/// appear on Windows, where Homebrew does not run.
+/// Homebrew is listed first where it runs (macOS, Linux): a Homebrew install
+/// upgrades with `brew upgrade`; re-running `install.sh` would drop a second,
+/// unmanaged copy for Homebrew's to shadow. Windows on ARM needs no entry: the
+/// same `install.ps1` installs the native ARM64 build.
 ///
-/// Windows on ARM needs no separate entry: the same `install.ps1` line installs
-/// the native ARM64 build, and falls back to the x86-64 one, which Windows runs
-/// under emulation, only for a release that predates the native build.
-///
-/// Labels are padded so every command starts in the same column as the
-/// `From source:` line below, which is the only thing making a three-line block
-/// scannable.
+/// Labels are padded so every command lines up with `From source:` below.
 #[cfg(windows)]
 const INSTALL_ROUTES: &[&str] = &[
     "Windows:     irm https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.ps1 | iex",
@@ -111,22 +89,18 @@ const INSTALL_ROUTES: &[&str] = &[
     "Linux/macOS: curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh",
 ];
 
-/// What to do about a newer release. Printed to stderr so the one-line
-/// report on stdout stays the only thing a script has to parse.
+/// What to do about a newer release, printed to stderr so the one-line report
+/// on stdout stays the only thing a script parses.
 ///
-/// A function rather than a `const` because [`INSTALL_ROUTES`] varies by target
-/// and `concat!` takes literals only. Writing the surrounding prose out twice
-/// under `cfg` would be the cheaper trick and the worse one — two copies of a
-/// sentence that has to stay in step is exactly the shape every stale claim in
-/// this repo has taken.
+/// A function rather than a `const` because [`INSTALL_ROUTES`] varies by
+/// target and `concat!` takes literals only; writing the prose twice under
+/// `cfg` would create two copies of a sentence that must stay in step.
 ///
 /// "re-run whatever you installed with", not "re-run the install script": with
 /// Homebrew on the list the older wording pointed a `brew` user at the one
-/// route that would go wrong for them. The verification claim is scoped to the
-/// prebuilt routes — Homebrew checks the digest the formula carries, which
-/// `just homebrew-formula` copies out of the release's `SHA256SUMS`, and both
-/// scripts check that file directly. Building from source does none of this,
-/// which is why it sits outside the sentence.
+/// route that would go wrong for them. The checksum claim covers the prebuilt
+/// routes only — Homebrew checks the formula's digest, the scripts check
+/// SHA256SUMS directly — which is why building from source sits outside it.
 fn upgrade_hint() -> String {
     let routes = INSTALL_ROUTES.join("\n  ");
     format!(
@@ -152,21 +126,16 @@ impl LatestRelease {
     /// Read the release out of where [`LATEST_RELEASE_PAGE`] redirected, or
     /// say why that is not a release.
     ///
-    /// The redirect has to be `/releases/tag/<tag>` on github.com for this
-    /// repository, matched as one exact prefix rather than parsed as a URL,
-    /// because anything else is not an answer to the question asked. A
-    /// repository with no published release redirects somewhere else, such as
-    /// its releases list, and a request that was never redirected at all has
-    /// no `Location` to read. Taking whatever follows the last `/` in those
-    /// would report `releases` or `latest` as the newest version — and since
-    /// [`is_newer`] reports any version it cannot parse as an update, that
-    /// would be a bogus "update available" rather than an error.
+    /// The redirect must be `/releases/tag/<tag>` on github.com for this
+    /// repository, matched as one exact prefix rather than parsed as a URL:
+    /// anything else is not an answer. Taking the last path segment of a
+    /// non-release redirect would report `releases` or `latest` as a version,
+    /// and [`is_newer`] treats an unparseable version as an update — a bogus
+    /// "update available" instead of an error.
     ///
-    /// The tag is held to the characters a version tag uses. That rules out a
-    /// second path segment, a query or a fragment, all of which would mean the
-    /// prefix matched something other than a tag; and since the tag and the URL
-    /// are printed as they are, it also keeps anything a terminal would act on
-    /// out of the one line a human reads.
+    /// Restricting the tag to version characters rules out a second path
+    /// segment, query, or fragment (also non-answers), and keeps terminal
+    /// control characters out of the line a human reads.
     fn from_redirect(redirect: &str) -> Result<Self> {
         let redirect = redirect.trim();
         let Some(tag) = redirect.strip_prefix(RELEASE_TAG_PREFIX) else {
@@ -246,31 +215,22 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Which curl to run on Windows, given the value of `%SystemRoot%` and a way
-/// to ask whether a file exists.
+/// Which curl to run on Windows, given `%SystemRoot%` and a file-exists check.
 ///
-/// A bare `curl` is not resolved through `PATH` on Windows. Rust's standard
-/// library does its own search, and looks in the directory holding
-/// `crt-query.exe` before `System32` and before `PATH`, so a `curl.exe`
-/// unpacked next to `crt-query.exe` — from the same download folder, say — is
-/// the one that runs. `System32` has had a `curl.exe` of its own since
-/// Windows 10 1803, and naming it by its full path skips the search entirely.
+/// A bare `curl` is not resolved through `PATH`: Rust's standard library
+/// searches the directory holding `crt-query.exe` before `System32` and
+/// `PATH`, so a planted `curl.exe` beside the binary wins. `System32` has had
+/// its own `curl.exe` since Windows 10 1803, and naming it by full path skips
+/// the search.
 ///
-/// `SystemRoot` has to be an absolute drive path, `C:\` or `C:/` onwards,
-/// before it is trusted. A relative value would be resolved against the
-/// current directory, which is the planting problem again by another route;
-/// a drive-relative (`C:Windows`) or root-relative (`\Windows`) one depends on
-/// the current directory or drive too; and a UNC share would have this reach
-/// across the network just to decide which program to start. The rule is
-/// spelt out by hand rather than left to [`Path::is_absolute`], which answers
-/// for the host it runs on, while the tests check the Windows answer on every
-/// host.
+/// `SystemRoot` must be an absolute drive path before it is trusted: a
+/// relative, drive-relative, or UNC value resolves against the current
+/// directory or reaches across the network — the planting problem again. The
+/// rule is written by hand rather than via [`Path::is_absolute`] so the
+/// Windows answer can be tested on every host.
 ///
-/// When there is no such file, or no usable `SystemRoot` — Windows before
-/// 1803, or an environment that has lost the variable — this falls back to
-/// the bare name and the search described above. That keeps the subcommand
-/// working where it worked before, and leaves those systems exactly as exposed
-/// as every system used to be, which `SECURITY.md` says in so many words.
+/// Otherwise fall back to the bare name, keeping pre-1803 systems working —
+/// and as exposed as they were before, which `SECURITY.md` documents.
 #[cfg(any(windows, test))]
 fn windows_curl(system_root: Option<&str>, exists: impl Fn(&Path) -> bool) -> String {
     let Some(root) = system_root.filter(|root| is_windows_drive_absolute(root)) else {
@@ -316,20 +276,16 @@ fn curl_program() -> String {
 /// Ask GitHub which release is newest, through the system `curl`.
 ///
 /// Shelling out rather than linking an HTTP client: TLS plus an async client
-/// is a large addition to a dependency tree this project audits on every PR,
-/// and it would be pulled in for one opt-in subcommand that the tool's actual
-/// job never touches.
+/// is a large addition to an audited dependency tree, for one opt-in
+/// subcommand.
 ///
 /// The answer is the redirect itself, so curl is told not to follow it and to
-/// print where it pointed, sending the body to [`NULL_DEVICE`]. `--no-location`
-/// is spelt out even though not following is the default: curl reads
-/// `~/.curlrc` before its arguments, and a `location` line there — a common
-/// enough convenience — would otherwise follow the redirect to the release
-/// page, which answers `200` with no redirect of its own and so no tag to read.
-/// `--proto =https` makes HTTPS the only protocol curl will speak: the URL
-/// already says so, but the answer decides what a user is told to install, and
-/// the flag keeps that true even if the URL or a config file ever says
-/// otherwise.
+/// print where it pointed, body to [`NULL_DEVICE`]. `--no-location` is spelt
+/// out although not following is the default: curl reads `~/.curlrc` first,
+/// and a `location` line there would follow to the release page, which
+/// answers 200 with no redirect and so no tag. `--proto =https` pins the
+/// protocol: the answer decides what a user is told to install, and the flag
+/// keeps that HTTPS-only even if the URL or a config file says otherwise.
 fn fetch_latest_release() -> Result<LatestRelease> {
     let program = curl_program();
     let output = Command::new(&program)

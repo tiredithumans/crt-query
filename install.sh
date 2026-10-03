@@ -3,23 +3,14 @@
 #
 # Detects your target triple, resolves the newest release (so there is no
 # version to keep up to date here or in the README), verifies the archive
-# against that release's SHA256SUMS, and installs the binary.
+# against that release's SHA256SUMS, and installs the binary. Re-run it to
+# upgrade: the new binary is staged beside the installed one and only
+# replaces it once it has been shown to run.
 #
 #   curl -fsSL https://raw.githubusercontent.com/tiredithumans/crt-query/main/install.sh | sh
 #
-# Re-run it to upgrade: the new binary is staged beside the installed one and
-# only replaces it once it has been shown to run.
-#
-# Options. When piping, pass them after `sh -s --`:
-#
-#   curl -fsSL .../install.sh | sh -s -- --dir "$HOME/.local/bin"
-#
-#   --dir <path>       install directory (default: /usr/local/bin)
-#   --version <vX.Y.Z> install this release instead of the newest one
-#   --help             print this and exit
-#
-# Environment: CRT_QUERY_DIR and CRT_QUERY_VERSION are read as defaults for
-# the two options above.
+# Options (--dir, --version, --help) and their CRT_QUERY_* environment
+# defaults: run with --help. When piping, pass them after `sh -s --`.
 
 set -eu
 
@@ -143,25 +134,22 @@ libc_note=""
 os=$(uname -s)
 case "$os" in
     Linux)
-        # Compute the honest triple. Hardcoding gnu once made a musl host match
-        # the glibc archive, installing a binary whose PT_INTERP does not exist
-        # there, so execve returns ENOENT and the shell reports "not found" for
-        # a file that is plainly there in ls -l. The release now ships a static
-        # musl archive, which is what a musl host gets; a release old enough to
-        # have none meets the "no build for $target" refusal below, which lists
-        # what it does ship.
+        # Compute the honest triple. Hardcoding gnu once made a musl host
+        # install the glibc archive — a binary whose PT_INTERP does not exist
+        # there — and the shell reported "not found" for a file plainly in
+        # ls -l. A musl host now gets the static musl archive the release
+        # ships; a release too old to ship one meets the "no build for
+        # $target" refusal below, which lists what it does ship.
         if ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; then
             os_part="unknown-linux-musl"
             libc_note="musl libc detected, so installing the static musl build."
         else
             os_part="unknown-linux-gnu"
-            # The glibc build needs GLIBC_FLOOR or newer: below it, ld.so
-            # refuses the binary before main, as it did every v0.4.0 install on
-            # a distribution older than the build machine. The musl build is
-            # static and needs nothing from the host, so it is the one that
-            # starts there. getconf prints "glibc 2.35"; a host where it is
-            # missing or says anything else keeps the glibc build (see
-            # glibc_below_floor).
+            # Below GLIBC_FLOOR, ld.so refuses the binary before main — what
+            # broke every v0.4.0 install on a distro older than the build
+            # machine. The static musl build needs nothing from the host, so
+            # old glibc gets it instead. A host whose getconf is missing or
+            # unreadable keeps the glibc build (see glibc_below_floor).
             glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
             case "$glibc" in
                 "glibc "[0-9]*.[0-9]*) glibc=${glibc#glibc } ;;
@@ -227,11 +215,9 @@ fetch() {
 note "Resolving the ${version:-latest} $BIN release..."
 fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
 
-# SHA256SUMS names every archive in the release, so it doubles as the index
-# that maps this machine's target triple to an archive — and therefore to the
-# version, which is embedded in the archive name. A leading `*` (a binary-mode
-# entry) or `./` (how the release workflow's glob spells the name) is not part
-# of that name.
+# SHA256SUMS doubles as the index mapping this triple to an archive — and to
+# the version embedded in the archive name. A leading `*` (binary mode) or
+# `./` (how the release workflow's glob spells it) is not part of the name.
 archive=$(awk -v suffix="-$target.tar.gz" '
     { name = $2; sub(/^\*?(\.\/)?/, "", name) }
     index(name, suffix) && substr(name, length(name) - length(suffix) + 1) == suffix { print name }
@@ -272,11 +258,11 @@ awk -v name="$archive" '
     entry == name { print }
 ' "$tmp/SHA256SUMS" > "$tmp/expected"
 [ -s "$tmp/expected" ] || die "no SHA256SUMS entry for $archive"
-# `-c` with output redirected, not `--check --status`: BusyBox's sha256sum takes
-# only short options, so the long form exits non-zero on a byte-perfect download
-# and this line then accuses the release channel of tampering. `-c -s` is not
-# the fix either — GNU coreutils rejects `-s`. `-c` plus a redirect is the one
-# spelling GNU coreutils, BusyBox and macOS shasum all accept.
+# `-c` with a redirect, not `--check --status` (BusyBox takes only short
+# options, so the long form fails a byte-perfect download and this line then
+# accuses the release channel of tampering) and not `-c -s` (GNU coreutils
+# rejects `-s`). `-c` plus a redirect is the one spelling GNU, BusyBox and
+# macOS shasum all accept.
 (cd "$tmp" && $checksum -c expected >/dev/null 2>&1) ||
     die "checksum mismatch for $archive — the download does not match the release's SHA256SUMS, so it was NOT installed"
 note "Checksum verified against the release's SHA256SUMS."
@@ -307,23 +293,20 @@ if [ ! -w "$dir" ]; then
     note "Installing to $dir (needs sudo)..."
 fi
 
-# Stage, verify, then swap. Installing first and checking afterwards means a
-# binary that cannot run here has already replaced a working one, with $tmp
-# cleared by the trap and nothing left to restore — which is what turned the
-# GLIBC_2.39 floor in v0.4.0 from "the new version will not start" into "the
-# version you had is gone too". Staging inside $dir rather than $tmp also keeps
-# the check honest: a noexec /tmp would otherwise fail a perfectly good binary,
-# and the final step is a rename within one directory rather than a copy.
+# Stage, verify, then swap. Installing first turned the v0.4.0 GLIBC_2.39
+# floor into "the version you had is gone too": a binary that cannot run here
+# had already replaced a working one, with $tmp cleared by the trap and
+# nothing left to restore. Staging inside $dir also keeps the check honest
+# under a noexec /tmp, and makes the swap a rename within one directory.
 staged="$dir/.$BIN.new.$$"
 $as_root install -m 0755 "$tmp/$stem/$BIN" "$staged" ||
     die "could not install to $dir/$BIN"
 
-# Belt and braces, and before the check rather than after: Gatekeeper refuses
-# to execute a quarantined binary, so an attribute left in place would fail the
-# very check meant to prove the download is good. curl does not set
-# com.apple.quarantine — only downloaders that opt into LSFileQuarantineEnabled
-# do, which is browsers and Mail — so on this path there is normally nothing to
-# clear. It costs nothing and covers an archive that arrived another way.
+# Belt and braces, before the check rather than after: Gatekeeper refuses a
+# quarantined binary, so a leftover attribute would fail the very check meant
+# to prove the download is good. curl does not set com.apple.quarantine —
+# only LSFileQuarantineEnabled downloaders (browsers, Mail) — so this normally
+# clears nothing and costs nothing, and covers an archive that came another way.
 if [ "$os" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
     $as_root xattr -d com.apple.quarantine "$staged" 2>/dev/null || true
 fi

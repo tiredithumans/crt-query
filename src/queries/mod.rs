@@ -23,12 +23,11 @@ use crate::queries::search::SearchRow;
 /// BY/DISTINCT for the same reason: LIMIT must be able to terminate early.
 ///
 /// `ESCAPE ''` turns off Postgres' default backslash escape, leaving `%` and
-/// `_` as the only metacharacters — which is what `--help` documents. Without
-/// it every backslash in the term is swallowed and the character after it is
-/// taken literally, so `a\b` searches for `ab` and a trailing backslash builds
-/// a pattern that cannot match at all. Either way the run reports "No
-/// certificates found", which is a result people act on. Identity terms — a DN
-/// fragment, an email SAN — are where a backslash actually turns up.
+/// `_` as the only metacharacters — what `--help` documents. Without it every
+/// backslash is swallowed and the next character taken literally, so `a\b`
+/// searches for `ab` and a trailing backslash cannot match at all; either way
+/// the run reports "No certificates found", which people act on. DN fragments
+/// and email SANs are where a backslash actually turns up.
 ///
 /// `server_now` rides along on every row so that window membership and the
 /// EXPIRED/days-left labels are decided by a single clock. Comparing a
@@ -128,14 +127,11 @@ impl<T> Report<T> {
     /// because crt.sh holds nothing more.
     ///
     /// `--limit` bounds identity rows, not certificates, and the collapse in
-    /// [`to_rows`] runs only after the server has already spent the window. A
-    /// full window that then collapses is indistinguishable, from the output
-    /// alone, from a name that genuinely has a handful of certificates — which
-    /// is the confusion this exists to name.
-    ///
-    /// Both halves are required. A full window that collapsed nothing handed
-    /// the caller exactly the rows they asked for, and a window that never
-    /// filled has nothing behind it to report.
+    /// [`to_rows`] runs after the server has spent the window. A full window
+    /// that collapses is indistinguishable from a name that genuinely has a
+    /// handful of certificates — the confusion this names. Both halves of the
+    /// condition are required: a full window that collapsed nothing gave the
+    /// caller what they asked for; an unfilled window has nothing behind it.
     pub fn window_hid_certificates(&self) -> bool {
         !self.saturated.is_empty() && self.rows.len() < self.raw_rows
     }
@@ -143,13 +139,11 @@ impl<T> Report<T> {
 
 /// Run an identity statement once per term and collect every row it returns.
 ///
-/// One statement per term, in sequence, for the reasons CONTRIBUTING.md
-/// spells out: the tsquery predicate has to stay index-driven to survive the
-/// guest database's statement timeout, so the terms cannot be folded into one
-/// `ANY` predicate; `--limit` is therefore per term, so a busy one cannot
-/// crowd the rest out of the window; and this tool holds exactly one
-/// connection to a database with a connection limit, so the terms queue
-/// rather than fanning out.
+/// One statement per term, in sequence, per CONTRIBUTING.md: the tsquery
+/// predicate must stay index-driven to survive the statement timeout, so the
+/// terms cannot fold into one `ANY` predicate; `--limit` is per term so a
+/// busy one cannot crowd the rest out; and one connection to a database with
+/// a connection limit means the terms queue rather than fan out.
 ///
 /// `$1` is always the term. `extra` binds `$2` onwards and is the same for
 /// every term — `search` and `expiring` differ only there.
@@ -517,15 +511,13 @@ mod tests {
     /// Snapshots of the three statements this tool sends.
     ///
     /// These are the contract between the SQL and the structs that read it:
-    /// every `column("…")` call names an alias defined here, and a projection
-    /// or join edit that drops one still compiles and still passes every other
-    /// test, then fails at runtime against the real database — which no offline
-    /// suite can reach. Re-blessing a snapshot is the prompt to re-check the
-    /// readers in that module.
+    /// every `column("…")` names an alias defined there, and dropping one
+    /// still compiles and passes every other test, failing only at runtime
+    /// against the real database — which no offline suite reaches. Re-blessing
+    /// a snapshot is the prompt to re-check that module's readers.
     ///
-    /// Verified to catch the mutation they exist for: renaming
-    /// `AS matched_identity` in `IDENTITY_QUERY` fails the two snapshots that
-    /// embed it and leaves `cert.sql` correctly green.
+    /// Verified against the mutation they exist for: renaming
+    /// `AS matched_identity` fails the two snapshots embedding it, not `cert.sql`.
     #[test]
     fn the_search_statement_matches_its_snapshot() {
         assert_eq!(
@@ -569,11 +561,9 @@ mod tests {
 
     #[test]
     fn the_identity_filter_disables_the_backslash_escape() {
-        // Without `ESCAPE ''` every backslash is swallowed and the next
-        // character taken literally, so `a\b` searches for `ab` and a trailing
-        // backslash cannot match at all — and the run reports "No certificates
-        // found", a result people act on. `--help` documents `%` and `_` as the
-        // only wildcards; this is what makes that true.
+        // Losing `ESCAPE ''` silently changes what a term with a backslash
+        // matches, reporting "No certificates found" instead; see
+        // IDENTITY_QUERY.
         assert!(
             IDENTITY_QUERY.contains("ILIKE ('%' || $1 || '%') ESCAPE ''"),
             "IDENTITY_QUERY lost its ESCAPE clause:\n{IDENTITY_QUERY}"

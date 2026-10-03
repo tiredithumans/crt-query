@@ -53,12 +53,11 @@ try {
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
 
-# ARM64 takes the native aarch64 build, which the release now ships. The x64
-# build stays in the list behind it for a release that predates the native one
-# (reachable with -Version): Windows on ARM runs x64 binaries under emulation,
-# so such a pin still installs something that works rather than nothing. No
-# 'x86' case: crt-query has never shipped a 32-bit build, so that branch could
-# only ever have resolved to an archive that does not exist.
+# ARM64 takes the native aarch64 build; the x64 entry behind it serves a
+# -Version pin predating it -- Windows on ARM runs x64 under emulation, so
+# the pin still installs something that works. No 'x86' case: a 32-bit build
+# has never shipped, so that branch could only resolve to an archive that
+# does not exist.
 switch ($arch) {
     'AMD64' { $targets = @('x86_64-pc-windows-msvc') }
     'ARM64' { $targets = @('aarch64-pc-windows-msvc', 'x86_64-pc-windows-msvc') }
@@ -89,11 +88,10 @@ try {
     $sumsPath = Join-Path $tmp 'SHA256SUMS'
     Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
 
-    # SHA256SUMS names every archive in the release, so it doubles as the
-    # index mapping this machine's target triple to an archive -- and
-    # therefore to the version, which is embedded in the archive name.
-    # `*` marks a binary-mode entry and `./` is how the release workflow's
-    # glob spells the names; neither is part of the file name.
+    # SHA256SUMS doubles as the index mapping this triple to an archive --
+    # and to the version embedded in the archive name. `*` marks a binary-mode
+    # entry and `./` is how the release workflow's glob spells the names;
+    # neither is part of the file name.
     $entries = foreach ($line in Get-Content -Path $sumsPath) {
         if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(?:\./)?(\S.*?)\s*$') {
             [pscustomobject]@{ Hash = $Matches[1].ToLower(); Name = $Matches[2] }
@@ -160,11 +158,11 @@ Build from source instead:
 
     # --- Install -----------------------------------------------------------
 
-    # Capture .FullName. New-Item's output was piped to Out-Null, so a relative
-    # -Dir reached the PATH write below verbatim -- and a relative entry in
-    # HKCU\Environment\Path is resolved by every future process against its own
-    # working directory, which survives reboots. It also normalises a trailing
-    # separator, so `-Dir C:\tools\` no longer appends a second C:\tools.
+    # Capture .FullName: a relative -Dir would otherwise reach the PATH write
+    # verbatim, and a relative entry in HKCU\Environment\Path is resolved by
+    # every future process against its own working directory, surviving
+    # reboots. Also normalises a trailing separator, so `-Dir C:\tools\` no
+    # longer appends a second C:\tools.
     $Dir = (New-Item -ItemType Directory -Path $Dir -Force).FullName
     $dest = Join-Path $Dir 'crt-query.exe'
 
@@ -176,22 +174,22 @@ Build from source instead:
     try {
         Copy-Item -Path $exe -Destination $staged -Force
 
-        # Everything downloaded from the internet carries a mark-of-the-web,
-        # which SmartScreen acts on. Clear it before the check rather than
-        # after: the mark can block execution, and would then fail the very
-        # check meant to prove the download is good. Clearing it is also what
-        # makes a re-run work as an upgrade -- the mark comes back each time.
+        # Internet downloads carry a mark-of-the-web, which SmartScreen acts
+        # on and which can block execution -- clear it before the check or it
+        # fails the very check meant to prove the download is good. Clearing
+        # it is also what makes a re-run work as an upgrade; the mark comes
+        # back each time.
         Unblock-File -Path $staged -ErrorAction SilentlyContinue
 
-        # Capture first, slice after. Piping into `Select-Object -First 1` stops
-        # the pipeline as soon as it has its one line, and a short-circuited
-        # native command never sets $LASTEXITCODE -- which is a terminating
-        # error under the StrictMode above, so the check meant to confirm a good
-        # install was the thing that failed it.
+        # Capture first, slice after: `Select-Object -First 1` short-circuits
+        # the pipeline, and a short-circuited native command never sets
+        # $LASTEXITCODE -- a terminating error under the StrictMode above, so
+        # the check meant to confirm a good install was the thing that failed
+        # it.
         #
-        # stderr goes to a file rather than $null so the loader's own words
-        # reach the message. Not 2>&1: under $ErrorActionPreference = 'Stop' a
-        # native command's stderr becomes error records that terminate here.
+        # stderr goes to a file so the loader's own words reach the message.
+        # Not 2>&1: under $ErrorActionPreference = 'Stop' a native command's
+        # stderr becomes error records that terminate here.
         $errPath = Join-Path $tmp 'runerr.txt'
         $versionOutput = & $staged --version 2>$errPath
         if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
@@ -213,12 +211,12 @@ Build from source instead:
     # --- PATH --------------------------------------------------------------
 
     if (-not $NoPathUpdate) {
-        # Go to the registry rather than [Environment]::GetEnvironmentVariable:
-        # that expands %USERPROFILE% and friends, and SetEnvironmentVariable
-        # writes the expanded result back as REG_SZ. Together they silently
-        # flatten every unexpanded entry another installer put there on purpose
-        # -- rustup's %USERPROFILE%\.cargo\bin is the one people hit -- which
-        # then stops following the user account it was written for.
+        # Go to the registry rather than [Environment]::Get/SetEnvironmentVariable:
+        # Get expands %USERPROFILE% and friends, Set writes the expanded result
+        # back as REG_SZ, and together they silently flatten unexpanded entries
+        # another installer put there on purpose -- rustup's
+        # %USERPROFILE%\.cargo\bin is the one people hit, and the flattened
+        # copy stops following the account it was written for.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
         try {
             $hasPath = @($key.GetValueNames()) -contains 'Path'
@@ -247,17 +245,17 @@ Build from source instead:
     Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
   }
 } catch {
-    # `throw` a flat string, never `exit`. Both documented invocations run this
-    # script inside the caller's own session -- `irm ... | iex` and the
-    # scriptblock form in .EXAMPLE -- where a top-level `exit` unwinds the host
-    # itself, closing the window or killing an interactive shell. The success
-    # path has no `exit`, so the asymmetry pointed the wrong way: a clean
-    # install left the console alive and the one outcome the user most needs to
-    # read, the checksum mismatch above, was the one that took it away.
+    # `throw` a flat string, never `exit`: both documented invocations run
+    # this script inside the caller's own session (`irm ... | iex` and the
+    # .EXAMPLE scriptblock), where a top-level `exit` unwinds the host
+    # itself -- closing the window or killing an interactive shell. The
+    # success path had no `exit`, so the asymmetry pointed the wrong way: a
+    # clean install left the console alive and the checksum mismatch, the one
+    # outcome the user most needs to read, was the one that took it away.
     #
     # Re-throwing the caught exception object would restore the unreadable
-    # multi-line rendering this catch exists to avoid, so the message is
-    # flattened into a single string. That still terminates with exit code 1
-    # under `pwsh -File`, and returns an interactive host to its prompt.
+    # multi-line rendering this catch exists to avoid, hence the flat string.
+    # That still terminates with exit code 1 under `pwsh -File`, and returns
+    # an interactive host to its prompt.
     throw "crt-query installer: error: " + $_.Exception.Message
 }
