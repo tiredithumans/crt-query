@@ -28,21 +28,15 @@ use crate::queries::cert::CertDetail;
 pub(crate) const EXIT_OK: i32 = 0;
 /// The run failed.
 const EXIT_ERROR: i32 = 1;
-/// The requested certificate ID does not exist. Distinct from EXIT_ERROR so a
-/// script can tell "no such certificate" from "the query failed".
+/// The requested certificate ID does not exist; distinct from EXIT_ERROR.
 ///
-/// 3 rather than the more obvious 2: clap exits 2 on a usage error, so
-/// `crt-query cert "$id"` with an empty or unset `$id` would otherwise report
-/// "no such certificate" for what is a typo — turning a shell slip into a
-/// false "the certificate is gone" alert, which is the exact confusion this
-/// code exists to prevent.
+/// 3 rather than 2 because clap uses 2 for usage errors — an empty `$id` is a
+/// shell slip, not a missing certificate, and must not read as one.
 const EXIT_NOT_FOUND: i32 = 3;
-/// `expiring --fail-on-expiring` found something to report: a certificate
-/// expiring inside `--within`, or one already expired inside the look-back.
-///
-/// Not EXIT_ERROR, because nothing failed, and not 2 or 3, which already mean
-/// "you typed it wrong" and "no such certificate". A monitoring check has to be
-/// able to tell "act on this" from "the check itself broke".
+/// `expiring --fail-on-expiring` found something to report: expiring inside
+/// `--within`, or already expired inside the look-back. A monitoring check
+/// must be able to tell "act on this" from "the check broke", so this is not
+/// EXIT_ERROR, nor 2/3 which already mean usage error / not found.
 const EXIT_EXPIRING: i32 = 4;
 
 #[tokio::main(flavor = "current_thread")]
@@ -60,13 +54,11 @@ async fn run() -> Result<i32> {
     let cli = Cli::parse();
     // Before anything can print: every informational line checks this.
     notice::set_quiet(cli.out.quiet);
-    // Check the CSV destination before any real work: before a connection is
-    // spent on the shared guest database, which is a genuinely scarce
-    // resource, and before check-update's network round trip.
+    // Check the CSV destination before spending a connection to the shared
+    // guest database or check-update's network round trip.
     //
-    // `completions` is exempt: it emits a shell script, never a record, so the
-    // output flags do not apply to it and touching the path would only leave a
-    // file behind for a run that was never going to write one.
+    // `completions` is exempt: it emits a shell script, never a record, so a
+    // precheck would only leave a stray file behind.
     if !matches!(cli.command, Commands::Completions { .. }) {
         output::precheck_csv(&cli.out)?;
     }
@@ -176,11 +168,9 @@ async fn run() -> Result<i32> {
         Commands::Cache { action } => run_cache(*action)?,
         Commands::CheckUpdate => update::run_check_update(&cli.out)?,
         Commands::Completions { shell } => {
-            // Rendered to memory first, then written through the same stdout
-            // path as every other output: clap_complete's generate() panics on
-            // a write error, so handing it a raw stdout makes
-            // `crt-query completions bash | head -1` an exit-101 panic rather
-            // than the clean end of output it is everywhere else.
+            // Rendered to memory first: clap_complete's generate() panics on
+            // a write error, so a raw stdout would make
+            // `crt-query completions bash | head -1` an exit-101 panic.
             let mut script = Vec::new();
             cli::write_completions(*shell, &mut script);
             output::emit_raw(&script)?;
@@ -189,18 +179,15 @@ async fn run() -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Resolve the connection settings — CLI flags over `CRT_QUERY_*` environment
-/// variables over config file over built-in defaults — and the cache that
-/// fronts them.
+/// Resolve the connection settings — CLI flags over `CRT_QUERY_*` env vars
+/// over config file over defaults — and the cache that fronts them.
 ///
-/// Called from inside the subcommand arms rather than once up front, so that
-/// `completions` and `check-update` neither read the config file nor open a
-/// connection to a shared public service they have no use for.
+/// Called from inside the subcommand arms so `completions` and `check-update`
+/// neither read the config nor touch a database they have no use for.
 ///
-/// Nothing is dialled here. [`Source`] connects on its first real need, so a
-/// run whose every term is already cached finishes without touching crt.sh —
-/// which is the whole point of having a cache in front of a service that
-/// regularly refuses connections.
+/// Nothing is dialled here: [`Source`] connects on first need, so a run whose
+/// terms are all cached finishes without touching crt.sh — the point of a
+/// cache in front of a service that often refuses connections.
 fn open_source(cli: &Cli) -> Result<(Source, Cache)> {
     let file = config::load()?;
     let env = config::EnvConfig::load()?;
@@ -210,10 +197,9 @@ fn open_source(cli: &Cli) -> Result<(Source, Cache)> {
 
 /// Fold the cache flags and config file into a cache.
 ///
-/// Same precedence as everything else here — flag, then file, then default —
-/// which means `--refresh` re-enables a cache the file turned off. That is the
-/// point of the flag: it asks for a fresh answer to be stored, and honouring
-/// `cache = false` over it would make it a slower synonym for `--no-cache`.
+/// Flag over file over default, so `--refresh` re-enables a cache the file
+/// turned off: the flag asks for a fresh answer to be *stored*, and honouring
+/// `cache = false` over it would make it a slower `--no-cache`.
 fn build_cache(opts: &cli::CacheOpts, file: &config::FileConfig) -> Cache {
     let mode = if opts.no_cache {
         cache::Mode::Disabled
@@ -241,14 +227,11 @@ fn run_cache(action: CacheAction) -> Result<()> {
         .map_or(cache::DEFAULT_TTL, std::time::Duration::from_secs);
     let cache = Cache::new(cache::Mode::Enabled, ttl);
     let Some(dir) = cache.dir().map(Path::to_path_buf) else {
-        // No absolute cache directory in this environment, so there is nowhere
-        // for entries to be — see `cache::cache_root` for why relative is
-        // refused rather than resolved.
-        //
-        // `cache path` cannot answer, and says so as an error: exiting 0 with
-        // nothing on stdout let `$(crt-query cache path)` read as an empty
-        // path, and under `--quiet` there was not even a note to say why.
-        // `cache clear` has genuinely nothing to do, so it stays a success.
+        // No absolute cache directory, so there is nowhere for entries to be
+        // (see `cache::cache_root` for why relative is refused). `cache path`
+        // errors rather than exiting 0 silently: an empty `$(crt-query cache
+        // path)` reads as a valid path. `cache clear` has nothing to do, so
+        // it stays a success.
         const WHY: &str =
             "no cache directory: neither XDG_CACHE_HOME nor HOME names an absolute path";
         return match action {
@@ -280,20 +263,18 @@ fn quoted(terms: &[String]) -> String {
         .join(", ")
 }
 
-/// The note printed when the row window filled and the collapse then handed
-/// back fewer certificates than rows.
+/// The note printed when the row window filled and the collapse handed back
+/// fewer certificates than rows.
 ///
-/// `--limit` bounds identity rows, not certificates: crt.sh returns one row per
-/// matched identity per CT entry, and logs a precertificate alongside its final
-/// leaf, so several rows routinely collapse into a single certificate. Without
-/// this the run is simply short, and a full window reads as "that is all there
-/// is" — the one thing it does not mean.
+/// `--limit` bounds identity rows, not certificates: crt.sh returns one row
+/// per identity per CT entry, and logs precertificates alongside leaves, so
+/// rows routinely collapse into one certificate. Without the note a full
+/// window reads as "that is all there is" — the one thing it does not mean.
 ///
-/// The counts are run totals, so with several terms they only add up once
-/// `--limit` is understood to be per term — hence the parenthetical, and hence
-/// naming the terms that actually filled. Left unqualified, a two-term run
-/// could report "11 identity rows" under "--limit 10" and send the reader off
-/// to reconcile a contradiction that is not there.
+/// Counts are run totals while `--limit` is per term, hence the "(per term)"
+/// parenthetical and naming only the terms that filled; unqualified, a
+/// two-term run reporting "11 identity rows" under "--limit 10" looks
+/// self-contradictory.
 fn saturation_note<T>(limit: i64, terms: &[String], report: &Report<T>) -> String {
     // One term is its own answer: naming it would only repeat the command.
     let (per_term, filled) = if terms.len() == 1 {
@@ -361,9 +342,8 @@ mod tests {
         )
     }
 
-    /// The note is the whole feature. It has to name the flag that caused the
-    /// shortfall, both counts, and the two ways out — a user who is told only
-    /// that the result is short is exactly as stuck as before.
+    /// The note must name the flag that caused the shortfall, both counts,
+    /// and the two ways out — otherwise the reader is as stuck as before.
     #[test]
     fn the_saturation_note_names_the_limit_both_counts_and_the_way_out() {
         let note = note_for(10, &["example.com"], 2, 10);
@@ -373,10 +353,9 @@ mod tests {
         assert!(note.contains("--no-dedupe"), "{note}");
     }
 
-    /// `--limit` is per term, so with two names the ceiling being hit is not
-    /// the number typed — it is that number over again for each name. Saying
-    /// "--limit 10" flat would send someone looking for ten rows that are not
-    /// the ones they are missing.
+    /// `--limit` is per term, so with two names the ceiling is that number
+    /// per name; flat "--limit 10" would point at rows that are not the ones
+    /// being missed.
     #[test]
     fn the_saturation_note_says_per_term_only_when_there_is_more_than_one() {
         assert!(
@@ -388,14 +367,10 @@ mod tests {
         );
     }
 
-    /// Saturation is per term, and the counts are run totals, so a multi-term
-    /// note has to name the term that actually filled — it is the one to raise
-    /// the limit for, and telling someone to widen a two-name search without
-    /// saying which half is no better than not telling them at all.
-    ///
-    /// The totals are also why the parenthetical matters: 11 rows reported
-    /// under `--limit 10` is a contradiction until the limit is understood to
-    /// be per term.
+    /// Saturation is per term but counts are run totals, so a multi-term note
+    /// names only the term that filled (the one to raise --limit for), and
+    /// the parenthetical resolves the apparent "11 rows under --limit 10"
+    /// contradiction.
     #[test]
     fn a_multi_term_note_names_only_the_terms_that_filled() {
         let note = note_for_filled(
@@ -436,9 +411,8 @@ mod tests {
         );
     }
 
-    /// clap exits 2 on a usage error and we do not control that number, so the
-    /// only way "no such certificate" stays distinguishable from "you typed the
-    /// command wrong" is for none of our codes to be 2.
+    /// clap exits 2 on usage error and we don't control that, so none of our
+    /// codes may be 2.
     #[test]
     fn no_exit_code_collides_with_claps_usage_error() {
         const CLAP_USAGE_ERROR: i32 = 2;
@@ -450,10 +424,9 @@ mod tests {
         ] {
             assert_ne!(code, CLAP_USAGE_ERROR, "{name} collides with clap's exit 2");
         }
-        // The value itself, not just its distinctness: tests/cli.rs asserts the
-        // README documents `3` but cannot see this constant (the crate is
-        // bin-only), and this test asserted only that the codes differ — so
-        // changing it to 4 left both green and the README wrong.
+        // Pin the values too, not just distinctness: tests/cli.rs checks the
+        // README text but can't see these constants, so a silent change would
+        // leave both this test and the README green.
         assert_eq!(
             EXIT_NOT_FOUND, 3,
             "README documents exit 3 for a missing certificate"

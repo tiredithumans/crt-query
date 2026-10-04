@@ -76,18 +76,16 @@ pub const ENV_DB_URL: &str = "CRT_QUERY_DB_URL";
 
 /// Connection settings read from `CRT_QUERY_*` environment variables.
 ///
-/// They sit between the command line and the config file: a container or a CI
-/// job can point the tool somewhere without writing a file, and an explicit
-/// flag still wins.
+/// They sit between the command line and the config file: a container or CI
+/// job can point the tool somewhere without writing a file, and a flag still
+/// wins.
 ///
 /// Read here rather than through clap's `env` attribute, which was tried and
-/// had two faults. clap parses every global argument for every subcommand, so
-/// an exported-but-empty `CRT_QUERY_PORT` made even `completions` exit 2; and
-/// it treats an empty variable as a value, where `export CRT_QUERY_HOST=` is
-/// how a shell user says "unset". Reading them only when a connection is
-/// resolved, with empty meaning absent, avoids both — and knowing the source
-/// directly is what lets a bad `CRT_QUERY_DB_URL` be reported under its own
-/// name.
+/// had two faults: clap parses every global argument for every subcommand, so
+/// an exported-but-empty `CRT_QUERY_PORT` made even `completions` exit 2, and
+/// it treats an empty variable as a value where `export CRT_QUERY_HOST=` means
+/// "unset". Reading them here, with empty meaning absent, avoids both — and
+/// knowing the source lets a bad `CRT_QUERY_DB_URL` be named by its own name.
 #[derive(Debug, Default)]
 pub struct EnvConfig {
     pub host: Option<String>,

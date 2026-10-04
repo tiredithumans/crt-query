@@ -41,13 +41,12 @@ jobs:
           # push, whichever commit that is.
           fetch-depth: 0
 
-      # "Analyze" is a required check, so the job itself must always run and
-      # report a status — an `on: paths-ignore` at the workflow level would
-      # instead leave it permanently "waiting" on a docs-only PR and block
-      # the merge. Skipping the actual analysis steps below, conditioned on
-      # this diff, gets the same effect without that trap. The weekly
-      # schedule run always analyzes in full: a newly published CodeQL query
-      # still needs to run against unchanged code.
+      # "Analyze" is a required check, so the job must always run and report:
+      # a workflow-level `on: paths-ignore` would leave it permanently
+      # "waiting" on a docs-only PR and block the merge. Skipping the analysis
+      # steps on this diff gets the same effect without that trap. Schedule
+      # runs always analyze in full — a newly published CodeQL query must
+      # still run against unchanged code.
       - name: Detect code changes
         id: changes
         run: |

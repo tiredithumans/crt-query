@@ -72,13 +72,11 @@ fn a_malformed_cert_argument_is_a_usage_error_not_a_missing_certificate() {
     }
 }
 
-/// `crt-query search "$DOMAIN"` with `$DOMAIN` unset used to spend a
-/// connection on the shared guest database and report "No certificates
-/// found" — a result people act on — for a term that was never there. It is a
-/// usage error, and the absence of "could not connect" in stderr is the
-/// assertion that it is decided before the network is touched. (The sentinel
-/// used to be "connection attempt", which the connect path no longer prints:
-/// retries are silent now, so only the closing error names the host.)
+/// An unset `$DOMAIN` used to spend a connection on the shared guest database
+/// and report "No certificates found" — a result people act on. It is a usage
+/// error now, decided before the network: the absence of "could not connect"
+/// is the assertion. (The sentinel was "connection attempt" until retries
+/// went silent; only the closing error names the host.)
 #[test]
 fn a_blank_term_is_a_usage_error_and_never_reaches_the_database() {
     for subcommand in ["search", "expiring"] {
@@ -134,12 +132,11 @@ fn completions_does_not_create_the_csv_destination() {
 }
 
 /// The ordering that makes `--csv` safe to schedule: an unwritable destination
-/// is caught before a connection is spent on the shared guest database. The
-/// absence of "could not connect" in stderr is the actual assertion — the
-/// error message alone would pass even if the check ran too late. That the
-/// string appears when the connect path *does* run is pinned below, by
-/// `a_spent_connect_reports_once_and_never_narrates_its_retries`; without it
-/// this assertion would hold for a string the binary never prints.
+/// is caught before a connection is spent. The absence of "could not connect"
+/// is the actual assertion — the error message alone would pass even if the
+/// check ran late. Its presence is pinned below by
+/// `a_spent_connect_reports_once_and_never_narrates_its_retries`; without
+/// that, this assertion would hold for a string the binary never prints.
 #[test]
 fn an_unwritable_csv_destination_fails_before_any_connection_is_attempted() {
     let out = run(&[
@@ -272,11 +269,10 @@ fn exit_code_documentation_is_present_for_the_case_this_suite_cannot_reach() {
 }
 
 /// `precheck_csv` creates the destination to prove it is writable, then removes
-/// it again so a run that fails leaves no empty report. `exists()` follows a
-/// symlink and `remove_file` does not, so for a dangling link it created the
-/// *target* and deleted the *link* — losing a file the user made and leaving
-/// behind exactly the empty report the check exists to prevent. The rotation
-/// pattern below is the ordinary way to meet this.
+/// it. `exists()` follows a symlink and `remove_file` does not, so for a
+/// dangling link it created the *target* and deleted the *link* — losing a
+/// file the user made and leaving the empty report the check prevents. The
+/// rotation pattern below is the ordinary way to meet this.
 #[test]
 #[cfg(unix)]
 fn a_dangling_report_symlink_survives_the_writability_check() {
@@ -310,14 +306,12 @@ fn a_dangling_report_symlink_survives_the_writability_check() {
     );
 }
 
-/// `completions` is routed through `on_stdout` precisely so a closed reader
-/// ends the run cleanly. `clap_complete::generate` panics on a write error, so
-/// the pre-fix shape exits 101; asserting only "exit 0 and stdout mentions
-/// crt-query" was true of that shape too, and so pinned nothing.
+/// `completions` goes through `on_stdout` so a closed reader ends the run
+/// cleanly; `clap_complete::generate` panics on a write error (exit 101), and
+/// "exit 0 and stdout mentions crt-query" was true of the panicking shape too.
 ///
-/// Dropping the child's stdout handle before waiting closes the pipe while the
-/// ~15KB script is still being written. `| head -1` does not reproduce it: head
-/// reads the whole script happily.
+/// Dropping the child's stdout before waiting closes the pipe mid-script;
+/// `| head -1` does not reproduce it, as head reads the whole 15KB happily.
 #[test]
 fn a_closed_reader_ends_completions_cleanly_rather_than_panicking() {
     use std::process::Stdio;

@@ -1,12 +1,10 @@
 //! End-to-end cache checks against the built binary.
 //!
-//! The unit tests prove that `run_search` and `run_cert` never dial on a hit,
-//! but they drive those functions with a cache built in the test. Nothing
-//! proved that the shipped binary finds entries where it writes them: that the
-//! directory it resolves from the environment, the key it builds from the
-//! command line and the filename it hashes all agree with what an earlier run
-//! left on disk. Any one of them drifting gives a cache that quietly never
-//! hits, which looks exactly like a working one that is merely cold.
+//! The unit tests prove `run_search` and `run_cert` never dial on a hit, but
+//! with a cache built in the test. Nothing proved the shipped binary finds
+//! entries where it writes them: directory, key and filename digest all
+//! agreeing with an earlier run. Any drift gives a cache that quietly never
+//! hits — indistinguishable from a working one that is merely cold.
 //!
 //! **Every test here is offline.** Each one seeds a cache directory by hand
 //! and runs the binary against `--host 127.0.0.1 --port 1`, where nothing
@@ -22,15 +20,13 @@
 //!
 //! # This file pins the on-disk format, on purpose
 //!
-//! Entries are built here from first principles rather than through the crate,
-//! which is bin-only and cannot be linked from here anyway: the key from the
-//! golden SQL snapshots, the cache identity, the bind parameters rendered with
-//! `Debug`, and the FNV-1a filename, all re-implemented. That duplicates
-//! `src/cache.rs`, and the duplication is the point. Changing the digest, the
-//! key or the entry shape orphans every user's cache without a word, and this
-//! suite is what turns such a change from silent into a failing test, so that
-//! it is made deliberately (with a `FORMAT_VERSION` bump where the shape
-//! changed) rather than by accident.
+//! Entries are built here from first principles — key from the golden SQL
+//! snapshots, cache identity, `Debug`-rendered bind parameters, the FNV-1a
+//! filename — duplicating `src/cache.rs` (a bin-only crate this cannot link
+//! anyway) on purpose. Changing the digest, key or entry shape orphans every
+//! user's cache without a word; this suite turns that into a failing test, so
+//! the change is made deliberately (with a `FORMAT_VERSION` bump where the
+//! shape changed) rather than by accident.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

@@ -3,18 +3,15 @@
 #
 #   packaging/homebrew/generate.sh [vX.Y.Z]   (default: the latest release)
 #
-# Release.yml's `tap` job runs this on `release: published` and pushes the
-# result to the tap, so a normal release needs no manual run. This stays the
-# fallback, and the way to inspect what the formula will say before a release.
+# release.yml's `tap` job runs this on `release: published` and pushes the
+# result to the tap — the one copy `brew install` reads. This script stays the
+# fallback and the way to inspect a formula before releasing. The output is
+# gitignored because nothing pushes it back here, so a tracked copy could only
+# go stale (it did, naming a superseded release).
 #
-# The output is gitignored rather than committed. The tap job never writes it
-# back to this repository, so a tracked copy could only fall behind the tap it
-# was generated for — which is what happened, until it named a release that had
-# already been superseded. The tap is the one copy `brew install` reads.
-#
-# Every checksum in the formula is copied straight out of the release's
-# SHA256SUMS, so the formula cannot drift from the archives it points at, and
-# nothing here has to be typed by hand at release time.
+# Every checksum comes straight out of the release's SHA256SUMS, so the formula
+# cannot drift from the archives it points at and nothing is hand-typed at
+# release time.
 set -euo pipefail
 
 REPO="tiredithumans/crt-query"
@@ -47,11 +44,10 @@ archive_for() {
     ' "$tmp/SHA256SUMS"
 }
 
-# `crt-query completions` first shipped in this release. Homebrew generates the
-# completion scripts by RUNNING the installed binary, so emitting that call for
-# an older release does not degrade gracefully -- it aborts `brew install`
-# outright. Nothing in this repo's gates catches it, because none of them runs
-# the released binary.
+# `crt-query completions` first shipped in this release. Homebrew generates
+# completions by RUNNING the installed binary, so emitting that call for an
+# older release aborts `brew install` outright -- and no gate here catches it,
+# because none of them runs the released binary.
 MIN_COMPLETIONS_VERSION="0.2.0"
 
 ARM_MAC="aarch64-apple-darwin"

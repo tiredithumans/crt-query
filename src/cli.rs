@@ -27,13 +27,13 @@ pub struct Cli {
     pub command: Commands,
 }
 
-/// Connection flags. Every field is optional so that a value left unset on the
-/// command line can fall back to a `CRT_QUERY_*` environment variable, then to
-/// the config file, then to the built-in defaults — see `config::resolve`.
+/// Connection flags. Every field is optional so an unset value falls back to a
+/// `CRT_QUERY_*` env var, then the config file, then defaults — see
+/// `config::resolve`.
 ///
-/// The variables are read by `config::EnvConfig` rather than through clap's
-/// `env` attribute (see there for why), so the help text names each one by
-/// hand. It names the variable, never its value, which may carry a password.
+/// The env vars are read by `config::EnvConfig`, not clap's `env` attribute
+/// (see there for why), so the help text names each one by hand — the
+/// variable, never its value, which may carry a password.
 #[derive(Args)]
 pub struct ConnOpts {
     /// Database host (default: crt.sh; env: CRT_QUERY_HOST)
@@ -88,9 +88,8 @@ pub struct OutputOpts {
 
 /// Cache flags.
 ///
-/// Results are cached locally so that repeating a query does not spend another
-/// client slot on a shared public database. See `cache::Cache` for what is
-/// stored and how stale it is allowed to get.
+/// Results are cached locally so repeating a query does not spend another
+/// client slot on a shared public database. See `cache::Cache`.
 #[derive(Args)]
 pub struct CacheOpts {
     /// Neither read nor write the local result cache
@@ -253,11 +252,10 @@ impl Commands {
         if skip_expired { 0 } else { since_expired }
     }
 
-    /// A `search` or `expiring` term list with repeats removed, preserving the
-    /// order they were given in.
+    /// A `search` or `expiring` term list with repeats removed, order kept.
     ///
-    /// Each term costs one statement against a shared public database, and the
-    /// identity match is case-insensitive, so `a.example A.example` would
+    /// Each term costs one statement against a shared public database, and
+    /// identity matching is case-insensitive, so `a.example A.example` would
     /// otherwise buy two identical result sets for twice the load.
     pub fn unique_terms(terms: &[String]) -> Vec<String> {
         let mut seen = Vec::with_capacity(terms.len());
@@ -276,16 +274,11 @@ impl Commands {
 /// A `search` term or `expiring` domain, rejected at parse time when it is
 /// empty or only whitespace.
 ///
-/// clap accepts an empty positional, and an empty term still costs a statement
-/// against the shared guest database: `plainto_tsquery` of nothing is a query
-/// that matches no row, so the run spent a connection to report "No
-/// certificates found" for a term that was never there. That is almost always
-/// an unset shell variable — `crt-query search "$DOMAIN"` — and "no
-/// certificates" is a result people act on, so the same reasoning that keeps
-/// `EXIT_NOT_FOUND` off clap's 2 applies: a slip must read as a usage error.
-///
-/// Whitespace inside a term is left alone; only a term with nothing else in
-/// it is refused.
+/// An empty term still costs a statement against the shared guest database
+/// (`plainto_tsquery` of nothing matches no row), and usually comes from an
+/// unset shell variable. "No certificates" is a result people act on, so a
+/// slip must read as a usage error — the same reasoning that keeps
+/// `EXIT_NOT_FOUND` off clap's 2. Whitespace inside a term is left alone.
 fn non_blank_term(term: &str) -> Result<String, String> {
     if term.trim().is_empty() {
         Err("a term cannot be empty or only whitespace".to_string())
@@ -369,10 +362,9 @@ mod tests {
         assert!(Cli::try_parse_from(["crt-query", "search"]).is_err());
     }
 
-    /// An unset `$DOMAIN` used to reach the database as an empty term, spend
-    /// a connection, and come back as "No certificates found" — a result
-    /// people act on. It is a usage error, and it is one for both subcommands
-    /// and anywhere in the list, not only the first position.
+    /// An unset `$DOMAIN` used to reach the database as an empty term and
+    /// come back as "No certificates found". It is a usage error, for both
+    /// subcommands and anywhere in the list.
     #[test]
     fn a_blank_term_is_a_usage_error_before_anything_is_queried() {
         for subcommand in ["search", "expiring"] {

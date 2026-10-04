@@ -25,12 +25,10 @@ const DASH: &str = "-";
 const PIPED_WIDTH: u16 = 120;
 
 /// Columns with no natural wrap point — an ID, a hex serial, a fixed-format
-/// timestamp — pinned to their exact content width. `ContentArrangement::Dynamic`
-/// only exempts a column from wrapping when its content is already narrower
-/// than the current average, so header text alone (e.g. "Not Before (UTC)")
-/// can push these into the "wrap when squeezed" bucket even though breaking a
-/// serial mid-hex-digit or a timestamp between date and time makes them
-/// harder to read, not easier.
+/// timestamp — pinned to their exact content width. `Dynamic` only exempts a
+/// column whose content is narrower than the current average, so header text
+/// alone can push these into "wrap when squeezed" — and breaking a serial
+/// mid-hex-digit makes it harder to read, not easier.
 const NO_WRAP_HEADERS: &[&str] = &[
     "crt.sh ID",
     "Issuer CA ID",
@@ -41,11 +39,10 @@ const NO_WRAP_HEADERS: &[&str] = &[
     "Status",
 ];
 
-/// Free-text columns that do have natural wrap points (spaces, dots, commas)
-/// but still need a floor: without one they end up squeezed to a
-/// character-per-line sliver once the columns above claim their content
-/// width. A minimum here can push the table past the width it was aiming for —
-/// preferred over a technically-fitting table nobody can read.
+/// Free-text columns that have wrap points but need a floor: without one they
+/// squeeze to a character-per-line sliver once the no-wrap columns claim
+/// their content width. A minimum can push the table past its target width —
+/// better than a fitting table nobody can read.
 const MIN_WIDTH_HEADERS: &[(&str, u16)] = &[
     ("Issuer", 20),
     ("Matched Identities", 20),
@@ -113,15 +110,10 @@ pub trait OutputRecord: Serialize {
 
 /// One CSV row per value of a multi-valued column, every other cell shared.
 ///
-/// The row shape for [`OutputRecord::csv_rows`] on a record with a list
-/// column: `cells` is the record rendered once, and `column` is overwritten
-/// with each of `values` in turn. A record with no values still writes one
-/// row, carrying whatever `cells` already holds there — the header-only
-/// contract for an empty report is decided above this, per file, not per row.
-///
-/// Rendering the record once and cloning is deliberate: the previous shape
-/// re-rendered every cell per value, which for a certificate with a hundred
-/// SANs meant a hundred passes over the same timestamps.
+/// `cells` is the record rendered once, `column` overwritten with each value
+/// in turn; no values still writes one row. The record is rendered once and
+/// cloned on purpose — the previous shape re-rendered every cell per value,
+/// a hundred passes over the same timestamps for a hundred-SAN certificate.
 pub fn expand_column(cells: Vec<String>, column: usize, values: &[String]) -> Vec<Vec<String>> {
     if values.is_empty() {
         return vec![cells];
@@ -154,13 +146,11 @@ pub fn csv_ts(ts: Option<&DateTime<Utc>>) -> String {
 /// Fail on an unwritable `--csv` destination before a connection is spent on
 /// the shared guest database.
 ///
-/// Checks exactly what [`replace_file`] will need: that the scratch file can
-/// be created beside the destination, and that an existing destination can be
-/// opened for writing. Nothing is left behind — the scratch file is removed
-/// again and an existing report is never truncated, since it is the previous
-/// run's and outliving a later failure is what it is for. An absent
-/// destination is not created either: an empty file where the documented
-/// contract promises a header row is worse than the absence it replaces.
+/// Checks exactly what [`replace_file`] will need: a scratch file creatable
+/// beside the destination, and an existing destination openable for writing.
+/// Nothing is left behind — the probe is removed, an existing report is never
+/// truncated, and an absent destination is not created: an empty file where
+/// the contract promises a header row is worse than no file.
 pub fn precheck_csv(out: &OutputOpts) -> Result<()> {
     if let Some(path) = &out.csv {
         check_replaceable(path)
@@ -233,14 +223,12 @@ fn scratch_beside(target: &Path) -> io::Result<PathBuf> {
 /// Replace the file at `path` with what `write` produces, or leave it exactly
 /// as it was.
 ///
-/// `File::create` truncates before the first byte is written, so a failure
-/// part-way — a full disk, a write error — left a partial report where the
-/// previous run's had been, and a scheduled consumer reading the file at the
-/// wrong moment saw a header and half the rows. The content goes to a scratch
-/// file beside the destination and is renamed into place once complete and
-/// flushed to disk: rename is atomic on every platform this tool ships for, so
-/// a reader sees the old report or the new one and never a mixture, and a
-/// failure removes the scratch file and touches nothing else.
+/// `File::create` truncates before the first byte, so a failure part-way
+/// left a partial report where the previous run's had been. The content goes
+/// to a scratch file beside the destination and is renamed into place once
+/// flushed: rename is atomic on every platform we ship for, so a reader sees
+/// the old report or the new one, never a mixture; failure cleans up and
+/// touches nothing.
 ///
 /// An existing report's permissions are carried over, as writing through it
 /// in place would have kept them.

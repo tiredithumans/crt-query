@@ -12,37 +12,26 @@ use std::borrow::Cow;
 /// Stop a spreadsheet treating a certificate field as a formula, or rendering
 /// one in a direction it does not hold.
 ///
-/// Issuer, subject, common name and SAN are all text lifted from a public CT
+/// Issuer, subject, common name and SAN are text lifted from a public CT
 /// log — anyone who can get a certificate logged chooses them. Excel and
-/// LibreOffice evaluate a cell beginning `=`, `+`, `-`, `@`, tab or carriage
-/// return, so a prefixed apostrophe makes them literal.
+/// LibreOffice evaluate a cell beginning `=`, `+`, `-`, `@`, tab or CR, so a
+/// prefixed apostrophe makes them literal.
 ///
-/// `-` is in that set, and it is the character a payload opens with precisely
-/// to slip past a filter covering only `=`/`+`/`@`. It also leads every
-/// negative `days_left`, the one column a script is most likely to read as a
-/// number. The invariant that matters is narrower than dropping `-` from the
-/// set: *a `-`-led field that parses as a finite number is left alone*. Test
-/// that directly: `-30` is left alone while `-2+3+cmd|' /C calc'!A0` is
-/// neutralised.
+/// `-` is in that set and is what a payload opens with to slip past a
+/// `=`/`+`/`@` filter — but it also leads every negative `days_left`. The
+/// invariant is narrower than dropping `-`: *a `-`-led field that parses as a
+/// finite number is left alone* — `-30` passes, `-2+3+cmd|' /C calc'!A0` is
+/// neutralised. Finite, because `f64::from_str` also accepts `inf`/`nan` and
+/// rounds `1e999` to infinity, none of which any column emits, and a
+/// spreadsheet evaluates `-inf` as a formula (`#NAME?`).
 ///
-/// Finite, because `f64::from_str` is wider than "a number this tool writes":
-/// it accepts `inf`, `infinity` and `nan` in any case, and rounds an
-/// overflowing exponent such as `1e999` to infinity. None of those is a value
-/// any column here emits, and a spreadsheet evaluates `-inf` as a formula —
-/// `#NAME?` in the cell rather than the text the log holds — so they stay
-/// quoted like any other `-`-led text.
+/// The exemption is for `-` alone: the numeric columns here can never emit a
+/// leading `+`, so `+1` is CT-log text and stays quoted.
 ///
-/// The exemption is for `-` alone, not for every leader that happens to parse.
-/// `id`, `issuer_ca_id` and `days_left` are the only numeric columns and none
-/// of them can emit a leading `+`, so a field arriving as `+1` is CT-log text
-/// rather than a number of ours, and stays quoted as it always has.
-///
-/// CSV gets [`bidi_safe`] as well. It is the machine format, but it is also the
-/// one people open in a spreadsheet — and a spreadsheet implements the Unicode
-/// bidirectional algorithm, so the display spoofing [`display_safe`] prevents
-/// in the table is reachable here too. Only the overrides are escaped, never
-/// letters: real Arabic or Hebrew in a subject DN reorders correctly from its
-/// own character properties and needs none of them.
+/// CSV gets [`bidi_safe`] as well — it is the format people open in a
+/// spreadsheet, which implements the Unicode bidirectional algorithm. Only
+/// overrides are escaped, never letters: real Arabic or Hebrew reorders
+/// correctly from its own character properties.
 pub(super) fn csv_safe(value: &str) -> Cow<'_, str> {
     let value = bidi_safe(value);
     let leads_a_formula = match value.chars().next() {
@@ -85,17 +74,12 @@ fn bidi_safe(value: &str) -> Cow<'_, str> {
 /// Characters that reorder the text around them while occupying no width.
 ///
 /// `char::is_control()` is Cc only, so these took the borrowed fast path and
-/// reached comfy-table verbatim — and comfy-table never appends a terminating
-/// PDF or PDI. Under the Unicode bidi algorithm, which ICU, VTE, iTerm2 3.5+,
-/// browsers and spreadsheets all implement, one U+202E inside a certificate
-/// identity renders the rest of the row reversed: the cell displays a hostname
-/// it does not contain and the row's closing border moves. Every column this
-/// reaches — Matched Identities, Common Name, Issuer, Subject, SANs — is text
-/// an attacker chooses and gets into a public CT log, the same threat model
-/// `csv_safe` above is written against.
-///
-/// Column alignment survives (these are zero-width) and the effect is bounded
-/// to one rendered line, so this is display spoofing rather than corruption.
+/// reached comfy-table verbatim — which never appends a terminating PDF or
+/// PDI. Under the Unicode bidi algorithm (ICU, VTE, iTerm2 3.5+, browsers,
+/// spreadsheets), one U+202E renders the rest of the row reversed: the cell
+/// displays a hostname it does not contain. Display spoofing rather than
+/// corruption — these are zero-width and bounded to one line — on the same
+/// attacker-chosen-text threat model as `csv_safe`.
 const BIDI_CONTROLS: &[char] = &[
     '\u{061c}', // ARABIC LETTER MARK
     '\u{200e}', // LEFT-TO-RIGHT MARK
@@ -134,20 +118,17 @@ fn escaped(c: char) -> String {
 /// Replace control characters that a terminal would act on rather than print.
 ///
 /// comfy-table measures a cell in bytes it believes are printable, so an ANSI
-/// escape inside a certificate identity is counted as width and then split
-/// mid-sequence by wrapping: the reset lands on a different line, the row is
-/// drawn narrower than its own borders, and the colour leaks into the rest of
-/// the session. A carriage return is worse — it returns the cursor to column 0
-/// and overwrites the line just drawn.
+/// escape in a certificate identity counts as width and gets split mid-sequence
+/// by wrapping: the reset lands on another line and the colour leaks into the
+/// session. A CR is worse — it overwrites the line just drawn.
 ///
 /// U+000A is left alone: comfy-table wraps on it correctly, and it is the one
 /// control character that means something here.
 ///
-/// This applies only to the two table paths. `serde_json` escapes C0, `"` and
-/// `\` — not DEL or C1, which therefore survive `--json` raw, deliberately:
-/// JSON is a machine format whose consumer decodes escapes anyway, and running
-/// this function over it would emit Rust-syntax `\u{009b}` whose backslash
-/// serde would escape a second time, corrupting a documented contract.
+/// Table paths only. `serde_json` escapes C0, `"` and `\` but not DEL or C1,
+/// which survive `--json` raw deliberately: JSON consumers decode escapes
+/// anyway, and running this over it would emit `\u{009b}` whose backslash
+/// serde escapes a second time, corrupting a documented contract.
 fn display_safe(value: &str) -> Cow<'_, str> {
     if !value.chars().any(needs_escaping) {
         return Cow::Borrowed(value);

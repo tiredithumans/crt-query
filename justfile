@@ -1,10 +1,9 @@
 # crt-query task runner. `just` with no arguments lists every recipe.
 #
-# The point of this file is that CI and a contributor's laptop run the SAME
-# commands: every recipe below that CI runs, it runs verbatim. The reverse does
-# not hold — `actionlint` and CodeQL's Analyze are required checks with no local
-# counterpart — so `just verify-full` passing is strong evidence rather than a
-# guarantee. See the note above `verify-full` for the current list.
+# CI and a contributor's laptop run the SAME commands: every recipe CI runs,
+# it runs verbatim. The reverse does not hold — `actionlint` and CodeQL's
+# Analyze have no local counterpart — so `just verify-full` is strong evidence
+# rather than a guarantee (current list in the note above `verify-full`).
 
 default:
     @just --list
@@ -19,13 +18,12 @@ build:
 build-release:
     cargo build --locked --release
 
-# The release ships statically linked musl archives beside the glibc ones, and
-# without this the tag push would be the first time anything compiled for a
-# musl target: the same trap `build-release` exists to close for the release
-# profile. Builds for this machine's own CPU, since the host's cc drives the
-# link and cannot link for another architecture. No musl-tools needed: rustc
-# carries musl's CRT objects and libc.a for the target itself, and nothing in
-# the dependency tree compiles C on Linux. Linux-only, so absent elsewhere.
+# The release ships static musl archives; without this the tag push would be
+# their first compile — the same trap `build-release` exists to close for the
+# release profile. Builds for this machine's own CPU: the host's cc drives the
+# link and cannot link for another architecture. No musl-tools needed — rustc
+# carries musl's CRT objects and libc.a, and nothing in the tree compiles C on
+# Linux. Linux-only, so absent elsewhere.
 # Static musl release build; the binary lands in target/<cpu>-unknown-linux-musl/release/crt-query.
 [linux]
 build-musl:
@@ -55,13 +53,11 @@ lint:
 test:
     cargo test --locked
 
-# Took the place of a `build` gate that only repeated `test`, whose integration
-# tests already build the binary into target/debug (see the Docs step in
-# ci.yml). The doc comments here carry the history behind the code, and an
-# intra-doc link to an item that was renamed or is private is a reference
-# nobody can follow; nothing checked for one until this. --document-private-items
-# because this is a binary crate: almost nothing in it is public, so without the
-# flag rustdoc would skip nearly every comment worth checking.
+# Replaced a `build` gate that only repeated `test` (whose integration tests
+# build the binary anyway — see the Docs step in ci.yml). A broken intra-doc
+# link is a reference nobody can follow, and nothing checked for one until
+# this. --document-private-items because this is a binary crate: almost nothing
+# in it is public, so without the flag rustdoc skips nearly every comment.
 # Docs gate: rustdoc with every warning, broken intra-doc links included, an error.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
@@ -127,13 +123,11 @@ verify: fmt-check lint test msrv lint-scripts doc
     @echo "verify OK — NOT run (needs network): audit, deny."
     @echo "  just verify-full adds the dependency gates"
 
-# Two required checks have no local counterpart and are not covered here:
-# `actionlint`, which CI installs from a pinned tarball rather than a recipe,
-# and CodeQL's Analyze, which only runs on GitHub. `build-release` and
-# `build-musl` are CI steps too — left out for the same reason `audit` and
-# `deny` were until now, that they cost minutes for a profile nothing else here
-# exercises. Run them by hand when touching the release profile or the release
-# targets.
+# Not covered here: `actionlint` (CI installs it from a pinned tarball, not a
+# recipe) and CodeQL's Analyze (GitHub only) — both required checks with no
+# local counterpart. `build-release` and `build-musl` are CI steps too, left
+# out for costing minutes on a profile nothing else here exercises; run them
+# by hand when touching the release profile or the release targets.
 #
 # (`just --list` shows only the comment line directly above a recipe, which is
 # why the summary sits last rather than first.)

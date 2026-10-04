@@ -1,11 +1,9 @@
 name: CI
 
-# Every `uses:` in this repo is pinned to a full commit SHA with the human-
-# readable version in a trailing comment. A tag is a movable pointer: whoever
-# controls the action's repo can repoint `v4` at new code, and a compromised
-# action runs with this workflow's token. Dependabot (see dependabot.yml)
-# advances both the SHA and the comment, so the pins stay fresh without ever
-# being trusted by name.
+# Every `uses:` is pinned to a full commit SHA with the readable version in a
+# trailing comment: a tag is a movable pointer, and a compromised action runs
+# with this workflow's token. Dependabot advances both SHA and comment (see
+# dependabot.yml), so the pins stay fresh without ever being trusted by name.
 
 on:
   push:
@@ -16,23 +14,21 @@ on:
   # PR with cancelled checks and no other way to retry them.
   workflow_dispatch:
   schedule:
-    # Weekly RustSec refresh, so an advisory filed after merge still reaches us.
-    # The `scripts` and `actionlint` jobs opt out of this tick (see their `if:`
-    # conditions); the rest run, which is free and occasionally catches a
-    # toolchain or dependency change that nothing in the repo triggered.
+    # Weekly RustSec refresh, so an advisory filed after merge still reaches
+    # us. The `scripts` and `actionlint` jobs opt out (see their `if:`); the
+    # rest run free and occasionally catch a toolchain or dependency change
+    # that nothing in the repo triggered.
     - cron: "0 6 * * 1"
 
-# A new push to a pull request supersedes its in-flight run: nobody will merge
-# the older head, so its result is worth nothing. A push to main is different.
-# Every merge is a commit that stays in the history, and cancelling its run
-# when a second merge landed a minute later left the first with no completed
-# CI record at all — no way to tell afterwards whether it was ever green.
-#
-# So only pull_request runs cancel, and every other run gets a group of its
-# own. Turning cancel-in-progress off alone would not be enough: a group holds
-# one running and one pending run, and GitHub cancels the pending one when a
-# third arrives, so three quick merges would still lose the middle one's run.
-# Nothing here deploys, so there is nothing for runs on main to serialise.
+# A push to a pull request supersedes its in-flight run: nobody merges the
+# older head, so those cancel. A push to main is a commit that stays in the
+# history, and cancelling its run left the first merge with no completed CI
+# record at all — no way to tell afterwards whether it was ever green. So
+# every other run gets a group of its own. Turning cancel-in-progress off
+# alone would not be enough: a group holds one running and one pending run,
+# and GitHub cancels the pending one when a third arrives, so three quick
+# merges would still lose the middle one's run. Nothing here deploys, so
+# main runs have nothing to serialise.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -73,12 +69,11 @@ jobs:
       # CI must never add load to it.
       - name: Tests
         run: just test
-      # There used to be a `just build` here, which only repeated work: the
-      # integration tests build the debug binary into target/debug themselves
-      # (they locate it through CARGO_BIN_EXE), so the step compiled nothing
-      # new. Rustdoc, on the other hand, had no gate, and a broken intra-doc
-      # link is a doc comment pointing at something that is not there. Run on
-      # every leg because some items exist only under a `#[cfg]` for one OS.
+      # The old `just build` step compiled nothing new: the integration tests
+      # build the debug binary themselves via CARGO_BIN_EXE. Rustdoc had no
+      # gate, and a broken intra-doc link is a comment pointing at something
+      # that is not there. Run on every leg: some items exist only under a
+      # `#[cfg]` for one OS.
       - name: Docs
         run: just doc
 
@@ -98,12 +93,11 @@ jobs:
         if: runner.os == 'Linux'
         run: just build-musl
 
-      # install.ps1 confirms a good install by running the binary it just
-      # copied. `lint-scripts` only parses that file, so a runtime fault in the
-      # check itself passes every gate and then breaks every Windows install --
-      # which is exactly what happened. Run the real shape against the debug
-      # binary the Tests step built into target/debug for the integration
-      # tests; keep it in lockstep with the block in install.ps1.
+      # install.ps1 confirms a good install by running the binary it copied,
+      # and `lint-scripts` only parses that file — a runtime fault in that
+      # check passed every gate and broke every Windows install, which is
+      # what happened. Run the real shape against the debug binary the Tests
+      # step built; keep it in lockstep with the block in install.ps1.
       - name: install.ps1 verification shape runs clean
         if: runner.os == 'Windows'
         shell: pwsh
@@ -162,17 +156,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Workflow-file syntax gate. An unparseable workflow produces 0-second
-      # "workflow file issue" runs and no other signal; this turns that into a
-      # failing check. Pinned by version + checksum — there is no action to SHA-
-      # pin here, so the tarball is verified instead.
+      # Workflow-file syntax gate: an unparseable workflow gives 0-second
+      # "workflow file issue" runs and no other signal; this turns that into
+      # a failing check. Pinned by version + checksum — there is no action to
+      # SHA-pin here, so the tarball is verified instead.
       #
-      # Not via taiki-e/install-action, which is used for `just` above and would
-      # verify the checksum itself: its manifest does not carry actionlint, and
-      # the cargo-binstall fallback cannot help because actionlint is a Go
-      # program with no crates.io entry. Tried, and it fails with
-      # "install-action does not support actionlint@1.7.12". Bump the version
-      # and the SHA-256 together.
+      # Not via taiki-e/install-action: its manifest does not carry actionlint,
+      # and the cargo-binstall fallback cannot help (a Go program with no
+      # crates.io entry — tried, it fails with "install-action does not
+      # support actionlint@1.7.12"). Bump the version and the SHA-256 together.
       - name: actionlint
         run: |
           curl -sSfL -o actionlint.tar.gz \

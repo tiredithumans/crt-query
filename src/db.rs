@@ -14,11 +14,10 @@ use crate::notice::notice;
 
 /// How many times a connection is dialled before the run gives up.
 ///
-/// Five rather than three because the wait between them is now short: the
-/// failure this budget exists for is pgbouncer refusing a client slot
-/// (`max_client_conn`), which it does instantly and recovers from in well under
-/// a second. Under the old flat two-second delay the same wall time bought two
-/// extra chances; it now buys four.
+/// Five rather than three: the failure this budget exists for is pgbouncer
+/// refusing a client slot (`max_client_conn`), which it does instantly and
+/// recovers from in under a second, so short waits buy more attempts per
+/// second than the old flat two-second delay.
 const CONNECT_ATTEMPTS: u32 = 5;
 
 /// The wait after the first failed attempt, doubling from there.
@@ -30,32 +29,22 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Ceiling on the whole connect phase — every attempt and every wait.
 ///
-/// The attempt count alone does not bound the wall time: an attempt that stalls
-/// costs `CONNECT_TIMEOUT`, so five of them would be over a minute of silence
-/// before the error appears. Retrying stops once this is spent, which caps the
-/// phase at this plus the attempt already in flight — 45s.
-///
-/// That total is the number to keep an eye on rather than this constant. A
-/// failed attempt is no longer announced as it happens, so the whole phase is
-/// silent, and an unreachable crt.sh is indistinguishable from a hung terminal
-/// until it ends. It is deliberately under what the old three-attempt,
-/// two-second-delay schedule could spend (~49s): quiet has to buy a wait that
-/// is shorter than the one it replaced, not a longer one.
+/// Attempt count alone doesn't bound wall time: a stalled attempt costs
+/// `CONNECT_TIMEOUT`, so five would be over a minute of silence. Retrying
+/// stops once this is spent, capping the phase at this plus one in-flight
+/// attempt — 45s, deliberately under the ~49s the old narrated schedule spent.
+/// The phase is silent now, so it must stay shorter than what it replaced.
 const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// Ceiling on a single statement, handshake to last row.
 ///
-/// `Config::connect_timeout` covers only `TcpStream::connect` — not the
-/// startup and authentication exchange, and not the query itself. A server
-/// that accepts the socket and then stops answering leaves the process silent
-/// until the two-hour keepalive default notices, which for a scheduled
-/// `expiring --csv` means a wedged slot rather than a fast failure into the
-/// next run.
+/// `Config::connect_timeout` covers only `TcpStream::connect` — not startup,
+/// auth, or the query. Without this, a server that accepts the socket then
+/// goes silent wedges a scheduled run until the two-hour keepalive notices.
 ///
-/// Set well above crt.sh's own statement timeout (~120s) on purpose: the
-/// server's `QUERY_CANCELED` names the real problem and suggests a narrower
-/// search, so it should be what fires in the ordinary too-broad-query case.
-/// This bound is for the case where nothing comes back at all.
+/// Set above crt.sh's own ~120s statement timeout on purpose: the server's
+/// `QUERY_CANCELED` names the real problem, so it should fire in the ordinary
+/// too-broad-query case. This bound is for when nothing comes back at all.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Ceiling on one connection attempt, including the name resolution and
@@ -64,22 +53,18 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What `tokio-postgres` applies to a single TCP connect.
 ///
-/// Named rather than left inline because it is the one bound in this file that
-/// is not the whole story, and the ordering against `CONNECT_TIMEOUT` reads
-/// like a guarantee it does not give: the driver applies this *per resolved
-/// address*, inside a loop over hosts and another over the addresses each host
-/// resolves to, and `lookup_host` is not covered at all. So an attempt against
-/// a multi-address host costs up to 10s x N, which is why `CONNECT_TIMEOUT`
-/// wraps the whole thing rather than trusting this to bound it.
+/// Named rather than inline because it is not the whole story: the driver
+/// applies it *per resolved address*, and `lookup_host` is uncovered, so an
+/// attempt against a multi-address host costs up to 10s x N. That is why
+/// `CONNECT_TIMEOUT` wraps the whole attempt rather than trusting this.
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A connected client plus whatever killed its connection task, if anything.
 pub struct Db {
     client: Client,
     /// Set by the spawned connection task when the socket dies. The task no
-    /// longer prints it itself: an orphaned line can interleave with table
-    /// output or trail a run that otherwise looked successful. Instead the
-    /// query path consults it, so the failure is reported once, in context.
+    /// longer prints it: an orphaned line can interleave with table output.
+    /// The query path consults it so the failure is reported once, in context.
     conn_err: Arc<OnceLock<String>>,
     /// Host and port for user-facing messages, never the raw `--db-url`.
     target: String,
@@ -114,12 +99,10 @@ impl Db {
 
     /// Announce a statement on stderr before it is sent.
     ///
-    /// The guest database is intermittently slow, so without this a query
-    /// that takes several seconds is indistinguishable from a hang — and
-    /// `expiring` over several domains sends one statement per domain, where
-    /// silence hides how far along it is. Gated on stderr being a terminal so
-    /// scheduled runs keep clean logs, and on stderr rather than stdout so it
-    /// never lands in a piped table or JSON document.
+    /// The guest database is intermittently slow, so without this a slow query
+    /// is indistinguishable from a hang. Gated on stderr being a terminal so
+    /// scheduled runs keep clean logs, and on stderr so it never lands in a
+    /// piped table or JSON document.
     fn hint(&self, subject: &str) {
         if std::io::stderr().is_terminal() {
             notice!("querying {} for {subject}…", self.target);
@@ -140,16 +123,13 @@ impl Db {
 }
 
 /// Translate a query failure into something actionable, or `None` to let the
-/// raw error stand.
+/// raw error stand — an unmapped SQLSTATE is better read raw than wrapped in a
+/// guess.
 ///
 /// Split from [`Db::explain`] so it can be tested: `tokio_postgres::Error`
-/// exposes no public constructor carrying a SQLSTATE, so every arm below was
-/// reachable only from a live server. Returning `None` rather than a fallback
-/// string is deliberate — an unmapped SQLSTATE is better read raw than
-/// wrapped in a guess.
+/// exposes no public constructor carrying a SQLSTATE.
 ///
-/// A SQLSTATE the server actually sent is authoritative and more specific than
-/// anything the connection task can say, so it is checked first; the
+/// A SQLSTATE the server sent is authoritative and checked first; the
 /// dead-connection cause explains the no-SQLSTATE case, where the server never
 /// answered at all.
 fn explain_context(
@@ -239,33 +219,23 @@ fn target(config: &Config) -> String {
 
 /// Host, port and database: what a cache entry is keyed on.
 ///
-/// Kept apart from [`target`] because the two answer different questions.
-/// `target` names a server for a person reading an error, and the database
-/// name is noise there. The cache has to name the database the rows came
-/// from, and the cache key used to be `target` alone, so `--dbname` against
-/// one host read entries another database had written. No private mirror is
-/// needed for that to bite: two databases behind one server are enough.
+/// Kept apart from [`target`] because they answer different questions: the
+/// cache must name the database the rows came from, and the key used to be
+/// `target` alone, so `--dbname` against one host read entries another
+/// database had written.
 ///
 /// Built from the parsed config, like `target`, so a password in a `db_url`
-/// never reaches it. That matters here as much as on stderr: the identity is
-/// written in full into every cache entry, and the cache would otherwise hold
-/// a credential in a file nobody thinks of as holding one.
+/// never reaches it — the identity is written into every cache entry, which
+/// would otherwise hold a credential in a file nobody thinks of as holding one.
 ///
-/// A `db_url` that names no database, such as `postgresql://me@db.internal/`,
-/// connects to the database PostgreSQL defaults to, which is the one named
-/// after the user. The identity says so by using the user name, which makes
-/// `postgresql://me@db.internal/` and `postgresql://me@db.internal/me` share
-/// entries, correctly, because they reach the same database. With no user
-/// either, tokio-postgres falls back to the operating-system account running
-/// the process (`whoami::username`), and the database follows it, so the
-/// identity asks the same function. It used to leave the name empty on the
-/// grounds that the account is fixed for a per-user cache directory, which is
-/// not so once a directory is shared: `sudo` keeping `HOME`, or an
-/// `XDG_CACHE_HOME` pointed at a shared folder, has two accounts reaching two
-/// databases through one cache. Only if the account cannot be read at all is
-/// the name left empty; tokio-postgres then fails to connect, so nothing it
-/// answered can be stored under that key. PostgreSQL has no database with an
-/// empty name, so `host:port/` is never mistaken for one that was named.
+/// A `db_url` naming no database connects to the one named after the user, so
+/// the identity says so by using the user name: `postgresql://me@db.internal/`
+/// and `.../me` share entries, correctly. With no user either, it falls back
+/// to the operating-system account, as tokio-postgres does; that matters once
+/// a cache directory is shared (`sudo` keeping `HOME`, a shared
+/// `XDG_CACHE_HOME`), where two accounts reach two databases through one
+/// cache. Only an unreadable account gets the empty name, under which nothing
+/// can be stored since the connection itself fails.
 fn cache_identity(config: &Config) -> String {
     cache_identity_with(config, || whoami::username().ok())
 }
@@ -296,38 +266,28 @@ fn chain(err: &tokio_postgres::Error) -> String {
 
 /// Whether a failed connection attempt is worth retrying.
 ///
-/// Retrying is for load and transport: the guest database drops connections
-/// when busy, and that is what `CONNECT_ATTEMPTS` exists for. A rejected
-/// password or a database that does not exist will be rejected the same way
-/// five times, so retrying only spends the budget and delays the error the
-/// caller has to read. That delay is the whole cost now that the attempts are
-/// silent; it used to be the delay plus two misleading "retrying..." lines.
+/// Retrying is for load and transport. A rejected password or missing
+/// database will be rejected identically five times, so retrying only delays
+/// the error the caller has to read.
 fn worth_retrying(err: &tokio_postgres::Error) -> bool {
     worth_retrying_parts(err.code(), &err.to_string())
 }
 
-/// The decision, split from the `tokio_postgres::Error` that carries it.
-///
-/// `tokio_postgres::Error` has no public constructor that carries a SQLSTATE,
-/// so a test cannot build the input this rule consumes. Taking the two fields
-/// the rule actually reads makes it reachable — and the old test could only
-/// assert that `INVALID_PASSWORD.code()` starts with "28", a property of the
-/// PostgreSQL spec rather than of anything decided here.
+/// The decision, split from the `tokio_postgres::Error` that carries it so
+/// tests can reach it: the error type has no public constructor carrying a
+/// SQLSTATE, and the old test could only assert a property of the PostgreSQL
+/// spec, not of this rule.
 fn worth_retrying_parts(code: Option<&SqlState>, rendered: &str) -> bool {
     match code {
         // Class 28 — invalid authorization specification.
         Some(code) if code.code().starts_with("28") => false,
         Some(&SqlState::INVALID_CATALOG_NAME) => false,
         Some(_) => true,
-        // No SQLSTATE means the server never answered — usually load, which is
-        // what the retries are for. But a connection setting that is wrong on
-        // this side never reaches a server at all, and is decided identically
-        // every time: `postgresql:///certwatch` with no host, mismatched
-        // host/port lists, a missing password. tokio-postgres gives those no
-        // code either, so the rendered text is the only thing separating them,
-        // and without this they burned the full retry budget on a verdict that
-        // was in from the first attempt — exactly what this function's doc
-        // comment above says it exists to prevent.
+        // No SQLSTATE usually means load, which is what the retries are for.
+        // But a wrong connection setting on this side never reaches a server,
+        // is decided identically every time, and carries no code either —
+        // without this it would burn the full retry budget on a foregone
+        // verdict. The rendered text is the only thing separating the two.
         None => !is_client_config_error(rendered),
     }
 }
@@ -350,16 +310,13 @@ enum Ending {
 
 /// Closing context for a run of failed connection attempts.
 ///
-/// The overload line is for the case it names — attempts spent against the
-/// shared guest database — and for nothing else. It used to be attached
-/// unconditionally, including on the `Fatal` break, so a rejected password
-/// against a host the caller chose themselves was answered with "the crt.sh
-/// guest database is shared and may be overloaded": advice they cannot act on,
-/// printed in front of the SQLSTATE that named the real problem.
+/// The overload line is only for the shared guest database. It used to be
+/// attached unconditionally, so a rejected password on a user-chosen host was
+/// answered with advice they couldn't act on, printed over the SQLSTATE that
+/// named the real problem.
 ///
-/// `attempts` is how many were actually made, not `CONNECT_ATTEMPTS`: the
-/// wall-clock budget can stop the loop early, and "after 5 attempts" would then
-/// be a count nobody made.
+/// `attempts` is how many were made, not `CONNECT_ATTEMPTS`: the budget can
+/// stop the loop early.
 fn connect_advice(target: &str, host: &str, ending: Ending, attempts: u32) -> String {
     let plural = if attempts == 1 { "attempt" } else { "attempts" };
     match ending {
@@ -378,11 +335,9 @@ fn connect_advice(target: &str, host: &str, ending: Ending, attempts: u32) -> St
 ///
 /// The per-attempt lines this used to print are gone, so the closing error is
 /// the only place a swallowed cause can still surface. anyhow prints the last
-/// error as the source, so repeating that one would say the same thing twice —
-/// and five identical `max_client_conn` rejections, the ordinary case, have
-/// nothing to add. Attempts that failed *differently* are a different problem
-/// from attempts that failed identically, and this is the surviving record
-/// of it.
+/// error as the source, so repeating it would say the same thing twice;
+/// identical failures (the ordinary case) add nothing. Attempts that failed
+/// *differently* are a different problem, and this is the surviving record.
 fn earlier_causes(causes: &[String]) -> Option<String> {
     let (last, earlier) = causes.split_last()?;
     let mut distinct: Vec<&str> = Vec::new();
@@ -402,10 +357,9 @@ fn earlier_causes(causes: &[String]) -> Option<String> {
 
 /// The wait after attempt `attempt`, before the next one.
 ///
-/// Doubling from [`FIRST_RETRY_DELAY`] to [`MAX_RETRY_DELAY`]: 250ms, 500ms,
-/// 1s, 2s. The old flat two seconds was tuned for nothing in particular and was
-/// mostly dead time — pgbouncer refuses a client slot instantly and frees one
-/// again in well under a second, so the first retry is worth taking almost
+/// Doubling from [`FIRST_RETRY_DELAY`] to [`MAX_RETRY_DELAY`]. The old flat
+/// two seconds was mostly dead time: pgbouncer refuses a client slot instantly
+/// and frees one in under a second, so the first retry is worth taking almost
 /// immediately.
 fn backoff(attempt: u32) -> Duration {
     // The shift is clamped before it is applied: `1u32 << 32` panics in debug
@@ -419,10 +373,9 @@ fn backoff(attempt: u32) -> Duration {
 
 /// Spread a delay out by up to a quarter, using the caller's `nanos`.
 ///
-/// Only ever adds: the backoff above is a floor, not a target. The README
-/// advertises `expiring --csv` on a schedule, and cron fires every client on
-/// the same second — without this they would all come back on the same
-/// 250ms/500ms/1s grid, retrying into each other's contention.
+/// Only ever adds: the backoff above is a floor, not a target. Cron fires
+/// every scheduled client on the same second; without this they would all
+/// retry on the same 250ms/500ms/1s grid, into each other's contention.
 fn jittered(base: Duration, nanos: u32) -> Duration {
     const NANOS_MAX: u64 = 999_999_999;
     let step = u64::from(nanos).min(NANOS_MAX);
@@ -435,8 +388,8 @@ fn jittered(base: Duration, nanos: u32) -> Duration {
 }
 
 /// A jitter source that costs no dependency: the sub-second part of the wall
-/// clock. `rand` would be a new crate in a tree audited on every PR, for four
-/// delays that need spreading rather than sampling.
+/// clock. `rand` would be a new crate for four delays that need spreading
+/// rather than sampling.
 fn jitter_nanos() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -461,11 +414,10 @@ async fn wait_before_retry(attempt: u32, started: Instant) -> bool {
 
 /// Dial the database, retrying transient failures.
 ///
-/// A failed attempt is not announced as it happens. The failure this retries
-/// most often is the shared guest database refusing a client slot, which the
-/// next attempt usually gets — and narrating it made a run that then succeeded
-/// read like a broken tool. The causes are collected instead, and reported
-/// together if no attempt ever connects.
+/// Failed attempts are not announced as they happen — the common case (a
+/// refused client slot) usually succeeds next try, and narrating it made a
+/// successful run look broken. Causes are collected and reported together if
+/// nothing connects.
 pub async fn connect(conn: &Conn) -> Result<Db> {
     let config = build_config(conn)?;
     let target = target(&config);
@@ -485,10 +437,9 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
         // completes the startup exchange would otherwise hang here forever.
         let Ok(attempted) = tokio::time::timeout(CONNECT_TIMEOUT, config.connect(NoTls)).await
         else {
-            // Not "connected, but the startup exchange never completed":
-            // this bound also spans name resolution and every TCP connect
-            // the host resolves to, so naming one phase asserts something
-            // the timeout cannot distinguish.
+            // Not "the startup exchange never completed": this bound also
+            // spans name resolution and every TCP connect, so naming one
+            // phase asserts what the timeout cannot distinguish.
             let stalled = anyhow::anyhow!(
                 "no response from {target} within {}s (name resolution, connect \
                      or the startup exchange did not complete)",
@@ -541,17 +492,13 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
 /// A connection that has not been dialled yet.
 ///
 /// [`connect`] is deliberate about spending a client slot on the shared guest
-/// database, and the cache makes that judgement sharper: a run whose every term
-/// is already cached has no reason to dial at all. Holding the resolved
-/// settings and connecting on first real need is what lets that run finish
-/// without touching crt.sh.
+/// database, and the cache sharpens that: a run whose terms are all cached has
+/// no reason to dial at all. Connecting on first real need lets such a run
+/// finish without touching crt.sh — the same reasoning `main.rs` applies by
+/// resolving the connection inside the subcommand arms.
 ///
-/// This is the same reasoning `main.rs` already applies by resolving the
-/// connection inside the subcommand arms, so `completions` and `check-update`
-/// never open one. A fully-cached query is that case.
-///
-/// `&mut` rather than interior mutability: everything here runs in sequence on
-/// a current-thread runtime, so the borrow checker is the whole synchronisation
+/// `&mut` rather than interior mutability: everything runs in sequence on a
+/// current-thread runtime, so the borrow checker is the whole synchronisation
 /// story and `tokio`'s `sync` feature stays out of the build.
 pub struct Source {
     conn: Conn,
@@ -565,10 +512,8 @@ impl Source {
 
     /// The connection, dialled on first call and reused after that.
     ///
-    /// A failed dial is not remembered: the error is returned and the next call
-    /// tries again. Retry policy belongs to [`connect`], which already spends a
-    /// bounded budget on it, and caching a failure here would silently shorten
-    /// that budget for the terms still to come.
+    /// A failed dial is not remembered: retry policy belongs to [`connect`],
+    /// and caching a failure here would shorten its budget for later terms.
     pub async fn db(&mut self) -> Result<&Db> {
         if self.db.is_none() {
             self.db = Some(connect(&self.conn).await?);
@@ -577,16 +522,12 @@ impl Source {
     }
 
     /// Host, port and database, for keying the cache, without dialling
-    /// anything. Never printed: user-facing messages name the server through
-    /// [`target`], which stays `host:port`.
+    /// anything. Never printed: user-facing messages use [`target`].
     ///
-    /// Every [`crate::cache::Key`] is built from this. There used to be a
-    /// `Source::target` returning `host:port` alone, and the keys were built
-    /// from that, so two databases on one host answered for each other. It
-    /// had no caller left outside the tests once the keys moved here, and it
-    /// is gone rather than kept as the tempting wrong answer. See
-    /// [`cache_identity`] for what stands in when a `db_url` names no
-    /// database.
+    /// Every [`crate::cache::Key`] is built from this. Keys used to be built
+    /// from a `host:port`-only `Source::target`, so two databases on one host
+    /// answered for each other; that method is gone rather than kept as the
+    /// tempting wrong answer. See [`cache_identity`] for the no-database case.
     pub fn cache_identity(&self) -> Result<String> {
         Ok(cache_identity(&build_config(&self.conn)?))
     }

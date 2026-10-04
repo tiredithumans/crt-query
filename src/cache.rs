@@ -1,48 +1,41 @@
 //! A local, on-disk cache of query results.
 //!
-//! crt.sh is a free public service on donated infrastructure that refuses
-//! connections and kills queries under load. The cheapest way to be a better
-//! citizen of it — and the only one available without a second data source —
-//! is to stop asking it the same question twice. A warm query is also the one
-//! kind of query that survives an outage entirely, because it never dials.
+//! crt.sh is a free public service that refuses connections and kills queries
+//! under load. The cheapest way to be a better citizen of it is to stop asking
+//! the same question twice — and a warm query never dials at all.
 //!
 //! # What is stored
 //!
-//! One file per (statement, term, bind parameters) triple: the same granularity
-//! [`crate::queries::fetch_by_term`] already loops at, so a multi-term run can
-//! hit on some terms and miss on others.
+//! One file per (statement, term, bind parameters) triple, the same
+//! granularity [`crate::queries::fetch_by_term`] loops at, so a multi-term run
+//! can hit on some terms and miss on others.
 //!
 //! # Lifetimes
 //!
-//! Two, told apart by filename so that pruning never has to open an entry:
+//! Two, told apart by filename so pruning never opens an entry:
 //!
-//! - **Short** (an hour by default, `cache_ttl_secs` in the config file):
-//!   `search` and `expiring` results, and a `cert` ID that was not found.
+//! - **Short** (an hour by default, `cache_ttl_secs`): `search`/`expiring`
+//!   results, and a `cert` ID that was not found.
 //! - **Long** ([`CERT_TTL`], thirty days, `cert-` prefix): a certificate that
-//!   was found. The record at a crt.sh ID cannot change, so there is nothing
-//!   for a short lifetime to protect.
+//!   was found — immutable at a given crt.sh ID.
 //!
-//! A miss is short-lived because it is not the same kind of fact. The guest
-//! database is a replica that runs behind the crt.sh website, so an ID logged
-//! minutes ago is a miss there for a while and then stops being one. v0.5.x
-//! kept the miss for the full thirty days, and a user who looked a fresh ID up
-//! too early was told "no such certificate", with exit 3, for a month after it
-//! arrived.
+//! A miss is short-lived because it is not the same kind of fact: the guest
+//! database is a lagging replica, so a freshly logged ID is a miss there for a
+//! while. v0.5.x cached misses for thirty days and answered "no such
+//! certificate" for a month after an ID arrived.
 //!
 //! # Staleness
 //!
-//! `SEARCH_SQL` and `EXPIRING_SQL` evaluate their validity windows server-side
-//! against `now()`, so a cached result set *is* the window as it stood when the
-//! entry was written, not as it stands on replay. The drift is bounded by the
-//! TTL and stays well below the day granularity of `--valid-since`, `--within`
-//! and `--since-expired`, which is why the default TTL is short. `--refresh`
-//! forces a re-fetch for callers who need the window recomputed now.
+//! `SEARCH_SQL` and `EXPIRING_SQL` evaluate validity windows server-side
+//! against `now()`, so a cached result is the window as it stood when written.
+//! The drift is bounded by the TTL, well under the day granularity of the
+//! window flags; `--refresh` forces a re-fetch.
 //!
 //! # Failure policy
 //!
-//! A cache is an optimisation, so nothing in this module returns an error that
-//! can fail a run. An unreadable entry, corrupt JSON, a stale format version or
-//! an unwritable directory all degrade to a miss or a skipped write.
+//! A cache is an optimisation: nothing here can fail a run. Unreadable
+//! entries, corrupt JSON, stale format versions, and unwritable directories
+//! all degrade to a miss or a skipped write.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -84,14 +77,10 @@ pub const CERT_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
     /// `host:port/dbname`, from [`crate::db::Source::cache_identity`].
-    /// Pointing `--host` elsewhere must not read entries written against
-    /// crt.sh, or a private mirror and the public database would answer for
-    /// each other, and the same goes for a second database behind one server.
-    ///
-    /// This field said `host:port/dbname` for a release while every caller
-    /// filled it with the user-facing `host:port`, so the database half of
-    /// that promise was never kept. The identity is a separate accessor now,
-    /// and the user-facing target is not something a key can be built from.
+    /// Pointing `--host` or `--dbname` elsewhere must not read entries written
+    /// against another database. This field said `host:port/dbname` for a
+    /// release while every caller passed `host:port`, so the database half of
+    /// the promise was never kept; the identity is a separate accessor now.
     pub target: String,
     /// The statement text itself. Editing `SEARCH_SQL` or `EXPIRING_SQL`
     /// invalidates every entry that came from the old one, which extends the
@@ -147,16 +136,14 @@ pub struct Cache {
     /// The short lifetime, even on the long-lived view.
     ///
     /// [`Cache::for_certs`] used to overwrite this with [`CERT_TTL`], so a
-    /// prune that ran after writing a certificate judged every unprefixed
-    /// entry by thirty days and left dead search results and `cert` misses in
-    /// place. Keeping the short lifetime here and deriving the long one from
-    /// `long_lived` lets every prune apply both correctly — see
-    /// [`Cache::lifetime`].
+    /// prune after a certificate write judged every unprefixed entry by thirty
+    /// days. Keeping the short lifetime here and deriving the long one from
+    /// `long_lived` lets every prune apply both correctly.
     ttl: Duration,
     /// Whether these entries are the long-lived kind: found certificates.
     ///
-    /// Tracked rather than inferred from `ttl`, which is configurable: pruning
-    /// has to tell the two apart by name, and comparing durations would make
+    /// Tracked rather than inferred from `ttl`, which is configurable:
+    /// pruning tells the two apart by name, and comparing durations would let
     /// `cache_ttl_secs = 2592001` silently reclassify every search result.
     long_lived: bool,
 }
@@ -290,13 +277,11 @@ impl Cache {
 
     /// Look up cached rows, replaying their server clock forward.
     ///
-    /// `server_now` rides on every row so that window membership and the
-    /// EXPIRED/days-left labels are decided by a single clock — see the comment
-    /// over `IDENTITY_QUERY`. Handing back an hour-old reading would reintroduce
-    /// precisely the skew it exists to prevent, with `--skip-expired` free to
-    /// print rows labelled EXPIRED. Advancing it by the entry's age keeps the
-    /// client-to-server correction, which is the part a local `Utc::now()`
-    /// cannot reproduce.
+    /// `server_now` rides on every row so window membership and the
+    /// EXPIRED/days-left labels are decided by a single clock (see
+    /// `IDENTITY_QUERY`). Handing back a stale reading would reintroduce the
+    /// skew it exists to prevent; advancing it by the entry's age keeps the
+    /// client-to-server correction, which a local `Utc::now()` cannot reproduce.
     pub fn get_rows(&self, key: &Key) -> Option<Vec<RawRow>> {
         let (mut rows, age) = self.get::<Vec<RawRow>>(key)?;
         let age = chrono::Duration::from_std(age).ok()?;
@@ -331,22 +316,16 @@ impl Cache {
     /// Drop entries that have outlived their lifetime.
     ///
     /// Opportunistic, on write: bounded work on a directory we are already
-    /// touching, and no background task to own. Files are judged by mtime
-    /// rather than by parsing each one, so a corrupt entry ages out too.
+    /// touching. Files are judged by mtime rather than parsed, so a corrupt
+    /// entry ages out too.
     ///
-    /// Each lifetime is applied only to the entries it governs, which is what
-    /// the `cert-` prefix is for. Pruning everything under the short one would
-    /// discard still-valid certificate records; pruning everything under the
-    /// long one would leave a month of dead search results on disk. Everything
-    /// unprefixed, `cert` misses included, is judged by the short lifetime
-    /// whichever view is doing the pruning.
+    /// Each lifetime is applied only to the entries it governs — that is what
+    /// the `cert-` prefix is for. Everything unprefixed, `cert` misses
+    /// included, is judged by the short lifetime whichever view prunes.
     ///
-    /// Scratch files go too, once they are older than the short lifetime and
-    /// [`SCRATCH_GRACE`]. A write that was interrupted between the scratch
-    /// file and the rename (a killed cron job, a full disk) leaves one behind,
-    /// and nothing else would ever remove it: `clear` counts entries, and a
-    /// scratch file is not one. Only names this module writes are touched —
-    /// see [`is_scratch`] — so anything else in the directory is left alone.
+    /// Scratch files go too once older than the short lifetime and
+    /// [`SCRATCH_GRACE`]; an interrupted write otherwise leaves one behind
+    /// forever. Only names this module writes are touched — see [`is_scratch`].
     fn prune(&self) {
         let Some(dir) = self.dir.as_deref() else {
             return;
@@ -396,16 +375,14 @@ impl Cache {
 
 /// FNV-1a over the key material, as 16 hex digits.
 ///
-/// Hand-rolled rather than `std::hash::DefaultHasher`, whose output is
-/// explicitly not guaranteed stable across Rust releases: a toolchain bump
-/// would silently orphan every user's cache. This is not a cryptographic hash
-/// and does not need to be — it names a file, and the full key inside the file
-/// is what decides a hit.
+/// Hand-rolled rather than `DefaultHasher`, whose output is not guaranteed
+/// stable across Rust releases — a toolchain bump would silently orphan every
+/// user's cache. Not a cryptographic hash: it names a file, and the full key
+/// inside the file decides a hit.
 ///
-/// `tests/cache.rs` carries its own copy of this function and seeds entries
-/// with it for the real binary to find. The copy is deliberate: a change here
-/// orphans every user's cache just as a toolchain bump would have, so it has
-/// to fail a test and be made on purpose, not slip through as a refactor.
+/// `tests/cache.rs` carries its own copy to seed entries for the real binary.
+/// The copy is deliberate: changing this orphans every user's cache, so it has
+/// to fail a test rather than slip through as a refactor.
 fn digest(key: &Key) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -465,29 +442,21 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 /// Where the entry at `path` is written before it is renamed into place:
 /// `[cert-]<digest>.<pid>-<nanos>.tmp`, beside it; see [`scratch_tag`].
 ///
-/// The process ID is there for the reason `output.rs`'s `scratch_beside` gives
-/// for CSV. The scratch file used to be `[cert-]<digest>.tmp`, shared by every
-/// process writing the same entry, and the README advertises `expiring --csv`
-/// on a schedule, where two runs finishing the same query together is
-/// ordinary. One run's rename could then move the other's half-written file
-/// into place, leaving a truncated entry for every later run to read as
-/// corrupt, and the other's rename failed on a file that had gone. With the
-/// process ID each run renames only what it wrote, and whichever renames last
-/// wins, which is no worse than one run replacing another's entry a moment
-/// later. One process never races itself: everything runs in sequence on a
-/// current-thread runtime.
+/// The scratch file used to be `[cert-]<digest>.tmp`, shared by every process
+/// writing the same entry — and with `expiring --csv` on a schedule, two runs
+/// finishing the same query together is ordinary: one run's rename could move
+/// another's half-written file into place. With a per-process tag each run
+/// renames only what it wrote, and last rename wins. One process never races
+/// itself: everything runs in sequence on a current-thread runtime.
 fn scratch_path(path: &Path) -> PathBuf {
     path.with_extension(format!("{}.tmp", scratch_tag()))
 }
 
 /// `<pid>-<nanoseconds>`: what makes one writer's scratch file its own.
 ///
-/// The process ID alone is not enough everywhere. Containers sharing a cache
-/// volume each run their entrypoint as PID 1, so two of them finishing the same
-/// query together would share `<digest>.1.tmp` and bring back the truncation
-/// the process ID was added to prevent. The wall clock's nanoseconds separate
-/// them; the process ID still separates two processes on one host that read
-/// the same clock tick.
+/// The PID alone is not enough: containers sharing a cache volume each run as
+/// PID 1, so the nanoseconds separate two writers on the same tick, and the
+/// PID still separates two processes on one host that read the same tick.
 pub(crate) fn scratch_tag() -> String {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -498,10 +467,9 @@ pub(crate) fn scratch_tag() -> String {
 /// The youngest a scratch file can be and still be pruned, whatever the short
 /// lifetime says.
 ///
-/// Scratch files are judged by the short lifetime, but `cache_ttl_secs` goes
-/// down to zero, and a zero lifetime would let one run's prune delete another
-/// run's scratch file between its write and its rename. No write this module
-/// makes takes more than a moment, so a scratch file this old was abandoned.
+/// `cache_ttl_secs` goes down to zero, and a zero lifetime would let one run's
+/// prune delete another's in-flight scratch file. No write here takes more
+/// than a moment, so anything older than this was abandoned.
 const SCRATCH_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// Whether `name` is a scratch file this module wrote: `[cert-]<digest>.tmp`
@@ -551,15 +519,13 @@ pub fn cache_dir() -> Option<PathBuf> {
 
 /// The directory the cache is looked up under.
 ///
-/// Absolute only, for the reason spelled out over `config::config_root`: a
-/// relative `$XDG_CACHE_HOME` or `$HOME` resolves against the process's current
-/// directory, so running inside a tree carrying `./.cache/crt-query` would read
-/// and write entries the caller never put there. Answering a query from a cache
-/// file that happened to be lying around in the working directory is a worse
-/// failure than missing.
+/// Absolute only, for the reason over `config::config_root`: a relative
+/// `$XDG_CACHE_HOME` or `$HOME` resolves against the current directory, so a
+/// tree carrying `./.cache/crt-query` would answer from entries the caller
+/// never wrote. Missing is the better failure.
 ///
-/// Taken as arguments rather than read here, so tests can reach the logic:
-/// `std::env::set_var` is `unsafe` under edition 2024.
+/// Taken as arguments so tests can reach the logic: `std::env::set_var` is
+/// `unsafe` under edition 2024.
 #[cfg(not(windows))]
 fn cache_root(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     // `is_absolute` subsumes the emptiness check: "" is not an absolute path.

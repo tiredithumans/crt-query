@@ -198,17 +198,15 @@ impl OutputRecord for CertDetail {
 
 /// Look one certificate up by its crt.sh ID.
 ///
-/// A certificate that was found is cached under a much longer TTL than
-/// `search` and `expiring`: the record at a given crt.sh ID is immutable, so
-/// the short TTL that exists to bound validity-window drift buys nothing here.
+/// A found certificate is cached under a much longer TTL: the record at a
+/// crt.sh ID is immutable, so the short TTL that bounds validity-window drift
+/// buys nothing here.
 ///
-/// A miss — no such ID — is cached too, so a typo'd ID in a loop is not
-/// re-asked every time, but only under the short TTL. The guest database is a
-/// replica that lags the crt.sh website, so an ID someone has just seen there
-/// is a miss here for a while and then is not. v0.5.x cached the miss for the
-/// full thirty days, and the lookup went on reporting "no such certificate"
-/// (exit 3) for a month after the certificate arrived. See [`recall`] and
-/// [`remember`] for which lifetime holds which answer.
+/// A miss is cached too — a typo'd ID in a loop must not re-ask every time —
+/// but only under the short TTL: the guest database lags the crt.sh website,
+/// so a fresh ID is a miss here for a while. v0.5.x cached the miss for the
+/// full thirty days and reported "no such certificate" (exit 3) for a month
+/// after the certificate arrived. See [`recall`] and [`remember`].
 pub async fn run_cert(
     source: &mut Source,
     cache: &Cache,
@@ -273,16 +271,14 @@ fn cert_key(identity: String, lookup: &CertRef) -> Key {
 /// certificate, `Some(None)` for a recent miss, and `None` when it has nothing
 /// usable and the database has to be asked.
 ///
-/// The long-lived view is read first, so a certificate that turns up after a
-/// miss was cached (because a `--refresh` run found it) wins over the miss
-/// still sitting in the short-lived view.
+/// The long-lived view is read first, so a certificate a `--refresh` run
+/// found wins over the miss still sitting in the short-lived view.
 ///
 /// Each view accepts only the answer it exists to hold. The long-lived entry
-/// is read as an `Option` purely so that a `null` there can be recognised and
-/// passed over: v0.5.x wrote its misses into that view, and honouring them
-/// would keep the month-long "no such certificate" alive for everyone who
-/// upgraded. The short-lived entry is likewise only ever a miss; nothing
-/// writes a certificate there, so one found there is not trusted either.
+/// is read as an `Option` so a `null` there can be passed over: v0.5.x wrote
+/// its misses there, and honouring them would keep the month-long "no such
+/// certificate" alive for everyone who upgraded. Nothing writes a certificate
+/// into the short-lived view, so one found there is not trusted either.
 fn recall(cache: &Cache, key: &Key) -> Option<Option<CertDetail>> {
     if let Some((Some(detail), _)) = cache.for_certs().get::<Option<CertDetail>>(key) {
         return Some(Some(detail));

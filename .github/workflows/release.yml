@@ -1,14 +1,14 @@
 name: Release
 
-# Triggered by pushing an annotated `vX.Y.Z` tag. Builds a binary for each
-# target, assembles SHA256SUMS, and publishes a DRAFT release. A human reviews
-# the draft and publishes it — that final step is what reaches users.
+# Triggered by pushing an annotated `vX.Y.Z` tag: builds each target,
+# assembles SHA256SUMS, and publishes a DRAFT release — a human publishes it,
+# the only step that reaches users.
 #
-# Publishing then fires `release: published`, which runs the `tap` job at the
-# bottom to sync the Homebrew formula. Two separate triggers on purpose: the
-# formula is generated from SHA256SUMS fetched over the PUBLIC download URL,
-# which serves nothing for a draft. A draft release fires no `release` event at
-# all, so the draft job cannot trigger the tap job.
+# Publishing fires `release: published`, which runs the `tap` job at the
+# bottom. Two separate triggers on purpose: the formula is generated from
+# SHA256SUMS fetched over the PUBLIC download URL, which serves nothing for a
+# draft — and a draft fires no `release` event at all, so the draft job cannot
+# trigger the tap job.
 #
 # Every `uses:` is pinned to a full commit SHA (see the note in ci.yml).
 
@@ -29,13 +29,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The oldest glibc a published -linux-gnu binary has to load on: RHEL/Rocky 9
+  # The oldest glibc a published -linux-gnu binary must load on: RHEL/Rocky 9
   # and Amazon Linux 2023 (2.34), Ubuntu 22.04 (2.35), Debian 12 (2.36). The
-  # two -linux-gnu rows below are pinned to the runner that produces this
-  # floor, and the `glibc floor` step in each of those builds fails the release
-  # if it ever rises. Below the floor, the static musl archives are the answer.
-  # README.md quotes this number, and install.sh uses it (GLIBC_FLOOR there) to
-  # send older hosts to the musl archive; keep all three in step.
+  # -linux-gnu rows are pinned to the runners that produce this floor, and
+  # each build's `glibc floor` step fails the release if it rises; below it,
+  # hosts get the static musl archives. README.md quotes this number and
+  # install.sh (GLIBC_FLOOR there) acts on it; keep all three in step.
   GLIBC_FLOOR: GLIBC_2.34
 
 jobs:
@@ -43,15 +42,16 @@ jobs:
   # here costs seconds; catching it after publish means a yanked release.
   guard:
     name: Guard
-    # The release-published and tap-only runs do no building; they start at the
-    # `tap` job. Skipping this skips `build` and `draft` with it, via `needs`.
+    # The release-published and tap-only runs do no building; they start at
+    # the `tap` job, and skipping this skips `build` and `draft` with it via
+    # `needs`.
     #
-    # Compared as a string against 'true' rather than written `!inputs.tap_only`:
-    # the `inputs` context is only populated on a manually triggered run, and on
-    # the tag push that actually cuts releases `github.event.inputs` is null,
-    # which compares unequal here and lets the build proceed. The string form
-    # also sidesteps the expression-language trap that makes the literal 'false'
-    # truthy — under `!`, an unticked checkbox would skip the whole release.
+    # Compared as a string against 'true' rather than `!inputs.tap_only`: the
+    # `inputs` context is only populated on a manual run, and on the tag push
+    # that cuts releases `github.event.inputs` is null, which compares unequal
+    # here and lets the build proceed. The string form also sidesteps the
+    # trap that makes the literal 'false' truthy — under `!`, an unticked
+    # checkbox would skip the whole release.
     if: github.event_name != 'release' && github.event.inputs.tap_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -89,11 +89,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Both glibc rows pin an explicit 22.04 runner rather than taking
-          # `ubuntu-latest`. A binary inherits the glibc floor of the machine
-          # that linked it, so `latest` silently raises it every time GitHub
-          # moves the alias — which is how v0.4.0 shipped binaries that could
-          # not start on Debian 12, RHEL 9 or Ubuntu 22.04 (see GLIBC_FLOOR).
+          # Both glibc rows pin an explicit 22.04 runner, not `ubuntu-latest`:
+          # a binary inherits the glibc floor of the machine that linked it,
+          # so `latest` silently raises it with every alias move — how v0.4.0
+          # shipped binaries that could not start on Debian 12, RHEL 9 or
+          # Ubuntu 22.04 (see GLIBC_FLOOR).
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
           # Native ARM64 runner, so no cross-compilation toolchain is needed.
@@ -101,18 +101,17 @@ jobs:
           # before this existed it resolved to an archive no release shipped.
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
-          # Statically linked musl builds, for the two kinds of Linux host the
-          # glibc rows cannot serve: musl distributions such as Alpine, where
-          # the glibc binary's PT_INTERP does not exist, and glibc older than
+          # Statically linked musl builds, for the two hosts the glibc rows
+          # cannot serve: musl distributions such as Alpine, where the glibc
+          # binary's PT_INTERP does not exist, and glibc older than
           # GLIBC_FLOOR, where it refuses to start. install.sh picks these for
-          # both. There is no musl-tools step because nothing needs one: rustc
-          # carries musl's CRT objects and libc.a for these targets and links
-          # them itself, with the runner's cc only driving the link, and no
-          # dependency compiles C on Linux (`cc` is in the tree for Haiku
-          # alone). A dependency that did would need musl-gcc, and ci.yml's
-          # `just build-musl` would fail on it before a tag ever did. The same
-          # pinned images as the glibc rows, for a toolchain that does not move
-          # under a release, not for a floor: a static binary has none.
+          # both. No musl-tools step: rustc carries musl's CRT objects and
+          # libc.a and links them itself, the runner's cc only drives the
+          # link, and no dependency compiles C on Linux (`cc` is in the tree
+          # for Haiku alone) — one that did would need musl-gcc, and ci.yml's
+          # `just build-musl` would fail on it before a tag ever did. Same
+          # pinned images as the glibc rows, for a toolchain that does not
+          # move under a release, not for a floor: a static binary has none.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
           - target: aarch64-unknown-linux-musl
@@ -123,11 +122,10 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          # Native ARM64, on GitHub's Windows ARM64 runner. Before this row,
-          # Windows on ARM got the x86-64 build and ran it under emulation.
-          # install.ps1 already asked for this target first and fell back to
-          # x86-64 only when a release lacked it, so it picks the native build
-          # up with no change beyond its comments.
+          # Native ARM64 on GitHub's Windows runner; before this row, Windows
+          # on ARM ran the emulated x86-64 build. install.ps1 already asked
+          # for this target first, so it picks the native build up with no
+          # change beyond its comments.
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
     steps:
@@ -144,23 +142,22 @@ jobs:
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
-      # Nothing else in this repo ever runs a released Linux binary, so the one
-      # property that decides whether it starts at all had no gate: v0.4.0
-      # shipped both Linux archives requiring a NON-weak GLIBC_2.39 verneed
-      # (from pidfd_spawnp/pidfd_getpid, which std's process-spawn path
-      # references and check-update reaches through `Command::new("curl")`).
-      # ld.so treats a missing non-weak version as fatal, so the binary died
-      # before main on every distribution below 2.39 — and install.sh had
-      # already overwritten the working copy by the time it found out.
+      # Nothing else here ever runs a released Linux binary, so the property
+      # that decides whether it starts at all had no gate: v0.4.0 shipped both
+      # Linux archives requiring a NON-weak GLIBC_2.39 verneed (from
+      # pidfd_spawnp/pidfd_getpid, reached through check-update's
+      # `Command::new("curl")`), which ld.so treats as fatal — the binary
+      # died before main below 2.39, and install.sh had already overwritten
+      # the working copy by the time it found out.
       #
       # Assert the floor rather than the runner label: pinning the image is
-      # what holds it today, but this is what says so out loud, and it fails
-      # the release instead of the user's install.
+      # what holds it today, this says so out loud, and it fails the release
+      # instead of the user's install.
       #
-      # Matched on the -linux-gnu suffix, not on "linux": a musl binary has no
-      # GLIBC_ verneeds at all, so the grep below finds nothing and, under
-      # pipefail, fails the step with a bare exit 1 and no annotation (tried
-      # against a local musl build). The musl rows get the step below instead.
+      # Matched on the -linux-gnu suffix, not "linux": a musl binary has no
+      # GLIBC_ verneeds at all, so the grep finds nothing and, under pipefail,
+      # fails the step with a bare exit 1 and no annotation (tried against a
+      # local musl build). The musl rows get the step below instead.
       - name: glibc floor
         if: endsWith(matrix.target, '-linux-gnu')
         shell: bash
@@ -179,14 +176,14 @@ jobs:
           echo "floor holds: highest required is $highest, at or below $GLIBC_FLOOR"
 
       # The musl archives exist for hosts where the glibc binary cannot start,
-      # so the one property they must have is needing nothing from the host:
-      # no program interpreter and no shared libraries. A musl binary that
-      # still named /lib/ld-musl-*.so.1 would start on Alpine and nowhere else,
-      # and install.sh would be sending the old-glibc hosts to an archive that
-      # fails on them exactly as the glibc one does. rustc links musl targets
-      # statically by default today; this is what fails the release if that
-      # default, or a flag somebody adds, ever changes it. Both rows run on a
-      # native runner, so the binary is also run once, the way install.sh will.
+      # so they must need nothing from the host: no program interpreter, no
+      # shared libraries. One that still named /lib/ld-musl-*.so.1 would start
+      # on Alpine and nowhere else — and install.sh would be sending the
+      # old-glibc hosts to an archive that fails on them exactly as the glibc
+      # one does. rustc links musl targets statically by default today; this
+      # is what fails the release if that default, or a flag somebody adds,
+      # changes it. Both rows run natively, so the binary is run once too, the
+      # way install.sh will.
       #
       # Checked by header rather than by `file`, whose wording differs between
       # versions ("static-pie linked" against "statically linked"). A static
@@ -230,20 +227,19 @@ jobs:
 
       # PowerShell and .NET only. This used to be bash and 7-Zip, which
       # windows-latest carries; windows-11-arm is a partner image maintained
-      # apart from GitHub's own, and while it lists both today, nothing obliges
-      # it to keep doing so. pwsh is what every Windows step here already
-      # relies on, and ZipFile ships inside it.
+      # apart from GitHub's own, and while it lists both today, nothing
+      # obliges it to keep doing so. pwsh is what every Windows step here
+      # already relies on, and ZipFile ships inside it.
       #
-      # ZipFile.CreateFromDirectory rather than Compress-Archive: .NET
-      # documents that it writes entry names with "/", the separator the zip
-      # format specifies, and includeBaseDirectory ($true below) keeps the
-      # layout install.ps1 extracts and then looks inside for — one top-level
-      # crt-query-<tag>-<target>/ holding crt-query.exe and the three
-      # documents. Compress-Archive documents the layout but not the
-      # separator, and a backslash one unpacks as flat, oddly named files
-      # anywhere but Windows. The layout is read back afterwards regardless,
-      # because a wrong one breaks every Windows install and nothing else
-      # here would notice.
+      # ZipFile.CreateFromDirectory rather than Compress-Archive: .NET writes
+      # entry names with the "/" the zip format specifies, and
+      # includeBaseDirectory ($true below) keeps the layout install.ps1
+      # extracts and then looks inside for — one top-level
+      # crt-query-<tag>-<target>/ holding the exe and the three documents.
+      # Compress-Archive documents the layout but not the separator, and a
+      # backslash one unpacks as flat, oddly named files anywhere but Windows.
+      # The layout is read back afterwards regardless: a wrong one breaks
+      # every Windows install and nothing else here would notice.
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -317,14 +313,13 @@ jobs:
           sha256sum ./* > SHA256SUMS
           cat SHA256SUMS
 
-      # SHA256SUMS proves the archives agree with each other; it is served from
-      # the same release, so it says nothing about where they came from. An
-      # attestation is signed by the workflow run itself, which is the one link
-      # a downloader cannot otherwise verify — and the install scripts replace
-      # the running binary after checking it against a SHA256SUMS fetched from
-      # that same release, which is exactly the trust the sentence above says
-      # proves nothing. So that link is worth having. (There is deliberately no
-      # self-update; see src/update.rs and README.md.) Verify with:
+      # SHA256SUMS proves the archives agree with each other but is served
+      # from the same release, so it says nothing about where they came from.
+      # The attestation is signed by the workflow run itself — the one link a
+      # downloader cannot otherwise verify, worth having because the install
+      # scripts replace a running binary after checking it against a
+      # SHA256SUMS fetched from that same release. (No self-update is
+      # deliberate; see src/update.rs and README.md.) Verify with:
       #   gh attestation verify <archive> --repo tiredithumans/crt-query
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -355,29 +350,26 @@ jobs:
           files: artifacts/*
           fail_on_unmatched_files: true
 
-  # Publishing a release does not by itself change what `brew install` serves:
-  # the formula lives in a separate tap repository, and copying it across was a
-  # manual step at the end of the release checklist. It was missed three times
-  # running — v0.4.1, v0.5.0 and v0.5.1 all shipped while the tap sat on
-  # v0.4.0 — so it is automated here rather than written down again.
+  # Publishing does not by itself change what `brew install` serves: the
+  # formula lives in a separate tap repo, and copying it across was a manual
+  # step at the end of the release checklist. It was missed three times —
+  # v0.4.1, v0.5.0 and v0.5.1 shipped while the tap sat on v0.4.0 — so it is
+  # automated here rather than written down again.
   #
-  # Runs on publish, never on the tag push: generate.sh fetches SHA256SUMS over
-  # the public download URL, and a draft serves nothing there.
+  # Runs on publish, never on the tag push: generate.sh fetches SHA256SUMS
+  # over the public download URL, and a draft serves nothing there.
   tap:
     name: Update Homebrew tap
     # A pre-release fires `published` too — `released` is the type that skips
     # them, and a pre-release published from a draft fires `published` either
     # way. The tap has no channels: one Formula/crt-query.rb is what every
-    # `brew upgrade` follows, so a soft-launched version would land on everyone.
+    # `brew upgrade` follows, so a soft-launched version would land on
+    # everyone. Every other install path ignores pre-releases for free via
+    # /releases/latest (both install scripts with no tag, and check-update);
+    # this is the one path that has to check the flag itself.
     #
-    # Every other install path already ignores pre-releases for free, by going
-    # through /releases/latest — install.sh and generate.sh when given no tag,
-    # and check-update (src/update.rs, which says so outright). This is the one
-    # path that has to check the flag itself. Named by file rather than by line:
-    # the line numbers this used to carry had drifted off their targets.
-    #
-    # Parenthesised because `&&` binds tighter than `||`: bare, the clause would
-    # attach to the tap_only branch and leave the release path unguarded.
+    # Parenthesised because `&&` binds tighter than `||`: bare, the clause
+    # attaches to the tap_only branch and leaves the release path unguarded.
     if: >-
       (github.event_name == 'release' && !github.event.release.prerelease)
       || github.event.inputs.tap_only == 'true'
@@ -407,10 +399,10 @@ jobs:
       # A manual re-sync passes no tag, and generate.sh then resolves
       # /releases/latest — which is what a re-sync is asking for anyway.
       #
-      # The formula is gitignored, not committed, so the checkout above holds
-      # no copy of it and every step below reads the file this one writes. A
-      # tracked copy held whatever was last committed by hand, since nothing
-      # pushes the result back here, and it duly went stale.
+      # The formula is gitignored, so the checkout above holds no copy and
+      # every step below reads the file this one writes. A tracked copy would
+      # hold whatever was last committed by hand — nothing pushes the result
+      # back here — and it duly went stale.
       - name: Regenerate the formula from the published release
         id: gen
         env:
@@ -418,15 +410,15 @@ jobs:
         run: |
           set -euo pipefail
           ./packaging/homebrew/generate.sh ${TAG:+"$TAG"}
-          # Read the tag back out of the generated file rather than trusting the
-          # event, so every assertion below is about what the formula says.
+          # Read the tag back out of the generated file rather than trusting
+          # the event, so every assertion below is about what the formula says.
           #
-          # `|| true` sits outside the substitution deliberately. grep exits 1
+          # `|| true` sits outside the substitution deliberately: grep exits 1
           # when it matches nothing, pipefail hands that status to the
-          # assignment, and `set -e` would then kill the step here — before the
-          # message explaining why. That made the branch below unreachable: the
-          # job died on a bare exit 1 with no annotation, on a release that is
-          # already public.
+          # assignment, and `set -e` would then kill the step here — before
+          # the message explaining why. That made the branch below
+          # unreachable: the job died on a bare exit 1 with no annotation, on
+          # a release that is already public.
           FORMULA_TAG=$(grep -m1 -oE 'releases/download/[^/"]+/' \
             packaging/homebrew/crt-query.rb | cut -d/ -f3) || true
           echo "formula points at ${FORMULA_TAG:-<nothing>}"
@@ -446,11 +438,10 @@ jobs:
           fi
           echo "tag=$FORMULA_TAG" >> "$GITHUB_OUTPUT"
 
-      # generate.sh copies the checksums out of SHA256SUMS, so this reads the
-      # same file back independently: a suffix-matching slip in its sum_for /
-      # archive_for that paired a hash with the wrong archive would survive
-      # generation and fail at `brew install`, which is the worst place to
-      # find out.
+      # generate.sh copies the checksums out of SHA256SUMS, so this reads that
+      # file back independently: a suffix-matching slip in sum_for /
+      # archive_for pairing a hash with the wrong archive would survive
+      # generation and fail at `brew install`, the worst place to find out.
       - name: Formula checksums match the published SHA256SUMS
         env:
           TAG: ${{ steps.gen.outputs.tag }}
@@ -491,12 +482,12 @@ jobs:
             echo "::error::checked $checked url/sha256 pairs, expected 4"; exit 1
           fi
 
-      # The property no other gate in this repo covers, and the one that breaks
-      # installs outright: Homebrew RUNS the binary it installs — once through
-      # generate_completions_from_executable at install time, and again in the
-      # `test do` block. A formula naming a subcommand the released binary does
-      # not carry aborts `brew install`. generate.sh says exactly this in its
-      # MIN_COMPLETIONS_VERSION comment; this is the check that enforces it.
+      # The property no other gate in this repo covers, and the one that
+      # breaks installs outright: Homebrew RUNS the installed binary — once
+      # through generate_completions_from_executable, again in `test do`. A
+      # formula naming a subcommand the released binary lacks aborts `brew
+      # install`; generate.sh says so in its MIN_COMPLETIONS_VERSION comment,
+      # this is the check that enforces it.
       - name: The released binary answers every call the formula makes
         env:
           TAG: ${{ steps.gen.outputs.tag }}
@@ -529,12 +520,11 @@ jobs:
           fi
 
       # Everything above checks what the formula POINTS AT. This checks the
-      # formula itself parses: generate.sh builds it by shell interpolation into
-      # a heredoc, so a stray quote in an interpolated value yields a file that
-      # is wrong in a way no checksum notices. `brew audit --strict --online` is
-      # the real gate and needs the formula inside a tapped tap, so it stays
-      # manual (see packaging/homebrew/README.md); a syntax check is the part
-      # that can run here, and it catches the failure mode generation can cause.
+      # formula parses: generate.sh builds it by shell interpolation into a
+      # heredoc, so a stray quote yields a file wrong in a way no checksum
+      # notices. `brew audit --strict --online` is the real gate and needs the
+      # formula inside a tapped tap, so that stays manual (see
+      # packaging/homebrew/README.md); a syntax check is the part here.
       - name: The formula is syntactically valid Ruby
         run: ruby -c packaging/homebrew/crt-query.rb
 

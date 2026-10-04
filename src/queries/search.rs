@@ -17,14 +17,13 @@ const IDENTITIES_COL: usize = 3;
 /// LIMIT window may be spent on; `0` disables the floor (`--all-history`).
 ///
 /// Without it the LIMIT takes an arbitrary slice of every certificate ever
-/// issued for the term, which in practice is the oldest rows — and the
-/// client-side sort below then presents that sample as a newest-first list.
+/// issued — in practice the oldest rows — and the client-side sort presents
+/// that sample as a newest-first list.
 ///
-/// `$3` is `--skip-expired`: a hard floor at the server's own clock, so the
-/// window holds only certificates that are valid right now. It is a separate
-/// predicate rather than a look-back of zero days because zero is already
-/// spoken for by `--all-history`, and it composes with `$2` — the stricter of
-/// the two decides, which is always this one when it is set.
+/// `$3` is `--skip-expired`: a hard floor at the server's clock, so the
+/// window holds only currently-valid certificates. A separate predicate
+/// rather than a zero-day look-back because zero means `--all-history`; it
+/// composes with `$2`, the stricter of the two deciding.
 static SEARCH_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{IDENTITY_QUERY}
@@ -161,16 +160,13 @@ pub async fn run_search(
 /// Turn the rows every statement returned into the finished, sorted list.
 ///
 /// Split out of `run_search` for the same reason as `assemble_expiring` in
-/// [`crate::queries::expiring`]: everything above it needs a database and
-/// nothing here does, so the newest-first ordering — which is the whole reason
-/// the client-side sort exists — had no seam a test could reach. Deleting the
-/// sort compiled clean and left the suite green.
+/// [`crate::queries::expiring`]: the code above needs a database and this
+/// does not, so the newest-first sort had no test seam — deleting it compiled
+/// clean and left the suite green.
 ///
-/// The function is named in code rather than linked because it is private to
-/// its module. Intra-doc links resolve with Rust's own visibility rules, so a
-/// link to it from here is unresolved even under `--document-private-items`,
-/// and that broke `cargo doc` under `-D warnings`. The module is public, so
-/// linking to it keeps the pointer without widening anything's visibility.
+/// `assemble_expiring` is named rather than linked: it is private to its
+/// module, and an intra-doc link would be unresolved even under
+/// `--document-private-items`, breaking `cargo doc` under `-D warnings`.
 ///
 /// Dedup runs over the merged rows, so a certificate matching two of the terms
 /// appears once, carrying both matched identities.
@@ -201,13 +197,10 @@ mod tests {
     /// The whole feature, through the function `main` actually calls.
     ///
     /// `a_fully_cached_run_never_dials` proves the mechanism inside
-    /// `fetch_by_term`; this proves `run_search` builds the same key on the way
-    /// in that it wrote on the way out — with the real `SEARCH_SQL` and the
-    /// real bind parameters, so a change to either shows up here rather than as
-    /// a cache that silently never hits.
-    ///
-    /// The source points at a closed port, so a connection attempt would fail
-    /// the test. Offline, and nothing leaves the machine.
+    /// `fetch_by_term`; this proves `run_search` builds the same key in that
+    /// it wrote out — real `SEARCH_SQL`, real bind parameters — so a change
+    /// to either shows up here rather than as a cache that silently never
+    /// hits. The source points at a closed port, so any dial fails the test.
     #[tokio::test]
     async fn a_cached_search_is_served_without_a_connection() {
         let dir =
@@ -275,15 +268,13 @@ mod tests {
     /// `search example.com --skip-expired --limit 10`: ten identity rows, four
     /// crt.sh IDs, two certificates.
     ///
-    /// Two multipliers stack. crt.sh logs a precertificate alongside its final
-    /// leaf, and returns one row per matched identity for each — and
-    /// `example.com` arrives twice per certificate, once as the commonName and
-    /// once as a SAN, so it burns two rows of the window while showing as one
-    /// entry in Matched Identities. The window is spent before `to_rows` has
-    /// collapsed anything, so a full window reads as a two-row result.
+    /// Two multipliers stack: a precertificate logged alongside its leaf, and
+    /// `example.com` matching twice per certificate (commonName and SAN). The
+    /// window is spent before `to_rows` collapses, so a full window reads as
+    /// a two-row result.
     ///
-    /// Served from the cache so this needs no network: the collapse and the
-    /// saturation flag are what is under test, not the fetch.
+    /// Served from the cache — the collapse and saturation flag are under
+    /// test, not the fetch.
     #[tokio::test]
     async fn a_full_window_collapsing_to_two_certificates_reports_itself() {
         let dir =
