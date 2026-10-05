@@ -181,10 +181,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # RustSec advisory scan; ignore list lives in .cargo/audit.toml.
+      # Version-pinned rather than left floating, for the reason the deny job
+      # below documents: a CLI refactor can change flags under the gate and
+      # flip it red or green for reasons that have nothing to do with any
+      # advisory. Bump it deliberately, alongside a lockfile change.
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
-          tool: just,cargo-audit
-      # RustSec advisory scan; ignore list lives in .cargo/audit.toml.
+          tool: just,cargo-audit@0.22.2
       - name: Audit
         run: just audit
 
