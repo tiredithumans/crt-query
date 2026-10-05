@@ -1095,7 +1095,7 @@ mod tests {
             fn cells(&self) -> Vec<String> {
                 vec![
                     "evil\u{1b}[31m".to_string(),
-                    "carriage\rreturn\u{202e}flip".to_string(),
+                    "gi\u{200b}thub\rreturn\u{202e}flip".to_string(),
                 ]
             }
         }
@@ -1111,6 +1111,7 @@ mod tests {
             ("ESC", '\u{1b}'),
             ("CR", '\r'),
             ("RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
+            ("ZERO WIDTH SPACE", '\u{200b}'),
         ] {
             assert!(
                 !rendered.contains(c),
