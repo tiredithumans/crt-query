@@ -11,6 +11,21 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Zero-width characters in certificate text are no longer emitted raw.**
+  U+200B, U+200C, U+200D, U+2060 and U+FEFF render as nothing, so a
+  certificate logged as `gi\u{200b}thub.com` read — and pasted — as a
+  genuine match for `github.com`, in the table and in the forwarded CSV
+  alike, where they had passed through `csv_safe` untouched. They now
+  render as visible escapes, like the bidirectional overrides already did.
+- **The wildcard docs say what `search` actually does.** `%` and `_` widen
+  only the substring identity match; the full-text predicate that keeps
+  queries on crt.sh's index reads them as word breaks and can veto the
+  match, so a term of only wildcards finds nothing rather than the "show
+  me everything" a `%` gives on the crt.sh website. `README.md` and
+  `search --help` had promised the website's behaviour.
+
 ## [0.6.0] - 2026-09-27
 
 ### Added

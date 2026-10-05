@@ -107,7 +107,10 @@ pub struct CacheOpts {
 pub enum Commands {
     /// Search certificates by domain or identity (crt.sh-style)
     Search {
-        /// Domains or identities to search for (% and _ act as wildcards).
+        /// Domains or identities to search for. `%` and `_` act as wildcards
+        /// in the substring match, but the full-text identity predicate has
+        /// to match too and reads them as word breaks, so a term of only
+        /// wildcards finds nothing.
         /// Several may be given; --limit applies per term, and results are
         /// merged (and deduplicated) across all of them
         #[arg(required = true, num_args = 1.., value_parser = non_blank_term)]

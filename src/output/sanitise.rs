@@ -28,12 +28,13 @@ use std::borrow::Cow;
 /// The exemption is for `-` alone: the numeric columns here can never emit a
 /// leading `+`, so `+1` is CT-log text and stays quoted.
 ///
-/// CSV gets [`bidi_safe`] as well — it is the format people open in a
-/// spreadsheet, which implements the Unicode bidirectional algorithm. Only
-/// overrides are escaped, never letters: real Arabic or Hebrew reorders
-/// correctly from its own character properties.
+/// CSV gets [`format_control_safe`] as well — it is the artefact people
+/// forward and open in a spreadsheet, which implements the Unicode
+/// bidirectional algorithm. Only format controls are escaped, never letters:
+/// real Arabic or Hebrew reorders correctly from its own character
+/// properties.
 pub(super) fn csv_safe(value: &str) -> Cow<'_, str> {
-    let value = bidi_safe(value);
+    let value = format_control_safe(value);
     let leads_a_formula = match value.chars().next() {
         Some('-') => !value.parse::<f64>().is_ok_and(f64::is_finite),
         Some('=' | '+' | '@' | '\t' | '\r') => true,
@@ -46,22 +47,24 @@ pub(super) fn csv_safe(value: &str) -> Cow<'_, str> {
     }
 }
 
-/// Render bidi overrides as visible text, leaving everything else alone.
+/// Render format controls — bidi overrides and zero-width characters — as
+/// visible text, leaving everything else alone.
 ///
 /// Narrower than [`display_safe`] on purpose: this runs over a machine format,
-/// so it neutralises only the characters that reorder a rendered cell and
-/// leaves the rest — control characters included — to the CSV writer, which
-/// quotes a field holding a comma, quote or line break and writes every other
-/// byte raw. Both forms round-trip through a CSV reader.
-fn bidi_safe(value: &str) -> Cow<'_, str> {
-    if !value.chars().any(is_bidi_control) {
+/// so it neutralises only the characters that make a rendered cell show text
+/// it does not hold, and leaves the rest — control characters included — to
+/// the CSV writer, which quotes a field holding a comma, quote or line break
+/// and writes every other byte raw. Both forms round-trip through a CSV
+/// reader.
+fn format_control_safe(value: &str) -> Cow<'_, str> {
+    if !value.chars().any(is_format_control) {
         return Cow::Borrowed(value);
     }
     Cow::Owned(
         value
             .chars()
             .map(|c| {
-                if is_bidi_control(c) {
+                if is_format_control(c) {
                     escaped(c)
                 } else {
                     c.to_string()
@@ -95,13 +98,38 @@ const BIDI_CONTROLS: &[char] = &[
     '\u{2069}', // POP DIRECTIONAL ISOLATE
 ];
 
+/// Zero-width format characters that hide rather than reorder.
+///
+/// The second half of the same display-spoofing class, and the reason the
+/// comment above about "zero-width and bounded to one line" needs a rule of
+/// its own: these are category Cf, not Cc, so `char::is_control()` never
+/// covered them and `BIDI_CONTROLS` does not list them. None of them
+/// reorders anything — the threat is invisibility. A certificate logged with
+/// SAN `gi\u{200b}thub.com` renders as `github.com` in the table, pixel for
+/// pixel at any terminal font, and the same bytes survive `csv_safe` into
+/// the report people forward, so the look-alike reads as a genuine match for
+/// the queried domain in both formats — and pastes as something else.
+const ZERO_WIDTH_FORMATS: &[char] = &[
+    '\u{200b}', // ZERO WIDTH SPACE
+    '\u{200c}', // ZERO WIDTH NON-JOINER
+    '\u{200d}', // ZERO WIDTH JOINER
+    '\u{2060}', // WORD JOINER
+    '\u{feff}', // BYTE ORDER MARK
+];
+
+/// Whether a character takes width away without giving anything back: either
+/// it reorders the text around it or it hides inside it.
+fn is_format_control(c: char) -> bool {
+    is_bidi_control(c) || ZERO_WIDTH_FORMATS.contains(&c)
+}
+
 /// Whether a character has to be rendered as an escape rather than emitted.
 ///
 /// `is_control()` is Cc, which already subsumes the C1 range U+0080..=U+009F
 /// this used to re-test separately — an exhaustive scan over every Unicode
 /// scalar finds nothing satisfying that range without also being a control.
 fn needs_escaping(c: char) -> bool {
-    c != '\n' && (c.is_control() || is_bidi_control(c))
+    c != '\n' && (c.is_control() || is_format_control(c))
 }
 
 /// Whether `c` is one of the [`BIDI_CONTROLS`].
@@ -272,11 +300,33 @@ mod tests {
     /// newlines, so bidi_safe deliberately leaves those alone rather than
     /// escaping them and changing the value a consumer parses back out.
     #[test]
-    fn bidi_safe_leaves_everything_else_to_the_csv_writer() {
-        assert_eq!(bidi_safe("a,b"), "a,b");
-        assert_eq!(bidi_safe("two\nlines"), "two\nlines");
-        assert_eq!(bidi_safe("quote\"inside"), "quote\"inside");
-        assert_eq!(bidi_safe("tab\there"), "tab\there");
+    fn format_control_safe_leaves_everything_else_to_the_csv_writer() {
+        assert_eq!(format_control_safe("a,b"), "a,b");
+        assert_eq!(format_control_safe("two\nlines"), "two\nlines");
+        assert_eq!(format_control_safe("quote\"inside"), "quote\"inside");
+        assert_eq!(format_control_safe("tab\there"), "tab\there");
+    }
+
+    /// The zero-width half of the class: U+200B renders as nothing at any
+    /// terminal font, so `gi\u{200b}thub.com` displayed as `github.com` and
+    /// pasted as something else. Both formats now show the escape instead.
+    #[test]
+    fn zero_width_format_characters_are_escaped_in_both_formats() {
+        for c in ZERO_WIDTH_FORMATS {
+            let hostile = format!("gi{c}thub.com");
+            let table = display_safe(&hostile);
+            assert!(
+                !table.contains(*c),
+                "U+{:04X} reached the table verbatim: {table:?}",
+                *c as u32
+            );
+            let safe = csv_safe(&hostile);
+            assert!(
+                !safe.contains(*c),
+                "U+{:04X} reached the CSV verbatim: {safe:?}",
+                *c as u32
+            );
+        }
     }
 
     /// Issuer, subject, common name and SAN are text from a public CT log:
