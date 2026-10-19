@@ -36,6 +36,11 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `deps:`. If the change
 is user-facing, add an entry under `## [Unreleased]` in `CHANGELOG.md`.
 
+Dependabot's patch and minor PRs auto-merge once every required check passes
+(`.github/workflows/dependabot-automerge.yml`); semver-major bumps wait for a
+manual review and merge. If one falls behind `main` and Dependabot has not
+rebased it, comment `@dependabot rebase` rather than pressing "Update branch".
+
 ## Testing against crt.sh
 
 **Every test in this repo is offline, and it needs to stay that way.** crt.sh is
