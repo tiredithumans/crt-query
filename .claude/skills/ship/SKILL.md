@@ -23,7 +23,8 @@ if a gate fails.
   Remote CI still runs the required checks either way.
 - **Changelog check:** if the change is user-facing (a feature, a fix, or a behavior change), add an
   entry under `## [Unreleased]` in `CHANGELOG.md` before committing. Internal refactors, docs and CI
-  changes do not need one.
+  changes do not need one. One short sentence per change, ending in the PR number once it is known,
+  as CONTRIBUTING.md § Writing changelog entries describes; the why goes in the commit and PR.
 
 ## 1. Branch
 

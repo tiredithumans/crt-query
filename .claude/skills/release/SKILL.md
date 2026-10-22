@@ -17,7 +17,7 @@ The pipeline: release PR onto `main` → annotated `vX.Y.Z` tag on the **merge c
 Use the argument if given. Otherwise read the commits since the last tag
 (`git log $(git describe --tags --abbrev=0)..HEAD --oneline`):
 
-- breaking change (`!` type, or a `Changed`/`Removed` changelog note that breaks a contract) → major
+- breaking change (`!` type, or a `**Breaking:**` changelog entry) → major
 - any `feat:` → minor
 - only `fix:` / `chore:` / `docs:` / `deps:` / `ci:` → patch
 
@@ -40,6 +40,9 @@ Do not run a full `cargo build` just to refresh the lock.
 
 ## 3. Finalize the changelog
 
+- Tighten any `[Unreleased]` entry that breaks CONTRIBUTING.md § Writing changelog entries (one
+  sentence, user-visible effect, PR number, `**Breaking:**` on contract changes). These lines become
+  the release notes verbatim.
 - Roll `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD` — **no `v` prefix, ASCII hyphen**
   (e.g. `## [0.2.0] - 2026-09-02`). This exact shape is load-bearing twice over: the `guard` job
   greps for it and fails without it, and the `draft` job extracts the release notes by matching it.

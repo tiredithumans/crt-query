@@ -15,561 +15,206 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Fixed
 
-- **Zero-width characters in certificate text are no longer emitted raw.**
-  U+200B, U+200C, U+200D, U+2060 and U+FEFF render as nothing, so a
-  certificate logged as `gi\u{200b}thub.com` read — and pasted — as a
-  genuine match for `github.com`, in the table and in the forwarded CSV
-  alike, where they had passed through `csv_safe` untouched. They now
-  render as visible escapes, like the bidirectional overrides already did.
-- **The wildcard docs say what `search` actually does.** `%` and `_` widen
-  only the substring identity match; the full-text predicate that keeps
-  queries on crt.sh's index reads them as word breaks and can veto the
-  match, so a term of only wildcards finds nothing rather than the "show
-  me everything" a `%` gives on the crt.sh website. `README.md` and
-  `search --help` had promised the website's behaviour.
+- The README and `search --help` now say what `%` and `_` really match: a term
+  made only of wildcards finds nothing, unlike on the crt.sh website. (#54)
+
+### Security
+
+- Zero-width characters in certificate text are shown as visible escapes in
+  the table and CSV, so `gi\u{200b}thub.com` no longer passes for
+  `github.com`. (#54)
 
 ## [0.6.0] - 2026-09-27
 
 ### Added
 
-- **`cert` accepts a SHA-256 fingerprint as well as a crt.sh ID.**
-  `crt-query cert 5c83f01a…374bdd` takes the 64 hex digits bare, in either
-  case, or colon-separated as `openssl x509 -fingerprint -sha256` prints them.
-  The fingerprint is what browsers and other CT tools show, and what a
-  certificate is known by before anyone has found its crt.sh ID. The lookup
-  matches on `digest(certificate, 'sha256')`, the same expression crt.sh
-  indexes. A malformed argument is still a usage error (exit 2), never "no
-  such certificate" (exit 3).
-- **`expiring --fail-on-expiring` exits `4` when the report lists anything.**
-  A monitoring check or a cron job no longer has to parse the report to learn
-  whether a certificate is expiring. The report is printed in full either way,
-  an empty one still exits `0`, and the status survives a reader that stops
-  early, so piping the alert into `head` cannot turn it into a success.
-- **`--quiet` (`-q`) for scheduled runs.** cron mails whatever a job writes to
-  stderr, and a run that worked fine still wrote something: the empty-result
-  explanation, the `--limit` note, `wrote N CSV row(s)`, `cache clear`'s count,
-  `check-update`'s upgrade hint. `--quiet` drops all of them and keeps errors.
-- **Connection settings can come from the environment.** `CRT_QUERY_HOST`,
-  `CRT_QUERY_PORT`, `CRT_QUERY_DBNAME`, `CRT_QUERY_USER` and `CRT_QUERY_DB_URL`
-  sit between the command-line flags and the config file, so a container or CI
-  job can point the tool somewhere without writing a file. An empty variable
-  counts as unset, a bad one fails only the subcommands that connect, a bad
-  `CRT_QUERY_DB_URL` is reported under its own name, and `--help` names each
-  variable without printing its value.
-- **Statically linked musl archives for `x86_64` and `aarch64` Linux.** They run
-  on Alpine and other musl systems, and on glibc distributions older than the
-  2.34 floor of the glibc builds, all of which previously had to build from
-  source. `install.sh` picks them on musl hosts, and on glibc hosts older than
-  2.34, where the glibc build cannot start.
-- **A native Windows ARM64 archive** (`aarch64-pc-windows-msvc`). `install.ps1`
-  already preferred a native build when a release had one, and now finds it
-  instead of falling back to the emulated x86-64 build.
-
-### Fixed
-
-- **A `cert` lookup that finds nothing is no longer cached for thirty days.**
-  The guest database is a replica that lags the crt.sh website, so an ID
-  someone has just seen there is a miss here for a while and then is not. The
-  miss was kept for the thirty-day lifetime meant for found certificates, and
-  the lookup went on answering "no such certificate" (exit 3) for a month after
-  the certificate arrived. A miss now lasts as long as a `search` result
-  (`cache_ttl_secs`, an hour by default).
-- **The cache is keyed on the database as well as the host.** Two databases
-  behind one server (`--dbname`, or a `db_url` naming another) used to answer
-  for each other from the cache. Existing entries are keyed the old way and so
-  miss once after upgrading.
-- **Two runs writing the same cache entry at once can no longer corrupt it.**
-  Both wrote through one scratch file, so one could rename the other's
-  half-written file into place. Each writer now has its own, and scratch files
-  abandoned by an interrupted run are pruned instead of accumulating.
-- **`check-update` no longer uses GitHub's rate-limited API.** It asked
-  `api.github.com`, whose per-address limit on unauthenticated requests was the
-  one failure its own error message had to explain, and which other people's
-  traffic behind a shared address could already have spent. It now reads the
-  tag from the `releases/latest` redirect on github.com, as the install scripts
-  already did.
-- **On Windows, `check-update` runs `System32\curl.exe` by its full path.** A
-  bare `curl` is resolved by Rust's own search, which looks in the directory
-  holding `crt-query.exe` first, so a `curl.exe` unpacked next to it ran
-  instead. The bare name is now only a fallback for systems without
-  `System32\curl.exe` (Windows 10 before 1803).
+- `cert` accepts a SHA-256 fingerprint as well as a crt.sh ID, bare or
+  colon-separated as `openssl x509 -fingerprint -sha256` prints it. (#50)
+- `expiring --fail-on-expiring` exits `4` when the report lists anything. (#50)
+- `--quiet` (`-q`) drops informational messages from stderr and keeps errors,
+  so cron stops mailing successful runs. (#50)
+- Connection settings can come from `CRT_QUERY_HOST`, `CRT_QUERY_PORT`,
+  `CRT_QUERY_DBNAME`, `CRT_QUERY_USER` and `CRT_QUERY_DB_URL`. (#50)
+- Static musl builds for `x86_64` and `aarch64` Linux, for Alpine and for glibc
+  older than 2.34; `install.sh` picks them automatically. (#50)
+- A native Windows ARM64 build, which `install.ps1` now installs in place of the
+  emulated x86-64 one. (#50)
 
 ### Changed
 
-- **A `db_url` combined with a setting from a higher-precedence source is now
-  an error.** A config-file `db_url` used to override an explicit `--host` or
-  `--port` without a word, contradicting the documented precedence and sending
-  the query somewhere the caller had said not to; the new environment layer
-  would have made that easy to hit. A `db_url` still replaces the individual
-  settings from its own layer and those below it, and `--db-url` with `--host`
-  on one command line still means the URL. `--port 6432` with a `db_url` in the
-  config file, or `CRT_QUERY_HOST` with one there, now fails before connecting
-  and names both.
-- `crt-query cache path` exits `1` when the environment names no absolute cache
-  directory, instead of exiting `0` with nothing on stdout, which
-  `$(crt-query cache path)` read as an empty path.
-- The generated Homebrew formula is no longer committed. The release workflow
-  generates it and pushes it to the tap, so the copy here only ever went stale
-  (it still named v0.5.1 after v0.5.2 shipped).
-- The crate is marked `publish = false`, and crates.io-only metadata is gone.
-  It is not on crates.io and is installed from release binaries or with
-  `cargo install --git`.
-- `chrono` and `toml` no longer enable default features the tool never uses,
-  which takes `toml_writer`, `indexmap`, `hashbrown` and `equivalent` out of the
-  dependency tree. `whoami`, already in the tree through `tokio-postgres`, is
-  now named directly for the cache key.
+- **Breaking:** a config-file `db_url` combined with `--host`, `--port` or a
+  `CRT_QUERY_*` setting is now an error instead of silently overriding them.
+  Keep only one of the two. (#50)
+- **Breaking:** `cache path` exits `1` when no absolute cache directory can be
+  found, instead of printing nothing and exiting `0`. (#50)
 
-### Supply chain
+### Fixed
 
-- CI gains a rustdoc gate (`just doc`, warnings denied) in place of a build step
-  that repeated what the test step had already built, and builds the musl
-  release binary on every change so a tag push is never the first time it is
-  compiled. `just verify` runs the same `doc` gate.
-- The release workflow checks that the musl archives are statically linked,
-  and applies the glibc floor check to the glibc archives only.
-- CI and CodeQL cancel a superseded run only on pull requests, so every commit
-  to `main` keeps a completed CI record.
-- `Cargo.toml` states the lint policy: unsafe code is forbidden, and a chosen
-  subset of `clippy::pedantic` is enforced. The lossy casts it found in the
-  retry jitter and the `--limit` check are fixed.
-- A test keeps the README's Rust badge and "Requires Rust" line in step with
-  `rust-version`, and end-to-end tests now prove the shipped binary finds cache
-  entries where it writes them, pinning the on-disk format.
+- A `cert` lookup that finds nothing is cached for an hour, not 30 days, so a
+  certificate that reaches crt.sh later is found. (#50)
+- Two databases on one server no longer share cache entries. Existing entries
+  miss once after upgrading. (#50)
+- Two runs writing the same cache entry at once can no longer corrupt it. (#50)
+- `check-update` no longer fails on GitHub's API rate limit. (#50)
+
+### Security
+
+- On Windows, `check-update` runs `System32\curl.exe` by full path, so a
+  `curl.exe` placed next to `crt-query.exe` is no longer run instead. (#50)
 
 ## [0.5.2] - 2026-09-25
 
 ### Changed
 
-- **Dependencies are at their latest releases.** `clap` 4.6.6 -> 4.6.7,
-  `clap_complete` 4.6.9 -> 4.6.11, `comfy-table` 8.0.0 -> 8.0.1 and `toml`
-  1.1.5 -> 1.1.6, plus their transitive dependencies (`cc`, `rand`, `rustix`,
-  `smallvec`, `syn`, `wasm-bindgen` and the rest). All patch-level; no
-  behaviour changed. Built with Rust 1.98.1.
-
-### Supply chain
-
-- Publishing a release now pushes the regenerated Homebrew formula to the tap
-  automatically, after checking every checksum against the published
-  `SHA256SUMS` and running the published Linux binary. The tap had stayed on
-  v0.4.0 through three releases because copying the formula across was a manual
-  step.
-- The `taiki-e/install-action` and `github/codeql-action` pins moved to their
-  latest releases.
+- Updated dependencies; no behaviour change. (#45, #48)
+- The Homebrew tap now updates as each release is published; it had been stuck
+  on v0.4.0. (#43)
 
 ## [0.5.1] - 2026-09-04
 
 ### Fixed
 
-- **A `--limit` that fills up now says so, instead of passing for a short
-  answer.** `--limit` bounds identity rows fetched server-side, not
-  certificates: crt.sh returns one row per matched identity, logs a
-  precertificate alongside its final leaf, and repeats a name that appears as
-  both the commonName and a SAN — so the rows collapse, client-side, only after
-  the window has already been spent. Measured against the real database,
-  `search example.com --skip-expired --limit 10` fills its window with ten
-  identity rows spanning four crt.sh IDs and prints two certificates.
-
-  That was documented but invisible: the run looked exactly like a name with
-  two certificates to its name, with nothing to say more were behind the limit.
-  `search` and `expiring` now print a note on stderr when the window filled and
-  the collapse then shortened it, naming both counts and the two ways on —
-  raise `--limit`, or `--no-dedupe` to see the rows themselves. Because the
-  limit is per term, a multi-term run names the terms that actually filled,
-  which are the ones worth widening. Results are unchanged; stdout is
-  untouched, so `--json` and `--csv` consumers see nothing new.
+- `search` and `expiring` print a note on stderr when `--limit` filled up and
+  deduplication then shortened the list, so a cut-off answer no longer looks
+  complete. Raise `--limit` or use `--no-dedupe`. (#40)
 
 ## [0.5.0] - 2026-09-04
 
 ### Added
 
-- **Results are cached locally, and a cached query never opens a connection.**
-  crt.sh refuses connections and times queries out under load, and until now
-  every repeat of a question spent another client slot on it to get the same
-  answer back. Entries live in `$XDG_CACHE_HOME/crt-query` (`~/.cache/crt-query`
-  when that is unset, `%LOCALAPPDATA%\crt-query\cache` on Windows), keyed per
-  term so a multi-term run can serve some terms locally and ask for the rest.
-  `search` and `expiring` results last an hour; a `cert` lookup lasts 30 days,
-  because a certificate at a given crt.sh ID cannot change.
-
-  The connection is now opened on first need rather than up front, which is what
-  lets a fully cached run finish without touching crt.sh at all — the same
-  reasoning that already kept `completions` and `check-update` from opening one.
-
-  Validity windows are evaluated by the server at query time, so a cached
-  `search` or `expiring` result carries the window as it stood when it was
-  written. That is what bounds the lifetime to an hour, and what `--refresh` is
-  for.
-
-- `--no-cache` to bypass the cache in both directions, and `--refresh` to ignore
-  what is stored and re-query, then cache the fresh answer. The two conflict.
-
-- `crt-query cache path` and `crt-query cache clear`, plus `cache` and
-  `cache_ttl_secs` config-file keys.
+- Results are cached locally: `search` and `expiring` for an hour, `cert` for
+  30 days. A fully cached run never connects to crt.sh. (#37)
+- `--no-cache` skips the cache, and `--refresh` re-queries and updates it. (#37)
+- `cache path` and `cache clear`, plus `cache` and `cache_ttl_secs` config
+  keys. (#37)
 
 ### Changed
 
-- **A connection retry that then succeeds no longer reports itself.** A run
-  against a busy crt.sh printed `connection attempt 1/3 to crt.sh:5432 failed:
-  db error: ERROR: no more connections allowed (max_client_conn); retrying...`
-  and then went on to work perfectly — an error message for a run that had not
-  failed, naming a condition of the shared guest database rather than anything
-  the caller did or could fix. The attempts are silent now. If none of them
-  connects, the one error that is printed names the host and every distinct
-  cause behind it, so nothing that used to be on screen is lost — it is just no
-  longer shown to people whose runs succeeded.
-- **The retry budget buys more chances and less waiting.** The delay was a flat
-  two seconds over three attempts, which is tuned for nothing in particular:
-  pgbouncer refuses a client slot instantly and frees one again in well under a
-  second. Five attempts now back off from 250ms to 2s, with jitter so that
-  scheduled `expiring --csv` runs firing on the same cron minute do not all
-  retry in lockstep. The same wall time that used to buy two extra attempts
-  buys four. The whole connect phase is bounded as well, so a host that accepts
-  the socket and never answers now gives up sooner than it did before — which
-  matters more than it used to, because that wait is silent.
+- A connection retry that then succeeds is no longer reported. If every attempt
+  fails, the error still lists each cause. (#36)
+- Retries are quicker: five attempts backing off from 250 ms to 2 s, and a
+  server that accepts the connection but never answers is given up on
+  sooner. (#36)
 
 ## [0.4.1] - 2026-09-04
 
-### Fixed
-
-- **An empty or whitespace-only search term is a usage error, not a query.**
-  `crt-query search "$DOMAIN"` with `$DOMAIN` unset used to spend a connection
-  on the shared guest database — `plainto_tsquery` of nothing matches no row —
-  and then report `No certificates found`, which is a result people act on.
-  `search` and `expiring` now refuse a blank term at parse time with exit 2,
-  the same code a malformed `cert` ID gets, so a shell slip never reads as an
-  empty certificate inventory. Whitespace inside a term is passed through
-  as given.
-- **A `--csv` write that fails part-way no longer destroys the previous
-  report.** The file was truncated before the first row was written, so a full
-  disk or a write error left a partial report where the last run's had been,
-  and a scheduled consumer reading the file at the wrong moment saw a header
-  and half the rows. The report is now written to a scratch file beside the
-  destination and renamed into place once complete: a reader sees the old
-  report or the new one, never a mixture, and a failure removes the scratch
-  file and touches nothing else. A symlinked destination (`latest.csv ->
-  2026-09-04.csv`) keeps its link, the target's permissions are carried over,
-  and the pre-query writability check now proves the scratch file can be
-  created rather than creating and deleting the report itself.
-- The CSV formula guard's exemption for negative numbers accepted `-inf`,
-  `-Infinity`, `-nan` and `-1e999`, which Rust's float parser reads as numbers
-  and a spreadsheet evaluates as formulas (`#NAME?`). The exemption is now for
-  finite numbers only; every `days_left` value is unaffected.
-- **The prebuilt Linux binaries could not start on most current distributions.**
-  Both Linux targets built on Ubuntu 24.04 runners, and a binary inherits the
-  glibc floor of the machine that linked it: std's process-spawn path — reached
-  by `check-update` through `Command::new("curl")` — references `pidfd_spawnp`
-  and `pidfd_getpid`, which are versioned symbols as of glibc 2.39, so the
-  linker stamped a non-weak `GLIBC_2.39` requirement into both v0.4.0 archives.
-  `ld.so` treats a missing non-weak version as fatal, so the binary died before
-  `main` on Debian 12, RHEL/Rocky 9, Ubuntu 22.04 and Amazon Linux 2023 — and on
-  Homebrew for Linux the failure aborted `brew install` itself, which runs the
-  binary to generate completions. The Linux rows now pin `ubuntu-22.04`
-  runners, which drops the floor to glibc 2.34, and a `glibc floor` step fails
-  the release if a future runner-image bump raises it again.
-- **Both installers no longer destroy a working install to find out the new
-  binary does not run.** They overwrote the installed binary and only then ran
-  `--version` on it, so a replacement that cannot start on this system had
-  already replaced a working one — with the scratch directory cleared by the
-  exit trap and nothing left to restore. `install.sh` also sent that check's
-  stderr to `/dev/null`, discarding the loader's own explanation. The download
-  is now staged beside the destination, run, and moved into place only if it
-  works; the failure message carries the loader's first line.
-- `install.sh`'s checksum verification used GNU long options that BusyBox's
-  `sha256sum` rejects, so on a BusyBox host a byte-perfect download exited
-  non-zero and was reported as `checksum mismatch … the download does not match
-  the release's SHA256SUMS`. It now uses `-c` with output redirected, the one
-  form GNU coreutils, BusyBox and macOS `shasum` all accept.
-- `install.sh` mapped every Linux to `unknown-linux-gnu`, so a musl host
-  installed a glibc binary whose interpreter does not exist — `execve` returns
-  ENOENT and the shell reports "not found" for a file that is plainly there. It
-  now detects musl and reports that the release ships no such archive, which is
-  what the existing no-build-for-this-target branch was already written to say.
-- `install.ps1` ended its failure path with `exit 1`, which unwinds the *host*
-  under both documented invocations (`irm … | iex` and the scriptblock form) —
-  so the one outcome a user most needs to read, the checksum mismatch, closed
-  the window it was printed to. It now raises a single-line terminating error,
-  which still exits 1 under `pwsh -File`.
-- `install.ps1` wrote a relative `-Dir` verbatim into the persistent user PATH,
-  where every future process would resolve it against its own working
-  directory. The path is now resolved before use.
-- **Connection failures no longer assert causes the code cannot observe.** A
-  failed connection was always closed with "the crt.sh guest database is shared
-  and may be overloaded", including when the attempt stopped on a rejected
-  password against an entirely different host the caller had named themselves.
-  That advice now appears only when the attempts really were spent against
-  crt.sh. The stalled-connection message claimed the startup exchange had not
-  completed, which the timeout cannot distinguish from name resolution or the
-  TCP connect it also spans; it now names all three.
-- Connection settings that are wrong on this side — a `db_url` with no host,
-  mismatched host/port lists — carry no SQLSTATE, so they were treated as
-  transient and retried three times behind two misleading `retrying...` lines.
-  They now fail immediately, which is what the retry policy already documented.
-- An unparseable `db_url` taken from the config file reported `invalid
-  --db-url`, naming a flag the caller never typed and no file to go and edit.
-  It now names the config file and its path.
-- **A `--csv` destination that is a symlink is no longer destroyed by the
-  writability check.** `exists()` follows a symlink and `remove_file` does not,
-  so for a link whose target had rotated away the check created the *target*
-  and then deleted the *link* — losing a file the user made, and leaving behind
-  precisely the empty report the check exists to prevent. This ran before the
-  query, so successful runs broke the usual `latest.csv -> 2026-09-03.csv`
-  rotation too, not just failed ones.
-- **`check-update`'s upgrade hint named routes that could not upgrade you.** It
-  listed only `install.sh` piped into `sh` — not a command a Windows host has,
-  and a script that refuses to run there anyway and could not have installed
-  the binary printing the message. It now offers the routes that exist on the
-  platform the binary was built for, so a Windows build points at `install.ps1`.
-  Homebrew is listed too, where it runs: a `brew` install is upgraded with
-  `brew upgrade`, and following the old advice would have dropped a second,
-  unmanaged copy in `/usr/local/bin` for Homebrew's own to shadow. The opening
-  line now reads "re-run whatever you installed with" rather than "re-run the
-  install script", which was the wrong instruction for exactly that user.
-- **A certificate field beginning `-` no longer reaches a spreadsheet as a
-  formula.** The formula-neutralising rule covered `=`, `+`, `@`, tab and
-  carriage return but skipped `-`, because `-` also leads every negative
-  `days_left` and prefixing it would have typed that column as text. `-` is
-  precisely the character a payload opens with to get past a filter covering
-  only the other three. A leading `-` is now quoted unless the whole field
-  parses as a number, so `-30` still reaches the file as `-30` while
-  `-2+3+cmd|' /C calc'!A0` does not. The other leaders are quoted
-  unconditionally, exactly as before.
-- **Bidi control characters are neutralised in `--csv` as well as the table.**
-  A spreadsheet implements the Unicode bidirectional algorithm, so a CSV is
-  exposed to the same display spoofing described below, and it is the artefact
-  people forward to someone else. Only the override characters are escaped:
-  genuine right-to-left text in a subject DN reorders correctly from its own
-  character properties and is left exactly as issued.
-- **Bidi control characters in certificate fields no longer reorder a rendered
-  table row.** The escape filter covered only the `Cc` control class, so
-  U+202A-U+202E, U+2066-U+2069, U+061C and the directional marks reached the
-  table verbatim; comfy-table never terminates them, so one override inside an
-  identity renders the rest of the row reversed and the cell displays a
-  hostname it does not contain. Those fields are chosen by whoever gets a
-  certificate logged. JSON is unaffected and deliberately left alone.
-- `cert --json <missing-id>` piped to a reader that goes away no longer reports
-  success: the broken-pipe path exited 0 from inside the writer, discarding the
-  exit code 3 the run had already decided on.
-
 ### Changed
 
-- A certificate whose validity dates crt.sh could not parse now sorts to the
-  end of `search` (newest first) and `expiring` (soonest first) instead of
-  the top. `None` orders before `Some`, so an undated row led both lists,
-  ahead of every certificate with a real date. Rare — the `expiring` window
-  predicate already excludes a NULL notAfter — but wrong where it happened.
-- Every documented `cargo install --git` route now passes `--locked`, in the
-  README, both install scripts and the hint `check-update` prints. Without it
-  `cargo install` re-resolves versions and ignores the lockfile, so the
-  from-source channel built a dependency set that `cargo audit`, `cargo deny`,
-  the MSRV gate and the test suite had never seen — while every justfile recipe
-  and the release workflow already passed it.
-- The README now states the glibc 2.34 floor for the prebuilt Linux archives,
-  in the install table and again under manual download.
-- `SECURITY.md` and the README described `check-update`'s `curl` lookup as
-  resolving through `PATH`. On Windows it does not: Rust's standard library
-  searches the directory holding `crt-query.exe` before `System32` and before
-  `PATH`, so auditing `PATH` does not cover it. Documented rather than changed.
-- The dedup description promised that a serial collision between different
-  certificates always keeps both. It cannot: a collision that also shares a
-  validity window is indistinguishable from a real precertificate/leaf pair.
-  Described as best-effort, which is what the surrounding text already says of
-  dedup generally.
-- The `just verify` gate list disagreed with itself across the justfile, README,
-  CONTRIBUTING and the PR template, and the justfile claimed a CI parity it does
-  not have — `actionlint` and CodeQL have no local counterpart. All four now
-  agree, and the two CI-only checks are named.
-- The README output table now records that `completions` ignores `--json` and
-  `--csv`, and that `check-update` honours `--csv`.
-- The macOS Gatekeeper documentation was wrong: `curl` does not set
-  `com.apple.quarantine` — only downloaders that opt into
-  `LSFileQuarantineEnabled` do — so nothing on the documented install paths ever
-  arrived quarantined, and the manual-install instructions told people to run an
-  `xattr -d` that fails with `No such xattr`. Signing status has no bearing on
-  quarantine either. The claim is corrected in the README, `install.sh` and the
-  Homebrew packaging notes; `install.sh` still clears the attribute, now before
-  the run check rather than after, for an archive that arrived another way.
+- Every documented `cargo install --git` command now passes `--locked`, so a
+  source install builds the dependency versions that were tested. (#25)
+
+### Fixed
+
+- The prebuilt Linux binaries start again on Debian 12, RHEL 9, Ubuntu 22.04
+  and Amazon Linux 2023, and `brew install` on Linux works; they need glibc
+  2.34 or newer. (#21)
+- An empty or whitespace-only search term is a usage error (exit `2`) instead
+  of an empty result. (#31)
+- A `--csv` write that fails part-way leaves the previous report intact. (#30)
+- A `--csv` destination that is a symlink is no longer deleted by the
+  pre-query check. (#24)
+- A certificate with unparseable validity dates sorts last in `search` and
+  `expiring`, not first. (#32)
+- `cert --json` for a missing ID keeps exit code `3` when the reader closes the
+  pipe early. (#24)
+- `install.sh` and `install.ps1` check that the new binary runs before it
+  replaces the installed one. (#22)
+- `install.sh` works with BusyBox `sha256sum`, and on musl Linux says there is
+  no prebuilt build instead of installing one that cannot run. (#22)
+- `install.ps1` no longer closes the PowerShell window when it fails, and
+  resolves a relative `-Dir` before adding it to `PATH`. (#22)
+- The macOS install docs no longer tell you to run an `xattr -d` that
+  fails. (#22)
+- `check-update`'s upgrade hint lists only routes that work on your platform,
+  including `install.ps1` on Windows and `brew upgrade` for Homebrew
+  installs. (#27, #29)
+- Connection errors no longer blame an overloaded crt.sh when the failure was
+  elsewhere, such as a wrong password for another host. (#23)
+- Connection settings that cannot work, such as a `db_url` with no host, fail
+  at once instead of being retried. (#23)
+- An invalid `db_url` in the config file is reported with the file's path, not
+  as `invalid --db-url`. (#23)
+
+### Security
+
+- A CSV field starting with `-` is quoted unless it is a finite number, so it
+  cannot reach a spreadsheet as a formula. (#26, #30)
+- Bidirectional control characters in certificate text are escaped in the
+  table and in CSV, so a row cannot display a hostname it does not
+  contain. (#24, #26)
 
 ## [0.4.0] - 2026-09-03
 
 ### Added
 
-- Prebuilt binaries for `aarch64-unknown-linux-gnu`. `install.sh` computed this
-  target on every ARM64 Linux host — Graviton, Ampere, a Raspberry Pi — and no
-  release shipped an archive for it, so the install failed with a list of what
-  was available. The Homebrew formula gains a matching `on_arm` block inside
-  `on_linux`.
-- Windows on ARM installs the x86-64 build, which Windows runs under emulation,
-  rather than failing outright when no native `aarch64-pc-windows-msvc` archive
-  exists. It says so when it does. The `x86` branch is gone: crt-query has never
-  shipped a 32-bit build, so it could only ever resolve to an archive that does
-  not exist.
-- Every release archive now carries a build-provenance attestation signed by the
-  workflow run that produced it. `SHA256SUMS` is served from the same release as
-  the archives it covers, so it proves they agree with each other and nothing
-  about where they came from — which matters because `check-update` points at
-  the same channel. Verify with
-  `gh attestation verify <archive> --repo tiredithumans/crt-query`.
+- Prebuilt binaries for ARM64 Linux (`aarch64-unknown-linux-gnu`). (#18)
+- On Windows ARM, `install.ps1` installs the x86-64 build, which runs under
+  emulation, instead of failing. (#18)
 
 ### Changed
 
-- **`--csv` is now a machine format rather than a copy of the table.** It shared
-  the table's formatters, so a NULL was written as `-` and timestamps lost their
-  seconds. The `Days Left` column therefore mixed `-30` with a literal `-`,
-  which types the whole column as text in pandas and Excel — contradicting the
-  code's own claim that `days_left` "is usable on its own in JSON and CSV" — and
-  a certificate expiring at 23:59:59 was recorded as `23:59`. NULL is now an
-  empty field and timestamps are full RFC 3339 instants. A script reading the
-  `-` placeholder or parsing minute-precision timestamps needs updating; the
-  table is unchanged.
-
-- **`cert` now exits `3`, not `2`, when no certificate has that crt.sh ID.**
-  clap exits `2` on a usage error, so `crt-query cert "$id"` with an empty or
-  unset `$id` reported "no such certificate" for what was a typo — turning a
-  shell slip into a false "the certificate is gone" alert, the exact confusion
-  the distinct code exists to prevent. A script keying on `2` for not-found
-  needs updating; `0` and `1` are unchanged.
-- `check-update --csv` now uses display column headers
-  (`Current`, `Latest`, `Update Available`, `Release URL`) like every other
-  record type. The `--json` keys are unchanged.
+- **Breaking:** `--csv` is now a machine format: NULL is an empty field instead
+  of `-`, and timestamps are full RFC 3339. Scripts that read `-` or
+  minute-precision times need updating. (#17)
+- **Breaking:** `cert` exits `3` instead of `2` when no certificate has that ID,
+  so `2` only ever means a usage error. Scripts that check for `2` need
+  updating. (#14)
+- **Breaking:** `check-update --csv` uses display headers (`Current`, `Latest`,
+  `Update Available`, `Release URL`); the `--json` keys are unchanged. (#14)
 
 ### Fixed
 
-- CSV fields that a spreadsheet would evaluate as a formula are now prefixed
-  with `'`. Issuer, subject, common name and SAN are text lifted from a public
-  certificate-transparency log — whoever got the certificate issued chose them —
-  and Excel and LibreOffice execute a cell beginning `=`, `+`, `@`, tab or
-  carriage return. The rule deliberately excludes `-`, so `days_left`'s
-  negatives stay numeric.
-- Control characters in a certificate field no longer corrupt the terminal.
-  comfy-table counts ANSI escape bytes as printable width, so an escape inside a
-  common name was split mid-sequence by wrapping: the reset landed on a
-  different line, the row was drawn narrower than its own borders, and the
-  colour leaked into the rest of the session. A carriage return returned the
-  cursor to column 0 and overwrote the line just drawn. Both are now escaped to
-  visible text in table output. JSON was never affected.
+- A search term containing a backslash no longer finds nothing for
+  certificates that exist. (#15)
+- A stalled crt.sh no longer hangs the run: a connection attempt gives up after
+  15 s and a query after 180 s. (#15)
+- A rejected password or missing database fails at once instead of being
+  retried. (#15)
+- `install.ps1` no longer fails at the last step of a successful install. (#13)
+- `install.ps1` no longer expands `%VAR%` entries in your user `PATH`, such as
+  rustup's, when it adds itself. (#13)
 
-- A search term containing a backslash no longer reports "No certificates
-  found" for certificates that exist. The identity filter's `ILIKE` had no
-  `ESCAPE` clause, so Postgres' default backslash escape applied: every
-  backslash was swallowed and the character after it taken literally, making
-  `a\b` search for `ab` and a trailing backslash build a pattern that cannot
-  match at all. `--help` documents `%` and `_` as the only wildcards, and
-  `ESCAPE ''` now makes that true. Hostnames do not contain backslashes, so
-  this shows up on identity terms — a DN fragment, an email SAN — where a
-  confident, wrong "nothing exists" is the worst possible answer.
-- A stalled crt.sh no longer hangs the run. `connect_timeout` bounds only the
-  TCP connect, not the startup exchange and not the query, so a server that
-  accepted the socket and then stopped answering left the process silent until
-  the two-hour keepalive default noticed — wedging a scheduled `expiring --csv`
-  slot instead of failing into the next run. A statement is now capped at 180s
-  and a connection attempt at 15s. The statement cap sits deliberately above
-  crt.sh's own ~120s timeout so the server's more specific "narrow your query"
-  message stays the one you see.
-- A rejected credential or a missing database is no longer retried three times.
-  Those fail identically on every attempt, so retrying only buried the real
-  error under two misleading "retrying..." lines. Load and transport failures
-  still get the full retry budget.
+### Security
 
-- Windows installs no longer abort at the last step. `install.ps1` confirmed a
-  good install by piping `crt-query --version` into `Select-Object -First 1`;
-  the pipeline short-circuits on that one line, a short-circuited native command
-  never sets `$LASTEXITCODE`, and reading an unset variable under
-  `Set-StrictMode -Version Latest` is a terminating error. The binary was
-  already in place, so the failure came after a successful install: no PATH
-  entry, an error on stderr, and — for the documented `irm | iex` route — a
-  shell killed by the `exit 1`. It presented as intermittent because a session
-  where any earlier native command had run had a stale `$LASTEXITCODE` to read.
-  CI now runs that verification shape against a freshly built binary on
-  `windows-latest`; the existing script gate only parses the file.
-- `install.ps1` no longer flattens `%VAR%` entries in your user `PATH`.
-  `[Environment]::GetEnvironmentVariable` expands them and
-  `SetEnvironmentVariable` writes the expanded text back as `REG_SZ`, so adding
-  crt-query to `PATH` permanently resolved every other installer's unexpanded
-  entry — rustup's `%USERPROFILE%\.cargo\bin` among them. The value is now read
-  and written through the registry with its kind preserved.
+- CSV fields a spreadsheet would run as a formula (starting `=`, `+`, `@`, tab
+  or carriage return) are prefixed with `'`. (#17)
+- Control characters in certificate fields are escaped in table output, so they
+  cannot corrupt the terminal. (#17)
+- Release archives carry build-provenance attestations; check one with
+  `gh attestation verify <archive> --repo tiredithumans/crt-query`. (#18)
 
 ## [0.3.0] - 2026-09-03
 
 ### Added
 
-- `search` accepts several names, like `expiring` already did:
-  `crt-query search example.com example.org`. One statement per name — the
-  statement timeout rules out folding them into a single query — so `--limit`
-  applies per name, results merge into one list, and a certificate matching two
-  of the names appears once carrying both matched identities.
-- `search --skip-expired` — only certificates that have not expired. It floors
-  the window at the server's own clock rather than a client-side timestamp, the
-  same rule that stops `expiring --skip-expired` surfacing an `EXPIRED` row. A
-  separate predicate rather than a zero-day `--valid-since`, because zero is
-  already `--all-history`; the two compose, and `--all-history --skip-expired`
-  means "everything crt.sh holds that is live today".
+- `search` accepts several names, and `--limit` applies to each:
+  `crt-query search example.com example.org`. (#11)
+- `search --skip-expired` shows only certificates that have not expired. (#11)
 
 ### Fixed
 
-- `--width` is now honoured exactly, in both directions. It could previously
-  neither narrow nor widen the wide result tables: comfy-table applies a column
-  constraint over the table width, so the no-wrap and minimum-width heuristics
-  added in 0.2.0 held every request open at roughly 190 columns, and
-  `ContentArrangement::Dynamic` stops at the natural content width rather than
-  spending surplus space. An explicit `--width` now switches to
-  `DynamicFullWidth` and drops those constraints — they exist to keep the
-  *automatic* layout readable, and should not overrule a width someone asked
-  for. Choosing the width automatically is unchanged.
+- `--width` is now honoured exactly, narrower or wider. (#11)
 
 ## [0.2.0] - 2026-09-03
 
 ### Added
 
-- `install.sh` and `install.ps1`: one-line installers for Linux/macOS and
-  Windows. Each detects the target triple, resolves the newest release through
-  `releases/latest/download` (so no version is hardcoded in the script or the
-  README), verifies the archive against that release's `SHA256SUMS`, and
-  installs. Re-running one is the upgrade path: it replaces the binary and
-  clears the macOS quarantine attribute or the Windows mark-of-the-web that
-  every fresh download arrives with. `--dir`/`-Dir` picks the destination and
-  `--version`/`-Version` pins a release.
-- Homebrew formula under `packaging/homebrew/`, so `brew upgrade` can carry the
-  macOS/Linux cohort forward. It is generated from a release's `SHA256SUMS` by
-  `just homebrew-formula`, which keeps its checksums from drifting away from
-  the archives they name. The generator only emits the completions call for a
-  release that actually has the `completions` subcommand: Homebrew builds those
-  scripts by *running* the installed binary, so calling it against an older
-  release aborts `brew install` outright rather than degrading — and no gate in
-  this repo catches that, because none of them runs a released binary. It also
-  leaves the `version` out of the formula, which Homebrew scans from the URLs
-  and `brew audit --strict` rejects as a duplicate.
-- `crt-query check-update` — reports whether a newer release exists, and exits
-  `0` either way. Opt-in on purpose: it is the only subcommand that contacts
-  anything other than crt.sh, and nothing checks in the background. `--json`
-  gives `current`, `latest`, `update_available` and `release_url`.
-- `crt-query completions <shell>` — completion scripts for bash, zsh, fish,
-  PowerShell and elvish, generated from the same clap definition the parser
-  uses, so they cannot drift from the flags they describe.
-- A config file for connection settings, read from
-  `$XDG_CONFIG_HOME/crt-query/config.toml` (`%APPDATA%\crt-query\config.toml`
-  on Windows), so a custom `--db-url` need not be repeated on every run.
-  Precedence is flag, then file, then built-in default. A missing file is fine;
-  an unparseable or misspelled key fails the run rather than being ignored, so
-  a typo cannot quietly redirect queries.
-- `expiring` accepts several domains: `crt-query expiring a.example b.example`.
-  One statement per domain — the statement timeout is what rules out folding
-  them into a single query — so `--limit` applies per domain. Results merge
-  into one report sorted by expiry, with a certificate covering two of the
-  domains appearing once and carrying both matched identities. Repeated domains
-  are collapsed case-insensitively rather than spending a second query on the
-  same rows.
-- A progress line on stderr (`querying crt.sh:5432 for "example.com"…`) before
-  each statement, because the shared guest database is intermittently slow and
-  a query that takes several seconds otherwise looks like a hang. Suppressed
-  when stderr is not a terminal, so scheduled runs keep clean logs.
+- One-line installers, `install.sh` for Linux and macOS and `install.ps1` for
+  Windows, that verify checksums; re-run one to upgrade. (#7)
+- A Homebrew formula. (#7)
+- `check-update` reports whether a newer release exists. Nothing checks in the
+  background. (#7)
+- `completions <shell>` for bash, zsh, fish, PowerShell and elvish. (#7)
+- A config file for connection settings, at
+  `$XDG_CONFIG_HOME/crt-query/config.toml` or
+  `%APPDATA%\crt-query\config.toml` on Windows. (#7)
+- `expiring` accepts several domains. (#7)
+- A progress line on stderr while a query runs, shown only in a terminal. (#7)
 
 ### Fixed
 
-- Table output: the crt.sh ID, Issuer CA ID, Serial, and both timestamp
-  columns no longer wrap — a serial cut mid-hex-digit or a timestamp split
-  between date and time is harder to read, not easier. Issuer, Matched
-  Identities, and Common Name now keep a minimum width instead of being
-  squeezed to a character per line once those columns claim their space.
+- Table columns such as IDs, serials and timestamps no longer wrap
+  mid-value. (#4)
 
 ## [0.1.0] - 2026-09-02
 
@@ -577,63 +222,11 @@ Initial release.
 
 ### Added
 
-- `search <query>` — find certificates by domain or identity, crt.sh style.
-  `--valid-since <days>` (default 365) bounds the server-side window to
-  certificates still valid within that period; `--all-history` removes the
-  bound. The bound matters: the guest database's statement timeout rules out a
-  server-side `ORDER BY`, so an unbounded `LIMIT` returns an arbitrary — in
-  practice the oldest — slice of matches.
-- `cert <id>` — full detail for one certificate by crt.sh ID, including subject,
-  SANs and the SHA-256 fingerprint.
-- `expiring <domain>` — certificates expiring within `--within <days>`
-  (default 30), with `--since-expired <days>` (default 30) bounding how far back
-  already-expired certificates are included. `--skip-expired` excludes them
-  entirely and is exactly `--since-expired 0`.
-- Three output formats: a terminal table by default, `--json` to stdout, and
-  `--csv <path>` to a file. Both flags are global and work with every
-  subcommand.
-- Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
-  `--db-url postgresql://…`.
-- `--width <cols>` to control table width.
-
-### Output guarantees
-
-- Timestamps are UTC throughout. JSON carries an explicit `Z`; table columns are
-  labelled `(UTC)`.
-- `--json` always emits valid JSON on every exit path, including `[]` for an
-  empty result and `null` for a `cert` ID that does not exist.
-- `--csv` always writes the file, including a header-only file for an empty
-  result, so a scheduled job never silently re-reads a previous run's report.
-  Multi-valued columns (matched identities, SANs) are written one row per value
-  rather than joined into a field, so the output is round-trippable.
-- `days_left` is floored: negative once a certificate has expired, and `0` only
-  within the last 24 hours before expiry.
-- Piping into `head`, or quitting `less` early, ends output cleanly instead of
-  reporting a broken pipe.
-- Exit codes: `0` completed (even with no results), `1` failed, `2` no
-  certificate with that crt.sh ID.
-
-### Behaviour worth knowing
-
-- Precertificate/leaf pairs are collapsed on `(issuer CA, serial)` — RFC 6962
-  requires both to carry the same serial — keeping the lowest crt.sh ID. A pair
-  is only collapsed when its validity windows also agree, so a serial collision
-  between genuinely different certificates keeps both. `--no-dedupe` shows raw
-  rows.
-- `expiring` decides window membership and the `EXPIRED`/`days_left` labels with
-  a single server-side clock, so `--skip-expired` cannot surface an `EXPIRED`
-  row.
-- A password embedded in `--db-url` is never echoed into error output.
-- `--limit`, `--within`, `--valid-since` and `--since-expired` are range-checked
-  client-side, before a connection is spent on the shared guest database.
-- Connections are retried (queries are not); failures report their underlying
-  cause rather than a bare "error connecting to server".
-
-### Supply chain
-
-- GitHub Actions pinned to full commit SHAs; dependencies locked by version and
-  checksum. `cargo-audit`, `cargo-deny` and CodeQL run on every PR and weekly.
-- Dual-licensed MIT OR Apache-2.0. Requires Rust 1.98+.
+- `search` finds certificates by domain or identity, `cert` shows one
+  certificate by crt.sh ID, and `expiring` lists certificates about to expire.
+- Table output by default, `--json` to stdout, and `--csv <path>` to a file.
+- Connection overrides: `--host`, `--port`, `--dbname`, `--user` and
+  `--db-url`.
 
 [Unreleased]: https://github.com/tiredithumans/crt-query/compare/v0.6.1...HEAD
 [0.6.1]: https://github.com/tiredithumans/crt-query/compare/v0.6.0...v0.6.1

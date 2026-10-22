@@ -9,4 +9,4 @@
 - [ ] `just verify` (fmt-check · lint · test · msrv · lint-scripts · doc)
 - [ ] `just verify-full` (adds cargo-audit + cargo-deny — required if `Cargo.toml`/`Cargo.lock` changed)
 - [ ] Exercised against the live crt.sh database (say which commands)
-- [ ] `CHANGELOG.md` updated under `## [Unreleased]` (user-facing changes only)
+- [ ] `CHANGELOG.md` updated under `## [Unreleased]` (user-facing changes only, one line each; see CONTRIBUTING.md)
