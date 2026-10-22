@@ -36,6 +36,34 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
 `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `deps:`. If the change
 is user-facing, add an entry under `## [Unreleased]` in `CHANGELOG.md`.
 
+## Writing changelog entries
+
+The changelog tells a user what changed for them. The why — root cause,
+history, the approach taken — belongs in the commit message and the PR, which
+each entry links to.
+
+- One short sentence, two at most, saying what the user will notice: a new
+  flag, a different exit code, a bug they no longer hit.
+- Commands, flags, exit codes, environment variables and files in backticks.
+  Nothing internal: no function, crate, CI job or SQL names.
+- End with the PR number: `(#54)`.
+- Start with `**Breaking:**` when the entry changes a machine contract (exit
+  codes, `--json` keys, CSV columns or format, config precedence), and say what
+  a script has to change.
+- Sections in this order, each only when it has entries: `Added`, `Changed`,
+  `Deprecated`, `Removed`, `Fixed`, `Security`. `Security` is for certificate
+  text that could spoof or attack the reader (display spoofing, spreadsheet
+  formulas, terminal escapes) and for verifying downloads.
+- Leave out CI, tests, refactors, lint policy and docs fixes, unless the old
+  docs told people to do something wrong. A release that only bumps
+  dependencies gets one line: "Updated dependencies; no behaviour change."
+
+```markdown
+- `expiring --fail-on-expiring` exits `4` when the report lists anything. (#50)
+- **Breaking:** `cert` exits `3` instead of `2` when no certificate has that ID.
+  Scripts that check for `2` need updating. (#14)
+```
+
 Dependabot's patch and minor PRs auto-merge once every required check passes
 (`.github/workflows/dependabot-automerge.yml`); semver-major bumps wait for a
 manual review and merge. If one falls behind `main` and Dependabot has not

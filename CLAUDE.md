@@ -41,7 +41,9 @@ them all. Clippy runs with `-D warnings`, rustdoc with `-D warnings`.
 - Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`,
   `deps:`). User-facing changes get an entry under `## [Unreleased]` in
   `CHANGELOG.md`; the release workflow reads its `## [X.Y.Z] - YYYY-MM-DD`
-  headers verbatim.
+  headers verbatim. An entry is one sentence on what the user will notice,
+  ending in the PR number; the why belongs in the commit and PR, not the
+  changelog (CONTRIBUTING.md § Writing changelog entries).
 - Comments explain *why*, usually with the history of the bug that motivated
   the code. Match that style, in British spelling (behaviour, sanitise).
 - Certificate text is attacker-chosen: table output goes through
