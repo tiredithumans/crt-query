@@ -123,17 +123,25 @@ pub struct Report<T> {
 }
 
 impl<T> Report<T> {
-    /// Whether this result is short because the row window filled, rather than
-    /// because crt.sh holds nothing more.
+    /// Whether some term filled its `--limit` window, so crt.sh may hold more
+    /// than this report shows.
     ///
-    /// `--limit` bounds identity rows, not certificates, and the collapse in
-    /// [`to_rows`] runs after the server has spent the window. A full window
-    /// that collapses is indistinguishable from a name that genuinely has a
-    /// handful of certificates — the confusion this names. Both halves of the
-    /// condition are required: a full window that collapsed nothing gave the
-    /// caller what they asked for; an unfilled window has nothing behind it.
-    pub fn window_hid_certificates(&self) -> bool {
-        !self.saturated.is_empty() && self.rows.len() < self.raw_rows
+    /// This used to require the collapse in [`to_rows`] to have merged rows
+    /// as well, on the reasoning that a full window that collapsed nothing
+    /// gave the caller what they asked for. It did not: the statement has no
+    /// `ORDER BY`, so a full window is an arbitrary, oldest-leaning slice that
+    /// the client then sorts newest-first. With `--no-dedupe`, or a term whose
+    /// every row was a distinct certificate, a truncated result printed as a
+    /// complete newest-first list with nothing on stderr to say otherwise.
+    pub fn window_filled(&self) -> bool {
+        !self.saturated.is_empty()
+    }
+
+    /// Whether the collapse in [`to_rows`] handed back fewer rows than the
+    /// window held — the case where the shortfall is most surprising, since
+    /// `--limit 10` can print two certificates.
+    pub fn window_collapsed(&self) -> bool {
+        self.rows.len() < self.raw_rows
     }
 }
 
@@ -439,12 +447,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The note exists because a full window and a genuinely small result look
-    /// identical in the output, so both halves of the condition carry weight.
-    /// All three cases are pinned: dropping either half of the `&&` leaves one
-    /// of these failing rather than the whole suite green.
+    /// A full window is worth a note whether or not it collapsed: without an
+    /// `ORDER BY` it is an arbitrary slice, not the newest rows. Only a window
+    /// that never filled has nothing behind it.
     #[test]
-    fn only_a_full_window_that_collapsed_is_worth_a_note() {
+    fn every_full_window_is_worth_a_note_and_only_a_full_one() {
         let report = |certs: usize, raw_rows: usize, saturated: bool| Report {
             rows: vec![(); certs],
             raw_rows,
@@ -454,12 +461,15 @@ mod tests {
                 Vec::new()
             },
         };
-        // 10 identity rows in, 2 certificates out, window full: the reported bug.
-        assert!(report(2, 10, true).window_hid_certificates());
-        // Full window, nothing collapsed: the caller got the rows they asked for.
-        assert!(!report(10, 10, true).window_hid_certificates());
+        // 10 identity rows in, 2 certificates out, window full.
+        assert!(report(2, 10, true).window_filled());
+        assert!(report(2, 10, true).window_collapsed());
+        // Full window, nothing collapsed: still truncated, and used to be
+        // reported as complete.
+        assert!(report(10, 10, true).window_filled());
+        assert!(!report(10, 10, true).window_collapsed());
         // Collapsed, but the window never filled: nothing is behind it to find.
-        assert!(!report(2, 10, false).window_hid_certificates());
+        assert!(!report(2, 10, false).window_filled());
     }
 
     /// A cache hit has to recognise a full window the same way a fresh fetch

@@ -359,7 +359,7 @@ mod tests {
             "ten rows against a --limit of ten is full"
         );
         assert!(
-            report.window_hid_certificates(),
+            report.window_filled() && report.window_collapsed(),
             "a full window that collapsed to two must not pass for a short answer"
         );
         // The duplicate commonName/SAN rows cost the window twice and show once.
