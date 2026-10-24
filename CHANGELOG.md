@@ -11,6 +11,31 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Changed
+
+- `search` and `expiring` print the `--limit` note whenever a name fills its
+  row window, including under `--no-dedupe`, so a truncated result no longer
+  passes for a complete one. (#63)
+- A terminal now shows `connecting to crt.sh:5432…` while the tool connects,
+  instead of nothing until the connection succeeds or fails. (#63)
+- `--help` for each subcommand lists the global flags under `Connection`,
+  `Output` and `Cache` headings, apart from the subcommand's own. (#63)
+
+### Fixed
+
+- A negative `--within`, `--since-expired`, `--valid-since`, `--limit` or
+  `--width` is reported as out of range instead of as an unknown flag. (#63)
+- An empty `expiring` result no longer ends "(in the first --limit rows)":
+  an empty result is complete. (#63)
+
+### Security
+
+- Every invisible Unicode format character in certificate text, such as the
+  soft hyphen in `exa\u{00ad}mple.com`, is shown as a visible escape in the
+  table and CSV, not just the bidi and zero-width ones. (#63)
+- Cached results are written readable by their owner only, even in a cache
+  directory that was created with looser permissions. (#63)
+
 ## [0.6.1] - 2026-10-05
 
 ### Fixed

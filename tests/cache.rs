@@ -467,6 +467,34 @@ fn quiet_silences_every_informational_line_but_keeps_the_output() {
     );
 }
 
+/// A full window that collapsed nothing is still a truncated, arbitrary slice.
+/// The note used to need a collapse as well, so two distinct certificates
+/// under `--limit 2` — or any full window under `--no-dedupe` — printed as a
+/// complete newest-first list with a clean stderr.
+#[test]
+fn a_full_window_is_noted_even_when_nothing_collapsed() {
+    let sandbox = Sandbox::new("full-uncollapsed");
+    let mut second = raw_row(2, "www.example.com");
+    second["serial"] = json!("0b");
+    sandbox.seed(
+        "",
+        &Key::search_with_limit("example.com", 2),
+        json!([raw_row(1, "example.com"), second]),
+    );
+
+    for extra in [&[][..], &["--no-dedupe"][..]] {
+        let args = [&["search", "example.com", "--limit", "2"][..], extra].concat();
+        let out = sandbox.run(&args);
+        assert_eq!(code(&out), 0, "{args:?}: stderr was:\n{}", stderr(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains("filled the server-side row window"),
+            "{args:?}: a full window went unreported:\n{err}"
+        );
+        assert!(!err.contains("collapsed"), "{args:?}: {err}");
+    }
+}
+
 /// `expiring --fail-on-expiring` exits 4 when the report lists anything, so a
 /// monitoring check can act on the status alone, and prints the report either
 /// way. Without the flag the same report is an ordinary exit 0.

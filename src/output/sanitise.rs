@@ -74,15 +74,54 @@ fn format_control_safe(value: &str) -> Cow<'_, str> {
     )
 }
 
-/// Characters that reorder the text around them while occupying no width.
+/// Every character that changes how the text around it is shown while showing
+/// nothing itself: Unicode general category Cf (format), plus the line and
+/// paragraph separators U+2028 and U+2029 (Zl, Zp), which a terminal or
+/// spreadsheet may break a line on without comfy-table knowing.
 ///
-/// `char::is_control()` is Cc only, so these took the borrowed fast path and
-/// reached comfy-table verbatim — which never appends a terminating PDF or
-/// PDI. Under the Unicode bidi algorithm (ICU, VTE, iTerm2 3.5+, browsers,
-/// spreadsheets), one U+202E renders the rest of the row reversed: the cell
-/// displays a hostname it does not contain. Display spoofing rather than
-/// corruption — these are zero-width and bounded to one line — on the same
-/// attacker-chosen-text threat model as `csv_safe`.
+/// Ranges rather than a list of named characters, because the lists this
+/// replaced were always one character short. They began with the bidi
+/// overrides — one U+202E renders the rest of a row reversed, so the cell
+/// shows a hostname it does not contain — then gained the zero-width spaces
+/// after `gi\u{200b}thub.com` passed for `github.com`. A review then found
+/// `exa\u{00ad}mple.com` (soft hyphen), U+2061..=U+2064 and the U+E0000 tag
+/// block doing the same thing, all Cf and none listed. The category is the
+/// rule; `BIDI_CONTROLS` and `ZERO_WIDTH_FORMATS` (test-only, so not linked)
+/// stay as the tests' named cases inside it.
+///
+/// Generated from Python's `unicodedata` (Unicode 15.1). `char::is_control()`
+/// is Cc only and std exposes no general category, and a Unicode crate would
+/// be a new dependency for one table. A later Unicode release that adds a Cf
+/// character leaves it unescaped until this table is regenerated.
+const FORMAT_RANGES: &[(char, char)] = &[
+    ('\u{00ad}', '\u{00ad}'),   // SOFT HYPHEN
+    ('\u{0600}', '\u{0605}'),   // ARABIC NUMBER SIGN ..
+    ('\u{061c}', '\u{061c}'),   // ARABIC LETTER MARK
+    ('\u{06dd}', '\u{06dd}'),   // ARABIC END OF AYAH
+    ('\u{070f}', '\u{070f}'),   // SYRIAC ABBREVIATION MARK
+    ('\u{0890}', '\u{0891}'),   // ARABIC POUND/PIASTRE MARK ABOVE
+    ('\u{08e2}', '\u{08e2}'),   // ARABIC DISPUTED END OF AYAH
+    ('\u{180e}', '\u{180e}'),   // MONGOLIAN VOWEL SEPARATOR
+    ('\u{200b}', '\u{200f}'),   // ZERO WIDTH SPACE .. RIGHT-TO-LEFT MARK
+    ('\u{2028}', '\u{202e}'),   // LINE SEPARATOR .. RIGHT-TO-LEFT OVERRIDE
+    ('\u{2060}', '\u{2064}'),   // WORD JOINER .. INVISIBLE PLUS
+    ('\u{2066}', '\u{206f}'),   // LEFT-TO-RIGHT ISOLATE .. NOMINAL DIGIT SHAPES
+    ('\u{feff}', '\u{feff}'),   // ZERO WIDTH NO-BREAK SPACE (BOM)
+    ('\u{fff9}', '\u{fffb}'),   // INTERLINEAR ANNOTATION ANCHOR ..
+    ('\u{110bd}', '\u{110bd}'), // KAITHI NUMBER SIGN
+    ('\u{110cd}', '\u{110cd}'), // KAITHI NUMBER SIGN ABOVE
+    ('\u{13430}', '\u{1343f}'), // EGYPTIAN HIEROGLYPH format controls
+    ('\u{1bca0}', '\u{1bca3}'), // SHORTHAND FORMAT LETTER OVERLAP ..
+    ('\u{1d173}', '\u{1d17a}'), // MUSICAL SYMBOL BEGIN BEAM ..
+    ('\u{e0001}', '\u{e0001}'), // LANGUAGE TAG
+    ('\u{e0020}', '\u{e007f}'), // TAG SPACE .. CANCEL TAG
+];
+
+/// Characters that reorder the text around them while occupying no width,
+/// under the Unicode bidi algorithm (ICU, VTE, iTerm2 3.5+, browsers,
+/// spreadsheets). comfy-table never appends a terminating PDF or PDI, so one
+/// U+202E reverses the rest of the row.
+#[cfg(test)]
 const BIDI_CONTROLS: &[char] = &[
     '\u{061c}', // ARABIC LETTER MARK
     '\u{200e}', // LEFT-TO-RIGHT MARK
@@ -98,17 +137,10 @@ const BIDI_CONTROLS: &[char] = &[
     '\u{2069}', // POP DIRECTIONAL ISOLATE
 ];
 
-/// Zero-width format characters that hide rather than reorder.
-///
-/// The second half of the same display-spoofing class, and the reason the
-/// comment above about "zero-width and bounded to one line" needs a rule of
-/// its own: these are category Cf, not Cc, so `char::is_control()` never
-/// covered them and `BIDI_CONTROLS` does not list them. None of them
-/// reorders anything — the threat is invisibility. A certificate logged with
-/// SAN `gi\u{200b}thub.com` renders as `github.com` in the table, pixel for
-/// pixel at any terminal font, and the same bytes survive `csv_safe` into
-/// the report people forward, so the look-alike reads as a genuine match for
-/// the queried domain in both formats — and pastes as something else.
+/// Zero-width format characters that hide rather than reorder: a SAN logged
+/// as `gi\u{200b}thub.com` renders as `github.com` pixel for pixel, and pastes
+/// as something else.
+#[cfg(test)]
 const ZERO_WIDTH_FORMATS: &[char] = &[
     '\u{200b}', // ZERO WIDTH SPACE
     '\u{200c}', // ZERO WIDTH NON-JOINER
@@ -117,10 +149,13 @@ const ZERO_WIDTH_FORMATS: &[char] = &[
     '\u{feff}', // BYTE ORDER MARK
 ];
 
-/// Whether a character takes width away without giving anything back: either
-/// it reorders the text around it or it hides inside it.
+/// Whether a character takes width away without giving anything back: it
+/// reorders the text around it, hides inside it, or breaks it. See
+/// [`FORMAT_RANGES`].
 fn is_format_control(c: char) -> bool {
-    is_bidi_control(c) || ZERO_WIDTH_FORMATS.contains(&c)
+    FORMAT_RANGES
+        .iter()
+        .any(|&(first, last)| (first..=last).contains(&c))
 }
 
 /// Whether a character has to be rendered as an escape rather than emitted.
@@ -130,11 +165,6 @@ fn is_format_control(c: char) -> bool {
 /// scalar finds nothing satisfying that range without also being a control.
 fn needs_escaping(c: char) -> bool {
     c != '\n' && (c.is_control() || is_format_control(c))
-}
-
-/// Whether `c` is one of the [`BIDI_CONTROLS`].
-fn is_bidi_control(c: char) -> bool {
-    BIDI_CONTROLS.contains(&c)
 }
 
 /// How an escaped character is rendered, shared by both sanitisers so the
@@ -326,6 +356,82 @@ mod tests {
                 "U+{:04X} reached the CSV verbatim: {safe:?}",
                 *c as u32
             );
+        }
+    }
+
+    /// The look-alikes the hand-written lists missed: each is category Cf (or
+    /// a line separator), renders as nothing in a terminal, and turned
+    /// `example.com` into a certificate that displayed as it while matching
+    /// something else.
+    #[test]
+    fn format_characters_outside_the_old_lists_are_escaped_in_both_formats() {
+        for c in [
+            '\u{00ad}',  // SOFT HYPHEN
+            '\u{180e}',  // MONGOLIAN VOWEL SEPARATOR
+            '\u{2028}',  // LINE SEPARATOR
+            '\u{2029}',  // PARAGRAPH SEPARATOR
+            '\u{2061}',  // FUNCTION APPLICATION
+            '\u{2064}',  // INVISIBLE PLUS
+            '\u{206f}',  // NOMINAL DIGIT SHAPES
+            '\u{e0001}', // LANGUAGE TAG
+            '\u{e0041}', // TAG LATIN CAPITAL LETTER A
+            '\u{e007f}', // CANCEL TAG
+        ] {
+            let hostile = format!("exa{c}mple.com");
+            let table = display_safe(&hostile);
+            assert!(
+                !table.contains(c),
+                "U+{:04X} reached the table verbatim: {table:?}",
+                c as u32
+            );
+            assert!(table.contains(&escaped(c)), "{table:?}");
+            let csv = csv_safe(&hostile);
+            assert!(
+                !csv.contains(c),
+                "U+{:04X} reached the CSV verbatim: {csv:?}",
+                c as u32
+            );
+        }
+    }
+
+    /// The named cases stay inside the category rule that replaced them, so
+    /// regenerating the table can never quietly drop one.
+    #[test]
+    fn the_named_bidi_and_zero_width_cases_are_inside_the_ranges() {
+        for c in BIDI_CONTROLS.iter().chain(ZERO_WIDTH_FORMATS) {
+            assert!(is_format_control(*c), "U+{:04X} left the table", *c as u32);
+        }
+    }
+
+    /// Ranges are written by hand from a generated list, so check they are
+    /// well formed and in order — an inverted pair would match nothing.
+    #[test]
+    fn the_format_ranges_are_ordered_and_disjoint() {
+        for (first, last) in FORMAT_RANGES {
+            assert!(
+                first <= last,
+                "U+{:04X} > U+{:04X}",
+                *first as u32,
+                *last as u32
+            );
+        }
+        for pair in FORMAT_RANGES.windows(2) {
+            assert!(
+                pair[0].1 < pair[1].0,
+                "{pair:?} overlap or are out of order"
+            );
+        }
+    }
+
+    /// Ordinary text next to the ranges is untouched: the plain hyphen and
+    /// space a DN is full of, and the letters either side of each block.
+    #[test]
+    fn neighbours_of_the_format_ranges_are_left_alone() {
+        for ordinary in [
+            "-", " ", "\u{00ac}", "\u{00ae}", "\u{2027}", "\u{2030}", "\u{2065}",
+        ] {
+            assert_eq!(display_safe(ordinary), ordinary);
+            assert_eq!(format_control_safe(ordinary), ordinary);
         }
     }
 

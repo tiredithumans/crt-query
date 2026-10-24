@@ -429,14 +429,32 @@ fn create_dir(dir: &Path) -> std::io::Result<()> {
 /// as the CSV destination in `output.rs`.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let scratch = scratch_path(path);
-    std::fs::write(&scratch, text)?;
-    match std::fs::rename(&scratch, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&scratch);
-            Err(e)
-        }
+    let written = write_private(&scratch, text).and_then(|()| std::fs::rename(&scratch, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&scratch);
     }
+    written
+}
+
+/// Create `path` owner-only and write `text` to it.
+///
+/// [`create_dir`] makes the directory 0700, but only a directory it creates:
+/// one that already existed with looser permissions — made by hand, by a
+/// backup restore, by another tool — kept them, and `std::fs::write` gave
+/// each entry the umask's 0644, so the searched-for names were readable by
+/// every account on the machine. The entry itself is now 0600 wherever it
+/// lands. `create_new` because the scratch name is this writer's alone, and
+/// refusing an existing file also refuses to write through a planted link.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(text.as_bytes())
 }
 
 /// Where the entry at `path` is written before it is renamed into place:
@@ -1036,6 +1054,25 @@ mod tests {
             );
             assert_eq!(root(None, Some("home/u")), None);
         }
+    }
+
+    /// The directory is only made 0700 when this module creates it, so an
+    /// entry has to protect itself: the names someone searched for are the
+    /// private part of a cache full of public certificates.
+    #[test]
+    #[cfg(unix)]
+    fn an_entry_is_owner_only_even_in_a_directory_that_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let cache = scratch("entry-mode", Mode::Enabled, DEFAULT_TTL);
+        let dir = cache.dir().unwrap().to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry = key("example.com");
+        cache.put(&entry, &vec![row(1, Utc::now())]);
+        let mode = std::fs::metadata(cache.path(&entry).unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "entry written {:o}", mode & 0o777);
     }
 
     /// The two lifetimes have to prune independently: a `search` write must not
