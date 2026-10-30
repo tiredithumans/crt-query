@@ -97,7 +97,7 @@ async fn run() -> Result<i32> {
                          {lookback} day(s); widen with --valid-since or --all-history."
                     );
                 }
-            } else if report.window_hid_certificates() {
+            } else if report.window_filled() {
                 notice!("{}", saturation_note(*limit, &terms, &report));
             }
             // Emitted even when empty: --json still owes the caller `[]`, and
@@ -138,20 +138,23 @@ async fn run() -> Result<i32> {
             )
             .await?;
             if report.rows.is_empty() {
+                // No `--limit` caveat: an empty result is a window that never
+                // filled, so it is the whole answer. It used to end "(in the
+                // first --limit rows)", hinting at a truncation that cannot
+                // have happened.
                 let names = quoted(&domains);
-                let limit_note = limit_note(&domains);
                 if lookback == 0 {
                     notice!(
                         "No unexpired certificates for {names} expiring within \
-                         {within} day(s) ({limit_note})."
+                         {within} day(s)."
                     );
                 } else {
                     notice!(
                         "No certificates for {names} expiring within {within} day(s) \
-                         or expired in the last {lookback} day(s) ({limit_note})."
+                         or expired in the last {lookback} day(s)."
                     );
                 }
-            } else if report.window_hid_certificates() {
+            } else if report.window_filled() {
                 notice!("{}", saturation_note(*limit, &domains, &report));
             }
             // Decided before writing, so a reader that goes away mid-report
@@ -263,13 +266,20 @@ fn quoted(terms: &[String]) -> String {
         .join(", ")
 }
 
-/// The note printed when the row window filled and the collapse handed back
-/// fewer certificates than rows.
+/// The note printed when a term filled its row window.
 ///
-/// `--limit` bounds identity rows, not certificates: crt.sh returns one row
-/// per identity per CT entry, and logs precertificates alongside leaves, so
-/// rows routinely collapse into one certificate. Without the note a full
-/// window reads as "that is all there is" — the one thing it does not mean.
+/// `--limit` bounds identity rows, not certificates, and the statement has no
+/// `ORDER BY`, so a full window is an arbitrary slice of what crt.sh holds —
+/// in practice the oldest — sorted newest-first only afterwards. Without the
+/// note a full window reads as "that is all there is", the one thing it does
+/// not mean.
+///
+/// Two shapes. When the collapse also merged rows the note gives both counts,
+/// because crt.sh returns one row per identity per CT entry and logs
+/// precertificates alongside leaves, so `--limit 10` can print two
+/// certificates. When nothing collapsed — `--no-dedupe`, or every row a
+/// distinct certificate — the counts agree and say nothing, so the note says
+/// what the window is instead. This second shape used to print nothing at all.
 ///
 /// Counts are run totals while `--limit` is per term, hence the "(per term)"
 /// parenthetical and naming only the terms that filled; unqualified, a
@@ -286,13 +296,22 @@ fn saturation_note<T>(limit: i64, terms: &[String], report: &Report<T>) -> Strin
         )
     };
     let (raw, certs) = (report.raw_rows, report.rows.len());
-    format!(
-        "note: --limit {limit}{per_term} filled the server-side row window{filled}; \
-         {raw} identity {rows} collapsed to {certs} {cert}. Raise --limit for \
-         more, or --no-dedupe for the raw rows.",
-        rows = plural(raw, "row"),
-        cert = plural(certs, "certificate"),
-    )
+    if report.window_collapsed() {
+        format!(
+            "note: --limit {limit}{per_term} filled the server-side row window{filled}; \
+             {raw} identity {rows} collapsed to {certs} {cert}. Raise --limit for \
+             more, or --no-dedupe for the raw rows.",
+            rows = plural(raw, "row"),
+            cert = plural(certs, "certificate"),
+        )
+    } else {
+        format!(
+            "note: --limit {limit}{per_term} filled the server-side row window{filled}, \
+             so crt.sh may hold more than these {certs} {rows}, and the window is an \
+             arbitrary slice rather than the newest. Raise --limit for more.",
+            rows = plural(certs, "row"),
+        )
+    }
 }
 
 /// English plural, so a one-certificate result does not read "1 certificates".
@@ -301,16 +320,6 @@ fn plural(n: usize, word: &str) -> String {
         word.to_string()
     } else {
         format!("{word}s")
-    }
-}
-
-/// The `--limit` caveat, which reads differently once more than one domain is
-/// in play because the limit applies to each of them.
-fn limit_note(domains: &[String]) -> &'static str {
-    if domains.len() == 1 {
-        "in the first --limit rows"
-    } else {
-        "in the first --limit rows per domain"
     }
 }
 
@@ -411,6 +420,38 @@ mod tests {
         );
     }
 
+    /// A full window that collapsed nothing — `--no-dedupe`, or every row its
+    /// own certificate — used to print no note at all, so a truncated,
+    /// arbitrary slice read as the complete newest-first list. The counts
+    /// agree here, so the note says what the window is instead, and does not
+    /// offer `--no-dedupe` as a way out of a collapse that did not happen.
+    #[test]
+    fn a_full_window_that_collapsed_nothing_still_says_it_is_truncated() {
+        let note = note_for(2, &["example.com"], 2, 2);
+        assert!(
+            note.contains("--limit 2 filled the server-side row window"),
+            "{note}"
+        );
+        assert!(note.contains("may hold more than these 2 rows"), "{note}");
+        assert!(
+            note.contains("arbitrary slice rather than the newest"),
+            "{note}"
+        );
+        assert!(!note.contains("collapsed"), "{note}");
+        assert!(!note.contains("--no-dedupe"), "{note}");
+
+        let multi = note_for_filled(
+            5,
+            &["busy.example", "quiet.example"],
+            &["busy.example"],
+            7,
+            7,
+        );
+        assert!(multi.contains("--limit 5 (per term)"), "{multi}");
+        assert!(multi.contains("for \"busy.example\""), "{multi}");
+        assert!(!multi.contains("quiet.example"), "{multi}");
+    }
+
     /// clap exits 2 on usage error and we don't control that, so none of our
     /// codes may be 2.
     #[test]
@@ -442,17 +483,15 @@ mod tests {
     }
 
     #[test]
-    fn one_domain_reads_as_a_single_limit_window() {
+    fn one_name_is_quoted_on_its_own() {
         let domains = ["example.com".to_string()];
         assert_eq!(quoted(&domains), "\"example.com\"");
-        assert_eq!(limit_note(&domains), "in the first --limit rows");
     }
 
     #[test]
-    fn several_domains_are_listed_and_the_limit_is_marked_per_domain() {
+    fn several_names_are_quoted_and_listed_in_order() {
         let domains = ["a.example".to_string(), "b.example".to_string()];
         assert_eq!(quoted(&domains), "\"a.example\", \"b.example\"");
-        assert_eq!(limit_note(&domains), "in the first --limit rows per domain");
     }
 
     fn cache_opts(no_cache: bool, refresh: bool) -> cli::CacheOpts {

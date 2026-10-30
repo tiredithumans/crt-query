@@ -33,7 +33,8 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// `CONNECT_TIMEOUT`, so five would be over a minute of silence. Retrying
 /// stops once this is spent, capping the phase at this plus one in-flight
 /// attempt — 45s, deliberately under the ~49s the old narrated schedule spent.
-/// The phase is silent now, so it must stay shorter than what it replaced.
+/// Attempts are no longer narrated (a terminal gets one "connecting to …"
+/// line, cron nothing), so it must stay shorter than what it replaced.
 const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// Ceiling on a single statement, handshake to last row.
@@ -422,6 +423,13 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
     let config = build_config(conn)?;
     let target = target(&config);
     let host = host_of(&config);
+    // One line before the phase, never one per attempt. The "querying …" hint
+    // only prints once a connection exists, so an unreachable host used to
+    // give a terminal 30 to 45 seconds of nothing before the error. Gated on a
+    // terminal like that hint, so scheduled runs keep clean logs.
+    if std::io::stderr().is_terminal() {
+        notice!("connecting to {target}…");
+    }
     let started = Instant::now();
     let mut causes: Vec<String> = Vec::new();
     let mut last_err: Option<anyhow::Error> = None;

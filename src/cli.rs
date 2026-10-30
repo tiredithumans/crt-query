@@ -14,13 +14,17 @@ pub const ALL_HISTORY: i32 = 0;
 #[derive(Parser)]
 #[command(name = "crt-query", version, about)]
 pub struct Cli {
-    #[command(flatten)]
+    // Headed groups, because these flags are global: without a heading clap
+    // lists them under a subcommand's own "Options", interleaved with its
+    // flags by declaration order, so `search --help` read `--host`,
+    // `--valid-since`, `--all-history`, `--port`.
+    #[command(flatten, next_help_heading = "Connection")]
     pub conn: ConnOpts,
 
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Output")]
     pub out: OutputOpts,
 
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Cache")]
     pub cache: CacheOpts,
 
     #[command(subcommand)]
@@ -53,7 +57,8 @@ pub struct ConnOpts {
     pub user: Option<String>,
 
     /// Full postgres:// URL; overrides --host/--port/--dbname/--user
-    /// (env: CRT_QUERY_DB_URL)
+    /// (env: CRT_QUERY_DB_URL — use that, or the config file, for a URL
+    /// carrying a password: a flag shows in `ps` and shell history)
     #[arg(long, global = true, value_name = "URL")]
     pub db_url: Option<String>,
 }
@@ -81,6 +86,7 @@ pub struct OutputOpts {
         long,
         global = true,
         value_name = "COLS",
+        allow_negative_numbers = true,
         value_parser = clap::value_parser!(u16).range(40..=1000),
     )]
     pub width: Option<u16>,
@@ -123,6 +129,7 @@ pub enum Commands {
             long,
             default_value_t = 365,
             value_name = "DAYS",
+            allow_negative_numbers = true,
             value_parser = clap::value_parser!(i32).range(1..=36_500),
         )]
         valid_since: i32,
@@ -142,6 +149,7 @@ pub enum Commands {
         #[arg(
             long,
             default_value_t = 100,
+            allow_negative_numbers = true,
             value_parser = clap::value_parser!(i64).range(1..=100_000),
         )]
         limit: i64,
@@ -172,6 +180,8 @@ pub enum Commands {
         #[arg(
             long,
             default_value_t = 30,
+            value_name = "DAYS",
+            allow_negative_numbers = true,
             value_parser = clap::value_parser!(i32).range(0..=36_500),
         )]
         within: i32,
@@ -182,6 +192,7 @@ pub enum Commands {
             long,
             default_value_t = 30,
             value_name = "DAYS",
+            allow_negative_numbers = true,
             value_parser = clap::value_parser!(i32).range(0..=36_500),
         )]
         since_expired: i32,
@@ -196,6 +207,7 @@ pub enum Commands {
         #[arg(
             long,
             default_value_t = 500,
+            allow_negative_numbers = true,
             value_parser = clap::value_parser!(i64).range(1..=100_000),
         )]
         limit: i64,
@@ -458,6 +470,58 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(&bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    /// A negative day count or limit is out of range, and should say so. clap
+    /// otherwise reads `-1` as an unknown flag and suggests `-- -1`, which
+    /// would pass it as a search term.
+    #[test]
+    fn a_negative_number_is_a_range_error_not_an_unknown_flag() {
+        for args in [
+            vec!["crt-query", "expiring", "a.example", "--within", "-1"],
+            vec![
+                "crt-query",
+                "expiring",
+                "a.example",
+                "--since-expired",
+                "-1",
+            ],
+            vec!["crt-query", "search", "a.example", "--valid-since", "-1"],
+            vec!["crt-query", "search", "a.example", "--limit", "-5"],
+            vec!["crt-query", "--width", "-80", "search", "a.example"],
+        ] {
+            let Err(err) = Cli::try_parse_from(&args) else {
+                panic!("accepted {args:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{args:?}"
+            );
+        }
+    }
+
+    /// Global flags sit under their own headings, not interleaved with a
+    /// subcommand's flags.
+    #[test]
+    fn global_flags_are_grouped_under_headings_in_subcommand_help() {
+        let mut command = Cli::command();
+        // Globals are copied into subcommands only when the command is built.
+        command.build();
+        let search = command
+            .find_subcommand_mut("search")
+            .expect("search exists");
+        let help = search.render_long_help().to_string();
+        let at = |needle: &str| {
+            help.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing:\n{help}"))
+        };
+        assert!(at("Connection:") < at("--host"), "{help}");
+        assert!(at("--skip-expired") < at("Connection:"), "{help}");
+        assert!(
+            at("Output:") < at("--json") && at("Cache:") < at("--no-cache"),
+            "{help}"
+        );
     }
 
     #[test]
