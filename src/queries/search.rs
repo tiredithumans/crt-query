@@ -168,6 +168,8 @@ pub async fn run_search(
         saturated: fetched.saturated,
         empty: fetched.empty,
         cached: fetched.cached,
+        renewed: 0,
+        renewals_unseen: Vec::new(),
     })
 }
 

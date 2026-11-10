@@ -208,9 +208,20 @@ crt-query cert 5c83f01af4edf38533f0da804bb740960120e9da1129216281a8542aea374bdd
 # What is expiring, or recently expired
 crt-query expiring example.com example.org --within 30
 
-# The same as a monitoring check: exit 4 when anything is listed
-crt-query --quiet expiring example.com --skip-expired --within 14 --fail-on-expiring
+# The same as a monitoring check: exit 4 when a certificate is running out
+# and nothing has replaced it
+crt-query --quiet expiring example.com --skip-expired --within 14 \
+    --ignore-renewed --fail-on-expiring
 ```
+
+`expiring` picks certificates by expiry date alone, so a certificate is listed
+through its last weeks even when its replacement was issued long ago — which,
+with automatic renewal, is always. `--ignore-renewed` leaves out a certificate
+when every name it matched is also on a certificate that outlives the
+`--within` window (a `*.example.com` certificate counts for `www.example.com`).
+It costs one more query per domain, and it only ever removes a row it has seen
+a replacement for: if that second query fills `--limit`, a renewed certificate
+may still be listed, and a note says so.
 
 `--json` writes JSON to stdout instead of a table, and `--csv <path>`
 additionally writes a CSV file. Both are global:

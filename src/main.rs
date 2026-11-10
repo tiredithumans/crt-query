@@ -136,6 +136,7 @@ async fn run() -> Result<i32> {
             skip_expired,
             limit,
             no_dedupe,
+            ignore_renewed,
             fail_on_expiring,
         } => {
             let domains = Commands::unique_terms(domain);
@@ -145,10 +146,13 @@ async fn run() -> Result<i32> {
                 &mut source,
                 &cache,
                 &domains,
-                *within,
-                lookback,
-                *limit,
-                !no_dedupe,
+                queries::expiring::Asked {
+                    within: *within,
+                    since_expired: lookback,
+                    limit: *limit,
+                    dedupe: !no_dedupe,
+                    ignore_renewed: *ignore_renewed,
+                },
             )
             .await?;
             if report.rows.is_empty() {
@@ -157,7 +161,14 @@ async fn run() -> Result<i32> {
                 // first --limit rows)", hinting at a truncation that cannot
                 // have happened.
                 let names = quoted(&domains);
-                if lookback == 0 {
+                if report.renewed > 0 {
+                    // Not "no certificates": there were some, and saying
+                    // otherwise would read as the domain having none.
+                    notice!(
+                        "Every certificate for {names} in the window has been \
+                         renewed; nothing needs attention."
+                    );
+                } else if lookback == 0 {
                     notice!(
                         "No unexpired certificates for {names} expiring within \
                          {within} day(s)."
@@ -302,6 +313,20 @@ fn closing_notes<T>(limit: i64, terms: &[String], report: &Report<T>) {
             notice!("note: nothing matched {}.", quoted(&report.empty));
         }
     }
+    if report.renewed > 0 {
+        notice!(
+            "note: left out {} {} already replaced by a newer one (--ignore-renewed).",
+            report.renewed,
+            plural(report.renewed, "certificate")
+        );
+    }
+    if !report.rows.is_empty() && !report.renewals_unseen.is_empty() {
+        notice!(
+            "note: --limit {limit} filled while looking for newer certificates for {}, \
+             so some of those listed may have been renewed. Raise --limit to check more.",
+            quoted(&report.renewals_unseen)
+        );
+    }
     if let Some(age) = report.cached {
         notice!(
             "note: answered from the local cache, stored {} ago; --refresh asks crt.sh again.",
@@ -442,6 +467,8 @@ mod tests {
                 saturated: saturated.iter().map(ToString::to_string).collect(),
                 empty: Vec::new(),
                 cached: None,
+                renewed: 0,
+                renewals_unseen: Vec::new(),
             },
         )
     }

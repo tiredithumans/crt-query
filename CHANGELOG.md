@@ -13,6 +13,9 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ### Added
 
+- `expiring --ignore-renewed` leaves out certificates whose names are all on a
+  newer certificate, so `--fail-on-expiring` no longer alerts on a domain that
+  renews on schedule. (#69)
 - `--csv -` writes the CSV to stdout in place of the table. (#68)
 - `--help` for `search`, `cert`, `expiring` and `completions` ends with
   examples. (#68)

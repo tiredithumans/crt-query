@@ -133,6 +133,11 @@ pub struct Report<T> {
     pub empty: Vec<String>,
     /// How old the oldest cache entry behind this report was, if any.
     pub cached: Option<std::time::Duration>,
+    /// Certificates `expiring --ignore-renewed` left out as already replaced.
+    pub renewed: usize,
+    /// The terms whose look for newer certificates filled its `--limit`
+    /// window, so some renewals may have gone unseen.
+    pub renewals_unseen: Vec<String>,
 }
 
 impl<T> Report<T> {
@@ -523,6 +528,8 @@ mod tests {
             },
             empty: Vec::new(),
             cached: None,
+            renewed: 0,
+            renewals_unseen: Vec::new(),
         };
         // 10 identity rows in, 2 certificates out, window full.
         assert!(report(2, 10, true).window_filled());

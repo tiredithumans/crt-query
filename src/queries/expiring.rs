@@ -114,6 +114,20 @@ impl OutputRecord for ExpiringRow {
     }
 }
 
+/// What an `expiring` run was asked for, flags already resolved.
+#[derive(Debug, Clone, Copy)]
+pub struct Asked {
+    /// Look-ahead, in days.
+    pub within: i32,
+    /// Look-back, in days; `0` for `--skip-expired`.
+    pub since_expired: i32,
+    /// Identity rows per domain.
+    pub limit: i64,
+    pub dedupe: bool,
+    /// Leave out certificates a longer-lived one has replaced.
+    pub ignore_renewed: bool,
+}
+
 /// Check one or more domains and merge the results into a single report.
 ///
 /// One statement per domain, in sequence — see [`fetch_by_term`] for why.
@@ -121,11 +135,15 @@ pub async fn run_expiring(
     source: &mut Source,
     cache: &Cache,
     domains: &[String],
-    within: i32,
-    since_expired: i32,
-    limit: i64,
-    dedupe: bool,
+    asked: Asked,
 ) -> Result<Report<ExpiringRow>> {
+    let Asked {
+        within,
+        since_expired,
+        limit,
+        dedupe,
+        ignore_renewed,
+    } = asked;
     let fetched = fetch_by_term(
         source,
         cache,
@@ -144,13 +162,112 @@ pub async fn run_expiring(
     // `drop_lapsed` for what that used to let through.
     drop_lapsed(&mut raw, Some(since_expired));
     let raw_rows = raw.len();
+    let mut rows = assemble_expiring(raw, dedupe);
+    let mut cached = fetched.cached;
+    let mut renewed = 0;
+    let mut renewals_unseen = Vec::new();
+    // Nothing listed, nothing to excuse: skip the second statement.
+    if ignore_renewed && !rows.is_empty() {
+        let later = fetch_later(source, cache, domains, within, limit).await?;
+        let before = rows.len();
+        let covered = Covered::by(&later.rows);
+        rows.retain(|row| !covered.all_of(&row.cert.matched_identities));
+        renewed = before - rows.len();
+        renewals_unseen = later.saturated;
+        cached = match (cached, later.cached) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+    }
     Ok(Report {
-        rows: assemble_expiring(raw, dedupe),
+        rows,
         raw_rows,
         saturated: fetched.saturated,
         empty: fetched.empty,
-        cached: fetched.cached,
+        cached,
+        renewed,
+        renewals_unseen,
     })
+}
+
+/// How far ahead the look for a replacement certificate reaches: the widest
+/// window the statement's `make_interval` is ever given.
+const FAR_AHEAD_DAYS: i32 = 36_500;
+
+/// The certificates for `domains` that outlive the `--within` window.
+///
+/// The same statement as the report itself, with the window moved: `$2`
+/// reaches as far ahead as it goes, and a *negative* look-back puts the floor
+/// at `now() + within` instead of behind `now()`. So there is no second
+/// statement to keep in step with the first, no new golden file, and the
+/// `LIMIT` window is still bounded by a validity predicate on both sides.
+async fn fetch_later(
+    source: &mut Source,
+    cache: &Cache,
+    domains: &[String],
+    within: i32,
+    limit: i64,
+) -> Result<crate::queries::Fetched> {
+    let floor = -within;
+    let mut later = fetch_by_term(
+        source,
+        cache,
+        domains,
+        EXPIRING_SQL.as_str(),
+        &[
+            (&FAR_AHEAD_DAYS, Type::INT4),
+            (&floor, Type::INT4),
+            (&limit, Type::INT8),
+        ],
+        limit,
+    )
+    .await?;
+    // A cached entry's floor has moved on with the clock, like any other.
+    drop_lapsed(&mut later.rows, Some(floor));
+    Ok(later)
+}
+
+/// The names that some longer-lived certificate carries.
+///
+/// What `--ignore-renewed` asks of each listed certificate: is every name it
+/// matched on here? `expiring` selects by notAfter alone, so it lists a
+/// certificate for its whole last month whether or not its replacement was
+/// issued weeks ago — which, for anything renewed automatically, is always.
+/// `--fail-on-expiring` then exited 4 for a healthy domain, every day.
+///
+/// Only ever positive evidence. A name is covered because a certificate
+/// carrying it was seen; one that went unseen — the look for newer
+/// certificates has a `--limit` too — leaves its certificate listed. The
+/// failure is an alert that was not needed, never one that was not raised.
+struct Covered(std::collections::BTreeSet<String>);
+
+impl Covered {
+    fn by(later: &[RawRow]) -> Self {
+        Self(
+            later
+                .iter()
+                .map(|row| row.matched_identity.to_lowercase())
+                .collect(),
+        )
+    }
+
+    /// Whether `name` is on a longer-lived certificate, itself or under a
+    /// wildcard one label up: `*.example.com` covers `www.example.com`, as it
+    /// does in a TLS handshake, and not `a.www.example.com`.
+    fn has(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        if self.0.contains(&name) {
+            return true;
+        }
+        name.split_once('.')
+            .is_some_and(|(_, parent)| self.0.contains(&format!("*.{parent}")))
+    }
+
+    /// Every one of `names`. A certificate with no name to check is not
+    /// excused by default.
+    fn all_of(&self, names: &[String]) -> bool {
+        !names.is_empty() && names.iter().all(|name| self.has(name))
+    }
 }
 
 /// Turn the rows every statement returned into the finished, sorted list.
@@ -260,6 +377,67 @@ mod tests {
             "labelled EXPIRED against the later clock; the earliest statement's \
              now() still had this certificate live"
         );
+    }
+
+    fn later(identities: &[&str]) -> Covered {
+        let n = now();
+        let rows: Vec<RawRow> = identities
+            .iter()
+            .map(|identity| RawRow {
+                matched_identity: (*identity).to_string(),
+                ..raw(9, n + Duration::days(80), n)
+            })
+            .collect();
+        Covered::by(&rows)
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(ToString::to_string).collect()
+    }
+
+    /// A certificate is renewed when every name it matched lives on; one
+    /// name left behind is the whole reason to keep the alert.
+    #[test]
+    fn a_certificate_is_renewed_only_when_every_name_on_it_is_covered() {
+        let covered = later(&["example.com", "WWW.example.com"]);
+        assert!(covered.all_of(&names(&["example.com"])));
+        assert!(
+            covered.all_of(&names(&["Example.com", "www.example.com"])),
+            "names compare without regard to case"
+        );
+        assert!(
+            !covered.all_of(&names(&["example.com", "mail.example.com"])),
+            "mail.example.com has no replacement and must stay listed"
+        );
+        assert!(!covered.all_of(&[]), "nothing to check is not a renewal");
+        assert!(!later(&[]).all_of(&names(&["example.com"])));
+    }
+
+    #[test]
+    fn a_wildcard_covers_one_label_and_no_more() {
+        let covered = later(&["*.example.com"]);
+        assert!(covered.has("www.example.com"));
+        assert!(covered.has("*.example.com"));
+        assert!(!covered.has("a.www.example.com"));
+        assert!(!covered.has("example.com"), "the apex is not under it");
+    }
+
+    /// The look for replacements re-sends the report's own statement with the
+    /// window moved, so its floor is a negative look-back. That only works
+    /// while both bounds are still in the text it sends.
+    #[test]
+    fn the_look_for_replacements_reuses_the_bounded_statement() {
+        assert!(EXPIRING_SQL.contains("- make_interval(days => $3)"));
+        assert!(EXPIRING_SQL.contains("+ make_interval(days => $2)"));
+        // And a cached replacement that has slipped back inside the window
+        // since it was stored is no longer one.
+        let n = now();
+        let mut rows = vec![
+            raw(1, n + Duration::days(29), n),
+            raw(2, n + Duration::days(31), n),
+        ];
+        drop_lapsed(&mut rows, Some(-30));
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2]);
     }
 
     #[test]
