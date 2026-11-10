@@ -262,12 +262,12 @@ anything close to renewal.
 | --- | --- |
 | Timestamps | UTC everywhere. JSON and CSV carry an explicit offset; table columns are labelled `(UTC)` and truncate to the minute |
 | `--json` | Always valid JSON, including `[]` for an empty result and `null` for a missing `cert` ID |
-| `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. The file is written beside the destination and renamed into place once complete, so a run that fails at any point — the write itself included — leaves the previous report untouched, and a reader never sees a partial one. A symlinked destination keeps its link. `check-update` writes a one-row file; `completions` writes none |
+| `--csv` | `search`, `cert` and `expiring` always write the file, header-only when empty, so a scheduled job never re-reads a stale report. The file is written beside the destination and renamed into place once complete, so a run that fails at any point — the write itself included — leaves the previous report untouched, and a reader never sees a partial one. A symlinked destination keeps its link. `check-update` writes a one-row file; `completions` and `cache` write none. `--csv -` writes the CSV to stdout in place of the table, for piping into `grep` or `cut`; it cannot be combined with `--json` |
 | CT-log text | Certificate fields are chosen by whoever got the certificate logged, so both the table and the CSV neutralise them: a cell a spreadsheet would evaluate as a formula is prefixed with `'`, and bidirectional overrides and zero-width format characters are written as `\u{202e}`, `\u{200b}` … rather than silently reordering a row or hiding a look-alike character in a domain. A leading `-` is quoted only when the field does not parse as a finite number, so a negative `days_left` is never touched while `-inf` is |
 | `completions` | Emits a shell script rather than a record, so it ignores both `--json` and `--csv` and never creates the CSV destination |
 | `days_left` | Floored: negative once expired, `0` only within the last 24 hours before expiry |
-| Table width | `--width <cols>` is met exactly, narrowing *or* widening. Without it: the terminal width, or 120 columns when stdout is a pipe |
-| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID · `4` `expiring --fail-on-expiring` found certificates to report. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
+| Table width | Without `--width` the table fits the terminal, or 120 columns when stdout is a pipe. If every column cannot fit, Serial, Issuer CA ID, Not Before and Common Name are left out in that order, with a note on stderr naming them; a terminal too narrow for what remains still overflows. `--width <cols>` is met exactly, narrowing *or* widening, and always shows every column. JSON and CSV are never trimmed |
+| Exit codes | `0` completed, even with no results · `1` failed · `3` no certificate with that crt.sh ID or SHA-256 fingerprint · `4` `expiring --fail-on-expiring` found certificates to report. `2` is clap's usage error, so a malformed command never looks like a missing certificate |
 
 Left to size itself, the table keeps atomic columns — an ID, a hex serial, a
 timestamp — off the wrapping list, and holds a floor under the free-text ones so
@@ -416,14 +416,27 @@ verifies what it fetches costs one line and does not.
 
 ## Shell completions
 
+Homebrew installs the bash, zsh and fish scripts for you. Otherwise:
+
 ```sh
-crt-query completions zsh  > ~/.zfunc/_crt-query
-crt-query completions bash > /usr/local/etc/bash_completion.d/crt-query
+# zsh: ~/.zshrc needs `fpath+=(~/.zfunc)` before `compinit`
+mkdir -p ~/.zfunc && crt-query completions zsh > ~/.zfunc/_crt-query
+
+# bash, with the bash-completion package installed
+mkdir -p ~/.local/share/bash-completion/completions
+crt-query completions bash > ~/.local/share/bash-completion/completions/crt-query
+
+# fish
 crt-query completions fish > ~/.config/fish/completions/crt-query.fish
 ```
 
-`powershell` and `elvish` work too. Homebrew installs the bash, zsh and fish
-scripts for you.
+For PowerShell, add this line to `$PROFILE`:
+
+```powershell
+crt-query completions powershell | Out-String | Invoke-Expression
+```
+
+`elvish` works too. `crt-query completions --help` repeats these.
 
 ## Notes on the data
 
@@ -442,8 +455,13 @@ shows the raw rows.
 connection limits, and is intermittently slow or unreachable. The tool retries
 connections (not queries), keeps every query on the full-text index, and never
 sorts server-side; sorting and dedup happen client-side over at most `--limit`
-rows. Dedup is best-effort within that window — a precert/leaf pair straddling
-the limit boundary may both appear.
+rows per name (100 by default for `search`, 500 for `expiring`). Dedup is
+best-effort within that window: a precert/leaf pair uses up two of its rows,
+and when only one half falls inside it that half is shown on its own.
+
+The database is reached directly, over outbound TCP port 5432. A network that
+only lets web traffic out — many office and guest networks — blocks it, and the
+tool then reports that nothing answered.
 
 A connection is retried up to five times, backing off from 250ms to 2s with a
 little jitter, and the whole connect phase is bounded so an unreachable host
@@ -453,7 +471,9 @@ retry is the shared database working as designed, not something to read an
 error about. When no attempt connects, the single error names the host and
 every distinct cause behind it.
 
-**Wildcards.** `%` and `_` in a search term act as SQL wildcards in the
+**Wildcards.** A `*` is not one: `*.example.com` matches only identities that
+contain that text, which is to say wildcard certificates. Search `example.com`
+to find every name under it. `%` and `_` in a search term act as SQL wildcards in the
 substring identity match — but every term must also satisfy the full-text
 identity predicate that keeps the query on crt.sh's index, and that predicate
 reads `%` and `_` as word breaks. Typo repair like `example_com` works; a

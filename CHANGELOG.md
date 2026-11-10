@@ -11,8 +11,27 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
 
 ## [Unreleased]
 
+### Added
+
+- `--csv -` writes the CSV to stdout in place of the table. (#68)
+- `--help` for `search`, `cert`, `expiring` and `completions` ends with
+  examples. (#68)
+
 ### Changed
 
+- The table fits the terminal (or 120 columns in a pipe) by leaving out the
+  Serial, Issuer CA ID, Not Before and Common Name columns as needed, and says
+  which on stderr; `--width` still shows every column. (#68)
+- The `--limit` note now prints after the table instead of before it. (#68)
+- A run answered from the cache says so on stderr, with how long ago the answer
+  was stored. (#68)
+- A run over several names notes each one that matched nothing. (#68)
+- `--help` text wraps to the terminal width. (#68)
+- A failed connection names the likely cause — an unresolved host name, or
+  nothing answering, which may be a firewall — instead of always suggesting
+  crt.sh is overloaded. (#68)
+- A `cert` lookup that finds nothing suggests retrying later with `--refresh`.
+  (#68)
 - `search` and `expiring` print the `--limit` note whenever a name fills its
   row window, including under `--no-dedupe`, so a truncated result no longer
   passes for a complete one. (#63)
@@ -45,6 +64,8 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   to lower a `--limit` it does not have. (#67)
 - A cache entry with an out-of-range clock is ignored instead of crashing the
   run. (#67)
+- The `cert` table no longer breaks the SHA-256 fingerprint across two lines.
+  (#68)
 
 ### Security
 

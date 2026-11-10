@@ -166,6 +166,8 @@ pub async fn run_search(
         rows: assemble_search(raw, dedupe),
         raw_rows,
         saturated: fetched.saturated,
+        empty: fetched.empty,
+        cached: fetched.cached,
     })
 }
 

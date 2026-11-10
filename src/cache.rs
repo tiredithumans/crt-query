@@ -289,16 +289,24 @@ impl Cache {
         }
     }
 
-    /// Look up cached rows, replaying their server clock forward.
+    /// The rows alone, for tests that have no use for an entry's age.
+    #[cfg(test)]
+    pub fn get_rows(&self, key: &Key) -> Option<Vec<RawRow>> {
+        self.get_rows_aged(key).map(|(rows, _)| rows)
+    }
+
+    /// Look up cached rows, replaying their server clock forward, with how
+    /// long ago the entry was written so the caller can say an answer is not
+    /// fresh.
     ///
     /// `server_now` rides on every row so window membership and the
     /// EXPIRED/days-left labels are decided by a single clock (see
     /// `IDENTITY_QUERY`). Handing back a stale reading would reintroduce the
     /// skew it exists to prevent; advancing it by the entry's age keeps the
     /// client-to-server correction, which a local `Utc::now()` cannot reproduce.
-    pub fn get_rows(&self, key: &Key) -> Option<Vec<RawRow>> {
-        let (mut rows, age) = self.get::<Vec<RawRow>>(key)?;
-        let age = chrono::Duration::from_std(age).ok()?;
+    pub fn get_rows_aged(&self, key: &Key) -> Option<(Vec<RawRow>, Duration)> {
+        let (mut rows, stored) = self.get::<Vec<RawRow>>(key)?;
+        let age = chrono::Duration::from_std(stored).ok()?;
         for row in &mut rows {
             // Checked: `+=` panics on overflow, and an entry is a file anyone
             // with the directory can edit. One carrying a clock at the end of
@@ -306,7 +314,7 @@ impl Cache {
             // module's promise is that nothing in the cache can fail a run.
             row.server_now = row.server_now.checked_add_signed(age)?;
         }
-        Some(rows)
+        Some((rows, stored))
     }
 
     /// Delete every entry, reporting how many went and how many would not.

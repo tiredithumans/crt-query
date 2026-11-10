@@ -644,3 +644,96 @@ fn quiet_silences_the_empty_and_not_found_explanations() {
     assert_eq!(code(&missing), 3, "not found is still exit 3");
     assert_eq!(stderr(&missing), "");
 }
+
+/// What a report cannot say for itself, said after it: that a name among
+/// several matched nothing, and that the answer came out of the cache. Both
+/// used to be silent, so a typo beside a real domain looked like a domain with
+/// no certificates and an hour-old answer looked like a fresh one.
+#[test]
+fn a_report_is_followed_by_what_it_cannot_say_for_itself() {
+    let sandbox = Sandbox::new("closing-notes");
+    sandbox.seed(
+        "",
+        &Key::search("example.com"),
+        json!([raw_row(4242, "example.com")]),
+    );
+    sandbox.seed("", &Key::search("exmaple.org"), json!([]));
+
+    let out = sandbox.run(&["search", "example.com", "exmaple.org"]);
+    assert_eq!(code(&out), 0, "stderr was:\n{}", stderr(&out));
+    assert_never_dialled(&out);
+    let err = stderr(&out);
+    assert!(err.contains("nothing matched \"exmaple.org\""), "{err}");
+    assert!(!err.contains("nothing matched \"example.com\""), "{err}");
+    assert!(err.contains("answered from the local cache"), "{err}");
+    assert!(err.contains("--refresh"), "{err}");
+}
+
+/// The table has to fit the 120 columns a pipe is laid out for. Its column
+/// floors alone used to come to more than that, so every line overflowed.
+#[test]
+fn a_piped_table_fits_its_width_and_says_what_it_left_out() {
+    let sandbox = Sandbox::new("table-fit");
+    let mut row = raw_row(22_625_564_176, "a-reasonably-long-name.service.example.com");
+    row["serial"] = json!("0a".repeat(18));
+    row["issuer_name"] = json!("C=GB, O=Sectigo Limited, CN=Sectigo Public Server CA");
+    sandbox.seed("", &Key::search("example.com"), json!([row]));
+
+    let out = sandbox.run(&["search", "example.com"]);
+    assert_eq!(code(&out), 0, "stderr was:\n{}", stderr(&out));
+    let table = stdout(&out);
+    let widest = table.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+    assert!(widest <= 120, "{widest} columns:\n{table}");
+    assert!(table.contains("Matched Identities"), "{table}");
+    assert!(
+        stderr(&out).contains("left out"),
+        "a column went missing without a word: {}",
+        stderr(&out)
+    );
+
+    // Asked for a width, the same row comes with every column.
+    let wide = sandbox.run(&["--width", "200", "search", "example.com"]);
+    assert!(stdout(&wide).contains("Serial"), "{}", stdout(&wide));
+    assert!(!stderr(&wide).contains("left out"), "{}", stderr(&wide));
+}
+
+/// `--csv -` is the CSV on stdout in place of the table, and no file named
+/// `-`. Header-only for an empty result, like the file.
+#[test]
+fn a_dash_sends_the_csv_to_stdout_instead_of_the_table() {
+    let sandbox = Sandbox::new("csv-stdout");
+    sandbox.seed(
+        "",
+        &Key::search("example.com"),
+        json!([raw_row(4242, "example.com")]),
+    );
+    sandbox.seed("", &Key::search("nothing.example"), json!([]));
+
+    let run_in_sandbox = |args: &[&str]| {
+        sandbox
+            .command()
+            .current_dir(&sandbox.root)
+            .args(args)
+            .args(["--host", "127.0.0.1", "--port", "1"])
+            .output()
+            .expect("failed to run the crt-query binary")
+    };
+    let out = run_in_sandbox(&["--csv", "-", "search", "example.com"]);
+    assert_eq!(code(&out), 0, "stderr was:\n{}", stderr(&out));
+    let text = stdout(&out);
+    let mut lines = text.lines();
+    assert!(lines.next().unwrap().starts_with("crt.sh ID,"), "{text}");
+    assert!(lines.next().unwrap().starts_with("4242,"), "{text}");
+    assert_eq!(lines.next(), None, "{text}");
+    assert!(!stderr(&out).contains("CSV row(s)"), "{}", stderr(&out));
+    assert!(
+        !sandbox.root.join("-").exists(),
+        "a file named - was created"
+    );
+
+    let empty = run_in_sandbox(&["--csv", "-", "search", "nothing.example"]);
+    assert_eq!(stdout(&empty).lines().count(), 1, "{}", stdout(&empty));
+
+    let both = run_in_sandbox(&["--csv", "-", "--json", "search", "example.com"]);
+    assert_eq!(code(&both), 2, "{}", stderr(&both));
+}
