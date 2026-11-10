@@ -252,7 +252,11 @@ fn raw_row(id: i64, identity: &str) -> Value {
         "serial": "0a",
         "not_before": "2026-01-01T00:00:00Z",
         "not_after": "2026-12-31T00:00:00Z",
-        "server_now": chrono::Utc::now(),
+        // A fixed clock rather than the wall clock. A cached row that has
+        // left its window by its replayed clock is dropped, so against
+        // `Utc::now()` every test seeding this row would start failing once
+        // the notAfter above had passed.
+        "server_now": "2026-06-01T00:00:00Z",
     })
 }
 

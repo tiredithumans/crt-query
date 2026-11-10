@@ -71,30 +71,54 @@ pub struct Db {
     target: String,
 }
 
+/// What kind of statement failed, which decides the advice worth giving.
+///
+/// The timeout messages used to tell everyone to try "a more specific search
+/// term or a lower --limit", including `cert`, which has neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Statement {
+    /// A `search`/`expiring` identity scan, bounded by a term and `--limit`.
+    Window,
+    /// A `cert` point lookup: nothing about it can be narrowed.
+    Lookup,
+}
+
+impl Statement {
+    /// What the caller can change to make a too-slow statement finish, if
+    /// anything; otherwise all that is left is to try again.
+    fn narrowing(self) -> &'static str {
+        match self {
+            Self::Window => "try a more specific search term or a lower --limit",
+            Self::Lookup => "retry in a moment",
+        }
+    }
+}
+
 impl Db {
+    /// Whether the connection behind this client has gone away.
+    fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
     /// Run a query, translating guest-DB failure modes into actionable errors.
     ///
     /// `subject` is what this statement is looking up — a domain, a search
-    /// term, a certificate ID — and appears in the progress hint.
+    /// term, a certificate ID — and appears in the progress hint. `kind`
+    /// picks the advice a timeout carries.
     ///
     /// `query_typed` uses the unnamed prepared statement: crt.sh sits behind a
     /// transaction-pooling pgbouncer, where named prepared statements fail.
     pub async fn query(
         &self,
         subject: &str,
+        kind: Statement,
         sql: &str,
         params: &[(&(dyn ToSql + Sync), Type)],
     ) -> Result<Vec<Row>> {
         self.hint(subject);
         match tokio::time::timeout(QUERY_TIMEOUT, self.client.query_typed(sql, params)).await {
-            Ok(result) => result.map_err(|e| self.explain(e)),
-            Err(_) => Err(anyhow::anyhow!(
-                "{} did not answer within {}s; the guest database is shared and \
-                 intermittently slow — retry, or narrow the query with a more \
-                 specific term or a lower --limit",
-                self.target,
-                QUERY_TIMEOUT.as_secs()
-            )),
+            Ok(result) => result.map_err(|e| self.explain(e, kind)),
+            Err(_) => Err(anyhow::anyhow!(unanswered(&self.target, kind))),
         }
     }
 
@@ -110,16 +134,34 @@ impl Db {
         }
     }
 
-    fn explain(&self, err: tokio_postgres::Error) -> anyhow::Error {
+    fn explain(&self, err: tokio_postgres::Error, kind: Statement) -> anyhow::Error {
         match explain_context(
             err.code(),
             self.conn_err.get().map(String::as_str),
             err.is_closed(),
             &self.target,
+            kind,
         ) {
             Some(context) => anyhow::Error::new(err).context(context),
             None => anyhow::Error::new(err),
         }
+    }
+}
+
+/// The error for a statement the server never answered inside
+/// [`QUERY_TIMEOUT`].
+fn unanswered(target: &str, kind: Statement) -> String {
+    let secs = QUERY_TIMEOUT.as_secs();
+    match kind {
+        Statement::Window => format!(
+            "{target} did not answer within {secs}s; the guest database is shared and \
+             intermittently slow — retry, or narrow the query with a more \
+             specific term or a lower --limit"
+        ),
+        Statement::Lookup => format!(
+            "{target} did not answer within {secs}s; the guest database is shared and \
+             intermittently slow — retry in a moment"
+        ),
     }
 }
 
@@ -138,18 +180,18 @@ fn explain_context(
     conn_err: Option<&str>,
     is_closed: bool,
     target: &str,
+    kind: Statement,
 ) -> Option<String> {
     match code {
-        Some(&SqlState::QUERY_CANCELED) => Some(
-            "the crt.sh guest database cancelled the query (statement timeout); \
-             try a more specific search term or a lower --limit"
-                .to_string(),
-        ),
-        Some(&SqlState::TOO_MANY_CONNECTIONS) => Some(
-            "the crt.sh guest database is at its connection limit; \
-             wait a moment and retry"
-                .to_string(),
-        ),
+        // Named by target, not as "the crt.sh guest database": with `--host`
+        // these described a server the run never spoke to.
+        Some(&SqlState::QUERY_CANCELED) => Some(format!(
+            "{target} cancelled the query (statement timeout); {}",
+            kind.narrowing()
+        )),
+        Some(&SqlState::TOO_MANY_CONNECTIONS) => Some(format!(
+            "{target} is at its connection limit; wait a moment and retry"
+        )),
         Some(
             &SqlState::ADMIN_SHUTDOWN
             | &SqlState::CRASH_SHUTDOWN
@@ -518,12 +560,19 @@ impl Source {
         Self { conn, db: None }
     }
 
-    /// The connection, dialled on first call and reused after that.
+    /// The connection, dialled on first call and reused while it lives.
     ///
     /// A failed dial is not remembered: retry policy belongs to [`connect`],
     /// and caching a failure here would shorten its budget for later terms.
+    ///
+    /// A connection that has since closed is dialled again. This used to
+    /// check only whether one had ever been made, so when the guest database
+    /// or its pgbouncer dropped the idle connection between two terms, the
+    /// second failed as "closed mid-query" with no statement in flight. That
+    /// is still retrying a connection, never a query: a statement that fails
+    /// is reported, not re-sent.
     pub async fn db(&mut self) -> Result<&Db> {
-        if self.db.is_none() {
+        if self.db.as_ref().is_none_or(Db::is_closed) {
             self.db = Some(connect(&self.conn).await?);
         }
         Ok(self.db.as_ref().expect("just connected"))
@@ -773,8 +822,14 @@ mod tests {
 
     #[test]
     fn each_mapped_sqlstate_explains_itself() {
-        let cancelled =
-            explain_context(Some(&SqlState::QUERY_CANCELED), None, false, "crt.sh:5432").unwrap();
+        let cancelled = explain_context(
+            Some(&SqlState::QUERY_CANCELED),
+            None,
+            false,
+            "crt.sh:5432",
+            Statement::Window,
+        )
+        .unwrap();
         assert!(cancelled.contains("statement timeout"), "{cancelled}");
         assert!(cancelled.contains("--limit"), "{cancelled}");
 
@@ -783,6 +838,7 @@ mod tests {
             None,
             false,
             "crt.sh:5432",
+            Statement::Window,
         )
         .unwrap();
         assert!(busy.contains("connection limit"), "{busy}");
@@ -792,10 +848,94 @@ mod tests {
             None,
             false,
             "db.internal:6432",
+            Statement::Window,
         )
         .unwrap();
         assert!(shutdown.contains("db.internal:6432"), "{shutdown}");
         assert!(shutdown.contains("closed the connection"), "{shutdown}");
+    }
+
+    /// `cert` has no term to sharpen and no `--limit` to lower, and
+    /// `--host` is not crt.sh.
+    #[test]
+    fn timeout_advice_fits_the_statement_and_names_the_real_host() {
+        let cancelled = explain_context(
+            Some(&SqlState::QUERY_CANCELED),
+            None,
+            false,
+            "db.internal:6432",
+            Statement::Lookup,
+        )
+        .unwrap();
+        assert!(cancelled.contains("statement timeout"), "{cancelled}");
+        assert!(cancelled.contains("db.internal:6432"), "{cancelled}");
+        assert!(!cancelled.contains("crt.sh"), "{cancelled}");
+        assert!(!cancelled.contains("--limit"), "{cancelled}");
+
+        let silent = unanswered("db.internal:6432", Statement::Lookup);
+        assert!(!silent.contains("--limit"), "{silent}");
+        assert!(unanswered("crt.sh:5432", Statement::Window).contains("--limit"));
+    }
+
+    /// The guest database drops idle connections. A dead one used to be kept
+    /// for the next term, which then failed as "closed mid-query".
+    ///
+    /// The server here is a thread that completes the startup exchange and
+    /// hangs up: enough for the driver to hand back a client, and for that
+    /// client to notice it is alone. Loopback only; nothing leaves the machine.
+    #[tokio::test]
+    async fn a_connection_that_closed_is_dialled_again() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                // StartupMessage: a four-byte length that counts itself.
+                let mut len = [0u8; 4];
+                if stream.read_exact(&mut len).is_err() {
+                    continue;
+                }
+                let mut rest = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
+                if stream.read_exact(&mut rest).is_err() {
+                    continue;
+                }
+                seen.fetch_add(1, Ordering::SeqCst);
+                // AuthenticationOk, then ReadyForQuery (idle); then hang up.
+                let _ = stream.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I");
+            }
+        });
+
+        let mut source = Source::new(Conn {
+            host: "127.0.0.1".into(),
+            port,
+            dbname: crate::config::DEFAULT_DBNAME.into(),
+            user: "guest".into(),
+            db_url: None,
+        });
+        source.db().await.expect("the first dial");
+        // The connection task has to run to see the hang-up.
+        for _ in 0..200 {
+            if source.db.as_ref().is_some_and(Db::is_closed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            source.db.as_ref().is_some_and(Db::is_closed),
+            "the client never noticed the server hang up"
+        );
+
+        source.db().await.expect("the second dial");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "a closed connection was reused instead of dialled again"
+        );
     }
 
     #[test]
@@ -803,22 +943,37 @@ mod tests {
         // Wrapping an unrecognised SQLSTATE in a guess would bury the one
         // description that is actually authoritative.
         assert_eq!(
-            explain_context(Some(&SqlState::SYNTAX_ERROR), None, false, "crt.sh:5432"),
+            explain_context(
+                Some(&SqlState::SYNTAX_ERROR),
+                None,
+                false,
+                "crt.sh:5432",
+                Statement::Window
+            ),
             None
         );
-        assert_eq!(explain_context(None, None, false, "crt.sh:5432"), None);
+        assert_eq!(
+            explain_context(None, None, false, "crt.sh:5432", Statement::Window),
+            None
+        );
     }
 
     #[test]
     fn the_connection_tasks_cause_beats_a_bare_closed_flag() {
-        let with_cause =
-            explain_context(None, Some("connection reset by peer"), true, "crt.sh:5432").unwrap();
+        let with_cause = explain_context(
+            None,
+            Some("connection reset by peer"),
+            true,
+            "crt.sh:5432",
+            Statement::Window,
+        )
+        .unwrap();
         assert!(
             with_cause.contains("connection reset by peer"),
             "the socket's real cause was dropped: {with_cause}"
         );
 
-        let bare = explain_context(None, None, true, "crt.sh:5432").unwrap();
+        let bare = explain_context(None, None, true, "crt.sh:5432", Statement::Window).unwrap();
         assert!(bare.contains("was closed mid-query"), "{bare}");
     }
 

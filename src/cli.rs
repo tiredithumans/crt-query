@@ -119,7 +119,7 @@ pub enum Commands {
         /// wildcards finds nothing.
         /// Several may be given; --limit applies per term, and results are
         /// merged (and deduplicated) across all of them
-        #[arg(required = true, num_args = 1.., value_parser = non_blank_term)]
+        #[arg(required = true, num_args = 1.., value_parser = normalised_term)]
         query: Vec<String>,
 
         /// Only consider certificates still valid within this many days of
@@ -173,7 +173,7 @@ pub enum Commands {
     Expiring {
         /// Domains to check; --limit applies per domain, and results are
         /// merged (and deduplicated) across all of them
-        #[arg(required = true, num_args = 1.., value_parser = non_blank_term)]
+        #[arg(required = true, num_args = 1.., value_parser = normalised_term)]
         domain: Vec<String>,
 
         /// Look-ahead window in days
@@ -198,7 +198,7 @@ pub enum Commands {
         since_expired: i32,
 
         /// Exclude certificates that have already expired
-        /// (equivalent to --since-expired 0)
+        /// (equivalent to --since-expired 0). Needs a --within of at least 1
         #[arg(long, conflicts_with = "since_expired")]
         skip_expired: bool,
 
@@ -286,19 +286,74 @@ impl Commands {
     }
 }
 
-/// A `search` term or `expiring` domain, rejected at parse time when it is
-/// empty or only whitespace.
+/// A `search` term or `expiring` domain, tidied and checked at parse time.
 ///
 /// An empty term still costs a statement against the shared guest database
 /// (`plainto_tsquery` of nothing matches no row), and usually comes from an
 /// unset shell variable. "No certificates" is a result people act on, so a
 /// slip must read as a usage error — the same reasoning that keeps
-/// `EXIT_NOT_FOUND` off clap's 2. Whitespace inside a term is left alone.
-fn non_blank_term(term: &str) -> Result<String, String> {
-    if term.trim().is_empty() {
-        Err("a term cannot be empty or only whitespace".to_string())
+/// `EXIT_NOT_FOUND` off clap's 2.
+///
+/// The same reasoning covers what a term picks up on its way here. Terms used
+/// to be bound exactly as typed, so `example.com\r` — every line `xargs` reads
+/// from a CRLF file — became the pattern `%example.com\r%`, matched nothing,
+/// and reported "No certificates found" with the terminal swallowing the one
+/// character that explained it. So:
+///
+/// - surrounding whitespace is trimmed;
+/// - a control character anywhere else is refused, since no identity holds one;
+/// - one trailing dot is dropped from a term with no whitespace in it: the
+///   fully-qualified spelling `example.com.` cannot match the identity
+///   `example.com`. A term with whitespace is a DN fragment such as
+///   `O=Example, Inc.`, where the dot is the caller's to keep.
+///
+/// Whitespace inside a term is left alone.
+fn normalised_term(term: &str) -> Result<String, String> {
+    const EMPTY: &str = "a term cannot be empty or only whitespace";
+    let term = term.trim();
+    if term.is_empty() {
+        return Err(EMPTY.to_string());
+    }
+    if let Some(c) = term.chars().find(|c| c.is_control()) {
+        return Err(format!(
+            "a term cannot contain a control character (found {})",
+            c.escape_default()
+        ));
+    }
+    let term = if term.contains(char::is_whitespace) {
+        term
     } else {
-        Ok(term.to_string())
+        term.strip_suffix('.').unwrap_or(term)
+    };
+    if term.is_empty() {
+        return Err(EMPTY.to_string());
+    }
+    Ok(term.to_string())
+}
+
+impl Cli {
+    /// Reject flag combinations clap's attributes cannot express, as the same
+    /// usage error (exit 2) clap gives for the ones it can.
+    ///
+    /// `expiring --within 0 --skip-expired` asks for certificates expiring no
+    /// later than now and no earlier than now: the window is a single instant
+    /// of the server's microsecond clock, so nothing can ever match and
+    /// `--fail-on-expiring` could never fire. A check that cannot alert is
+    /// worse than one that fails to start.
+    pub fn validate(&self) -> Result<(), clap::Error> {
+        if let Commands::Expiring {
+            within: 0,
+            skip_expired: true,
+            ..
+        } = self.command
+        {
+            return Err(Self::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--within 0 with --skip-expired can never match a certificate; \
+                 use --within 1 or more, or drop --skip-expired",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -401,19 +456,82 @@ mod tests {
         }
     }
 
-    /// Only a term with nothing else in it is refused: whitespace around or
-    /// inside a value is the caller's to keep.
+    /// Whitespace inside a term is the caller's to keep; whitespace around it
+    /// is how a term arrives from `xargs` or a CRLF file, and used to be bound
+    /// into the pattern, where it matched nothing.
     #[test]
-    fn a_term_with_whitespace_in_it_is_passed_through_as_given() {
-        let cli = Cli::try_parse_from(["crt-query", "search", " example.com ", "O=Example, Inc."])
-            .unwrap();
+    fn a_term_is_trimmed_but_whitespace_inside_it_is_kept() {
+        let cli = Cli::try_parse_from([
+            "crt-query",
+            "search",
+            " example.com ",
+            "example.org\r",
+            "O=Example, Inc.",
+        ])
+        .unwrap();
         let Commands::Search { query, .. } = cli.command else {
             panic!("expected the search subcommand");
         };
         assert_eq!(
             query,
-            vec![" example.com ".to_string(), "O=Example, Inc.".to_string()]
+            vec![
+                "example.com".to_string(),
+                "example.org".to_string(),
+                "O=Example, Inc.".to_string()
+            ]
         );
+    }
+
+    /// `example.com.` is how a fully-qualified name is written, and no
+    /// identity is stored that way. A DN fragment keeps its full stop.
+    #[test]
+    fn one_trailing_dot_is_dropped_from_a_hostname_but_not_a_dn_fragment() {
+        assert_eq!(normalised_term("example.com.").unwrap(), "example.com");
+        assert_eq!(normalised_term("example.com..").unwrap(), "example.com.");
+        assert_eq!(
+            normalised_term("O=Example, Inc.").unwrap(),
+            "O=Example, Inc."
+        );
+        assert!(
+            normalised_term(".").is_err(),
+            "nothing is left to search for"
+        );
+    }
+
+    #[test]
+    fn a_control_character_inside_a_term_is_a_usage_error() {
+        for bad in [
+            "exam\tple.com",
+            "a.example\r\nb.example",
+            "example\u{7}.com",
+        ] {
+            let Err(err) = Cli::try_parse_from(["crt-query", "search", bad]) else {
+                panic!("accepted {bad:?}");
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    /// The window `--within 0 --skip-expired` describes is one instant wide,
+    /// so the run could only ever report an all-clear.
+    #[test]
+    fn a_window_nothing_can_fall_in_is_a_usage_error() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().validate();
+        let err = parse(&[
+            "crt-query",
+            "expiring",
+            "a.example",
+            "--within",
+            "0",
+            "--skip-expired",
+        ])
+        .expect_err("an empty window was accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert_eq!(err.exit_code(), 2);
+        // Each half is meaningful on its own.
+        parse(&["crt-query", "expiring", "a.example", "--within", "0"]).unwrap();
+        parse(&["crt-query", "expiring", "a.example", "--skip-expired"]).unwrap();
+        parse(&["crt-query", "search", "a.example", "--skip-expired"]).unwrap();
     }
 
     #[test]

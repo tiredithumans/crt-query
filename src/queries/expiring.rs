@@ -9,7 +9,7 @@ use crate::cache::Cache;
 use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, fmt_opt};
 use crate::queries::search::SearchRow;
-use crate::queries::{IDENTITY_QUERY, RawRow, Report, fetch_by_term, to_rows};
+use crate::queries::{IDENTITY_QUERY, RawRow, Report, drop_lapsed, fetch_by_term, to_rows};
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
@@ -139,9 +139,13 @@ pub async fn run_expiring(
         limit,
     )
     .await?;
-    let raw_rows = fetched.rows.len();
+    let mut raw = fetched.rows;
+    // A cached entry holds the window as it stood when it was written; see
+    // `drop_lapsed` for what that used to let through.
+    drop_lapsed(&mut raw, Some(since_expired));
+    let raw_rows = raw.len();
     Ok(Report {
-        rows: assemble_expiring(fetched.rows, dedupe),
+        rows: assemble_expiring(raw, dedupe),
         raw_rows,
         saturated: fetched.saturated,
     })
@@ -154,7 +158,9 @@ pub async fn run_expiring(
 /// this module lives, and a rule with no test is a rule that comes back.
 fn assemble_expiring(raw: Vec<RawRow>, dedupe: bool) -> Vec<ExpiringRow> {
     // The same clock the server used to choose the window decides the labels,
-    // so --skip-expired can never surface a row marked EXPIRED. Across
+    // so --skip-expired can never surface a row marked EXPIRED — for rows out
+    // of the cache too, now that `run_expiring` re-applies the floor against
+    // their replayed clock before they get here. Across
     // several statements that means the *earliest* clock: every row satisfied
     // its own query's `now()`, which is at or after this one, so labelling
     // against the earliest can only ever be conservative.
