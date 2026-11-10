@@ -252,7 +252,11 @@ mod tests {
                 serial: Some("0a".into()),
                 not_before: Some(utc(2026, 1, 1)),
                 not_after: Some(utc(2026, 12, 31)),
-                server_now: Utc::now(),
+                // A fixed clock, not the wall clock: `run_search` now drops a
+                // cached row that has expired by its replayed clock, and
+                // against `Utc::now()` this fixture would start failing the
+                // day its notAfter passed.
+                server_now: utc(2026, 6, 1),
             }],
         );
 
@@ -327,7 +331,7 @@ mod tests {
             serial: Some(serial.to_string()),
             not_before: Some(utc(2026, 1, 1)),
             not_after: Some(utc(2026, 12, 31)),
-            server_now: Utc::now(),
+            server_now: utc(2026, 6, 1),
         })
         .collect();
         assert_eq!(raw.len(), 10, "the window this test is about");
