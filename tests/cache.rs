@@ -97,6 +97,20 @@ impl Key {
         }
     }
 
+    /// The key `expiring <domain> --ignore-renewed` builds for its second
+    /// statement, the look for certificates that outlive the window: as far
+    /// ahead as the window goes, and a look-back of *minus* `--within`.
+    fn renewals(domain: &str) -> Self {
+        Self {
+            params: vec![
+                format!("{:?}", 36_500i32),
+                format!("{:?}", -30i32),
+                format!("{:?}", 500i64),
+            ],
+            ..Self::expiring(domain)
+        }
+    }
+
     /// The key `cert <id>` builds. Both lifetimes share it; only the filename
     /// prefix differs.
     fn cert(id: i64) -> Self {
@@ -736,4 +750,63 @@ fn a_dash_sends_the_csv_to_stdout_instead_of_the_table() {
 
     let both = run_in_sandbox(&["--csv", "-", "--json", "search", "example.com"]);
     assert_eq!(code(&both), 2, "{}", stderr(&both));
+}
+
+/// `expiring` lists a certificate for its last month whether or not its
+/// replacement already exists, so `--fail-on-expiring` alerted on every
+/// automatically renewed domain. `--ignore-renewed` leaves out a certificate
+/// whose every matched name is on a longer-lived one — and only then.
+#[test]
+fn ignore_renewed_excuses_a_certificate_only_when_every_name_lives_on() {
+    let sandbox = Sandbox::new("ignore-renewed");
+    let mut replacement = raw_row(8, "busy.example");
+    replacement["serial"] = json!("0b");
+
+    // Renewed: the one name on the expiring certificate is on a later one.
+    sandbox.seed(
+        "",
+        &Key::expiring("busy.example"),
+        json!([raw_row(7, "busy.example")]),
+    );
+    sandbox.seed("", &Key::renewals("busy.example"), json!([replacement]));
+    let args = [
+        "expiring",
+        "busy.example",
+        "--ignore-renewed",
+        "--fail-on-expiring",
+        "--json",
+    ];
+    let renewed = sandbox.run(&args);
+    assert_eq!(code(&renewed), 0, "stderr was:\n{}", stderr(&renewed));
+    assert_never_dialled(&renewed);
+    assert_eq!(stdout(&renewed).trim(), "[]");
+    let err = stderr(&renewed);
+    assert!(err.contains("has been renewed"), "{err}");
+    assert!(err.contains("left out 1 certificate"), "{err}");
+
+    // Without the flag the same data is still an alert: opt-in only.
+    let plain = sandbox.run(&["expiring", "busy.example", "--fail-on-expiring", "--json"]);
+    assert_eq!(code(&plain), 4, "stderr was:\n{}", stderr(&plain));
+
+    // Half renewed: a second name with no replacement keeps the alert.
+    sandbox.seed(
+        "",
+        &Key::expiring("busy.example"),
+        json!([raw_row(7, "busy.example"), raw_row(7, "mail.busy.example")]),
+    );
+    let partial = sandbox.run(&args);
+    assert_eq!(code(&partial), 4, "stderr was:\n{}", stderr(&partial));
+    let rows: Value = serde_json::from_str(&stdout(&partial)).expect("--json prints JSON");
+    assert_eq!(rows[0]["id"], 7);
+}
+
+/// With nothing in the window there is nothing to excuse, so the second
+/// statement is never sent: the port-1 source would fail the run if it were.
+#[test]
+fn ignore_renewed_asks_nothing_more_when_nothing_is_expiring() {
+    let sandbox = Sandbox::new("ignore-renewed-empty");
+    sandbox.seed("", &Key::expiring("quiet.example"), json!([]));
+    let out = sandbox.run(&["expiring", "quiet.example", "--ignore-renewed"]);
+    assert_eq!(code(&out), 0, "stderr was:\n{}", stderr(&out));
+    assert_never_dialled(&out);
 }

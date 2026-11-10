@@ -223,6 +223,13 @@ pub enum Commands {
         #[arg(long)]
         no_dedupe: bool,
 
+        /// Leave out a certificate when every name it matched is also on a
+        /// certificate that outlives the --within window: it has been
+        /// renewed, and is expiring on schedule. Costs a second query per
+        /// domain
+        #[arg(long)]
+        ignore_renewed: bool,
+
         /// Exit 4 instead of 0 when the report lists any certificate, so cron
         /// or a monitoring check can act on the status alone. The report is
         /// printed in full either way
@@ -270,8 +277,9 @@ Examples:
   crt-query expiring example.com --within 14
   crt-query expiring example.com example.org --skip-expired --csv report.csv
 
-  In cron, where exit 4 means there is something to act on:
-  crt-query --quiet expiring example.com --skip-expired --fail-on-expiring";
+  In cron, where exit 4 means a certificate is running out unrenewed:
+  crt-query --quiet expiring example.com --skip-expired --ignore-renewed \\
+      --fail-on-expiring";
 
 const COMPLETIONS_EXAMPLES: &str = "\
 Examples:
