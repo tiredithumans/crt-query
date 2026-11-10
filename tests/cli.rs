@@ -583,3 +583,58 @@ fn quiet_silences_cache_clear() {
     assert_eq!(stderr(&out), "", "--quiet printed an informational line");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `cache` writes no CSV and reads nothing from the config file, so neither a
+/// destination that cannot be written nor a config file that cannot be parsed
+/// is its problem. Both used to stop it: the CSV precheck ran for every
+/// subcommand but `completions`, and the file was loaded for a lifetime
+/// neither action consults — which left `cache clear` unusable exactly when a
+/// broken setup made someone reach for it.
+#[cfg(not(windows))]
+#[test]
+fn the_cache_subcommand_ignores_a_csv_destination_and_a_broken_config() {
+    let home = std::env::temp_dir().join(format!("crt-query-cachecmd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let config = home.join("config").join("crt-query");
+    std::fs::create_dir_all(&config).expect("create scratch config dir");
+    std::fs::write(config.join("config.toml"), "this is = not [ toml").expect("write config");
+
+    for args in [
+        &["cache", "path"][..],
+        &["cache", "clear"][..],
+        &["--csv", "/no/such/directory/out.csv", "cache", "path"][..],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_crt-query"))
+            .args(args)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_CACHE_HOME", home.join("cache"))
+            .output()
+            .expect("failed to run the crt-query binary");
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A window one instant wide can never hold a certificate, so the check it
+/// describes could only ever pass. A usage error, before anything is dialled.
+#[test]
+fn an_expiring_window_nothing_can_fall_in_is_a_usage_error() {
+    let out = run(&[
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "1",
+        "expiring",
+        "a.example",
+        "--within",
+        "0",
+        "--skip-expired",
+    ]);
+    assert_eq!(code(&out), CLAP_USAGE_ERROR, "{}", stderr(&out));
+    assert!(stderr(&out).contains("can never match"), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("could not connect"),
+        "the window was checked only after dialling: {}",
+        stderr(&out)
+    );
+}

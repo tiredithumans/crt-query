@@ -226,6 +226,10 @@ a single query — so `--limit` applies per name. The results merge into one
 report, and a certificate matching two of the names appears once, carrying both
 matched identities. An empty or whitespace-only name — usually an unset shell
 variable — is a usage error (exit 2) rather than a query that finds nothing.
+Whitespace around a name and one trailing dot (`example.com.`) are dropped
+before it is sent; a control character inside one is a usage error too.
+Certificates hold an internationalised name in its ASCII form, so search for
+`xn--bcher-kva.de`, not `bücher.de`.
 
 Connection overrides: `--host`, `--port`, `--dbname`, `--user`, or a full
 `--db-url postgresql://…`. Set them once in a [config file](#configuration) or
@@ -355,9 +359,11 @@ for a month would go on answering exit `3` long after the certificate arrived.
 `search` and `expiring` get the short lifetime because their validity windows —
 `--valid-since`, `--within`, `--since-expired` — are evaluated by the server
 when the query runs, so **a cached result carries the window as it stood when it
-was written**. The drift is bounded by the lifetime above and stays well inside
-the day granularity those flags work in, but `--refresh` is there when you need
-the window recomputed now.
+was written**. A certificate that has dropped out of the back of that window
+since — expired, under `--skip-expired` — is left out when the cached result is
+shown, but one that has entered it since is not there to add. With the default
+lifetime that drift stays well inside the day granularity those flags work in;
+a longer `cache_ttl_secs` widens it, and `--refresh` recomputes the window now.
 
 Entries are keyed on the host, port and database they came from, so pointing
 `--host`, `--dbname` or `--db-url` somewhere else never serves what another

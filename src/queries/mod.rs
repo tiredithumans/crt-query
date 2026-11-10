@@ -12,7 +12,7 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
 use crate::cache::{Cache, Key};
-use crate::db::Source;
+use crate::db::{Source, Statement};
 use crate::queries::search::SearchRow;
 
 /// Projection and index-driven `WHERE` clause shared by `search` and
@@ -178,7 +178,11 @@ pub async fn fetch_by_term(
         let key = Key {
             target: identity.clone(),
             sql: sql.to_string(),
-            term: term.clone(),
+            // Folded, because the match is case-insensitive: `Example.com`
+            // and `example.com` are one question, and keyed as typed they
+            // were two entries and two statements. `$1` is still bound as
+            // typed, so the fold never reaches the server.
+            term: term.to_lowercase(),
             params: params_key.clone(),
         };
         if let Some(hit) = cache.get_rows(&key) {
@@ -198,7 +202,7 @@ pub async fn fetch_by_term(
         let rows = source
             .db()
             .await?
-            .query(&format!("\"{term}\""), sql, &params)
+            .query(&format!("\"{term}\""), Statement::Window, sql, &params)
             .await?;
         let mut fetched = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -214,6 +218,39 @@ pub async fn fetch_by_term(
         rows: raw,
         saturated,
     })
+}
+
+/// Drop rows whose certificate has left the validity window since the server
+/// chose them, judged by each row's own (replayed) server clock.
+///
+/// `lookback_days` is the floor the statement applied: `Some(0)` for
+/// `--skip-expired`, `Some(n)` for "expired no more than `n` days ago", `None`
+/// when it applied no floor at all.
+///
+/// A fresh row satisfied exactly this predicate on the server a moment ago, so
+/// this only ever removes rows that came out of the cache. Those were chosen
+/// by the window as it stood when the entry was written, and the cache then
+/// replays `server_now` forward by the entry's age — which moved the labels
+/// but not the membership. A certificate that expired ten minutes into an
+/// hour-old `expiring --skip-expired` entry came back labelled EXPIRED, and
+/// `--fail-on-expiring` exited 4 for it; `search --skip-expired` listed it with
+/// nothing to say it was dead.
+///
+/// Only the floor is re-checked. The look-ahead edge of `expiring` moves the
+/// other way: a replayed clock can only widen it, so a cached entry misses
+/// certificates that have since entered the window rather than holding ones
+/// that left it, and no client-side filter can add rows.
+///
+/// A row with no notAfter is kept: `search` treats it as never expiring.
+pub fn drop_lapsed(raw: &mut Vec<RawRow>, lookback_days: Option<i32>) {
+    let Some(days) = lookback_days else { return };
+    let lookback = chrono::Duration::days(i64::from(days));
+    raw.retain(
+        |r| match (r.not_after, r.server_now.checked_sub_signed(lookback)) {
+            (Some(not_after), Some(floor)) => not_after >= floor,
+            _ => true,
+        },
+    );
 }
 
 /// Whether `len` rows filled a window of `limit`.
@@ -666,6 +703,51 @@ mod tests {
             true,
         );
         assert_eq!(rows.len(), 2);
+    }
+
+    /// A cached entry replays its clock forward; the rows in it were chosen
+    /// before that. One that has since crossed the floor must go, and one
+    /// that has not must stay — including a row the server just returned,
+    /// which sits exactly on its own predicate.
+    #[test]
+    fn a_row_that_left_the_window_while_cached_is_dropped() {
+        let at = |id, not_after, server_now| RawRow {
+            server_now,
+            ..raw(Raw {
+                id,
+                serial: Some("0a"),
+                identity: "example.com",
+                not_after,
+            })
+        };
+        let now = utc(2026, 2, 1);
+        let minute = chrono::Duration::minutes(1);
+        let rows = || {
+            vec![
+                at(1, now - minute, now),
+                at(2, now, now),
+                at(3, now + minute, now),
+                at(4, now - chrono::Duration::days(40), now),
+            ]
+        };
+        let ids = |lookback| {
+            let mut raw = rows();
+            drop_lapsed(&mut raw, lookback);
+            raw.iter().map(|r| r.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(Some(0)), vec![2, 3], "--skip-expired kept a dead row");
+        assert_eq!(ids(Some(30)), vec![1, 2, 3]);
+        assert_eq!(ids(None), vec![1, 2, 3, 4], "no floor, nothing to drop");
+    }
+
+    #[test]
+    fn a_row_with_no_expiry_never_lapses() {
+        let mut rows = vec![RawRow {
+            not_after: None,
+            ..pair(1, "0a", "example.com")
+        }];
+        drop_lapsed(&mut rows, Some(0));
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]

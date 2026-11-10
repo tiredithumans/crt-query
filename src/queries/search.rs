@@ -8,7 +8,7 @@ use tokio_postgres::types::Type;
 use crate::cache::Cache;
 use crate::db::Source;
 use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
-use crate::queries::{IDENTITY_QUERY, RawRow, Report, fetch_by_term, to_rows};
+use crate::queries::{IDENTITY_QUERY, RawRow, Report, drop_lapsed, fetch_by_term, to_rows};
 
 /// Column index of the multi-valued identity field within `cells()`.
 const IDENTITIES_COL: usize = 3;
@@ -149,9 +149,21 @@ pub async fn run_search(
         limit,
     )
     .await?;
-    let raw_rows = fetched.rows.len();
+    let mut raw = fetched.rows;
+    // The floor the statement applied, re-applied to whatever the cache
+    // handed back: `$3` is the stricter of the two, and a zero `$2` is no
+    // floor at all (`--all-history`).
+    let floor = if skip_expired {
+        Some(0)
+    } else if valid_since_days == crate::cli::ALL_HISTORY {
+        None
+    } else {
+        Some(valid_since_days)
+    };
+    drop_lapsed(&mut raw, floor);
+    let raw_rows = raw.len();
     Ok(Report {
-        rows: assemble_search(fetched.rows, dedupe),
+        rows: assemble_search(raw, dedupe),
         raw_rows,
         saturated: fetched.saturated,
     })

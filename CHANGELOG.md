@@ -27,6 +27,24 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   `--width` is reported as out of range instead of as an unknown flag. (#63)
 - An empty `expiring` result no longer ends "(in the first --limit rows)":
   an empty result is complete. (#63)
+- A cached `--skip-expired` or `--since-expired` result no longer lists a
+  certificate that has left that window since the result was stored. (#67)
+- A name is trimmed of surrounding whitespace and of one trailing dot, and a
+  control character inside it is a usage error, so `example.com.` or a line
+  from a CRLF file no longer finds nothing. (#67)
+- An empty result for an internationalised name such as `bücher.de` adds a note
+  to search for its `xn--` spelling. (#67)
+- `expiring --within 0 --skip-expired`, a window nothing can fall in, is a
+  usage error. (#67)
+- A connection the server dropped between two names is dialled again instead of
+  failing the second name. (#67)
+- `cache path` and `cache clear` work with an unreadable config file or an
+  unwritable `--csv` path, and `cache clear` exits 1 if an entry would not
+  delete. (#67)
+- Timeout messages name the host actually queried, and no longer advise `cert`
+  to lower a `--limit` it does not have. (#67)
+- A cache entry with an out-of-range clock is ignored instead of crashing the
+  run. (#67)
 
 ### Security
 

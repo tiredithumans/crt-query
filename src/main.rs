@@ -52,14 +52,22 @@ async fn main() {
 
 async fn run() -> Result<i32> {
     let cli = Cli::parse();
+    if let Err(usage) = cli.validate() {
+        usage.exit();
+    }
     // Before anything can print: every informational line checks this.
     notice::set_quiet(cli.out.quiet);
     // Check the CSV destination before spending a connection to the shared
     // guest database or check-update's network round trip.
     //
     // `completions` is exempt: it emits a shell script, never a record, so a
-    // precheck would only leave a stray file behind.
-    if !matches!(cli.command, Commands::Completions { .. }) {
+    // precheck would only leave a stray file behind. So is `cache`, which
+    // writes no CSV either and used to fail on a destination it would never
+    // have touched.
+    if !matches!(
+        cli.command,
+        Commands::Completions { .. } | Commands::Cache { .. }
+    ) {
         output::precheck_csv(&cli.out)?;
     }
 
@@ -97,6 +105,7 @@ async fn run() -> Result<i32> {
                          {lookback} day(s); widen with --valid-since or --all-history."
                     );
                 }
+                punycode_hint(&terms);
             } else if report.window_filled() {
                 notice!("{}", saturation_note(*limit, &terms, &report));
             }
@@ -154,6 +163,7 @@ async fn run() -> Result<i32> {
                          or expired in the last {lookback} day(s)."
                     );
                 }
+                punycode_hint(&domains);
             } else if report.window_filled() {
                 notice!("{}", saturation_note(*limit, &domains, &report));
             }
@@ -223,12 +233,12 @@ fn build_cache(opts: &cli::CacheOpts, file: &config::FileConfig) -> Cache {
 ///
 /// Built with the cache forced on, so `--no-cache` earlier in the command line
 /// cannot leave `cache clear` silently clearing nothing.
+///
+/// The config file is not read. It used to be, for a lifetime neither action
+/// consults, so a typo in it stopped `cache clear` — the command someone
+/// reaches for when things are already going wrong.
 fn run_cache(action: CacheAction) -> Result<()> {
-    let file = config::load()?;
-    let ttl = file
-        .cache_ttl_secs
-        .map_or(cache::DEFAULT_TTL, std::time::Duration::from_secs);
-    let cache = Cache::new(cache::Mode::Enabled, ttl);
+    let cache = Cache::new(cache::Mode::Enabled, cache::DEFAULT_TTL);
     let Some(dir) = cache.dir().map(Path::to_path_buf) else {
         // No absolute cache directory, so there is nowhere for entries to be
         // (see `cache::cache_root` for why relative is refused). `cache path`
@@ -248,13 +258,45 @@ fn run_cache(action: CacheAction) -> Result<()> {
     match action {
         CacheAction::Path => println!("{}", dir.display()),
         CacheAction::Clear => {
-            let removed = cache
+            let cleared = cache
                 .clear()
                 .with_context(|| format!("clearing the cache in {}", dir.display()))?;
-            notice!("Cleared {removed} cached result(s) from {}.", dir.display());
+            notice!(
+                "Cleared {} cached result(s) from {}.",
+                cleared.removed,
+                dir.display()
+            );
+            if cleared.failed > 0 {
+                anyhow::bail!(
+                    "{} cached result(s) in {} could not be deleted",
+                    cleared.failed,
+                    dir.display()
+                );
+            }
         }
     }
     Ok(())
+}
+
+/// After an empty result, say why an internationalised name found nothing.
+///
+/// Certificates carry such a name in its ASCII `xn--` form, so `bücher.de`
+/// matches no identity and the run reports an all-clear for a domain that may
+/// have plenty. A hint rather than a usage error, because a term is not always
+/// a hostname: `O=Société Générale` is a legitimate search and does match.
+fn punycode_hint(terms: &[String]) {
+    if let Some(name) = terms.iter().find(|t| looks_like_an_idn(t)) {
+        notice!(
+            "note: certificates hold an internationalised name in its ASCII \
+             form, so \"{name}\" will not match as typed; search for its xn-- \
+             (punycode) spelling instead."
+        );
+    }
+}
+
+/// A dotted name with no whitespace and a non-ASCII character in it.
+fn looks_like_an_idn(term: &str) -> bool {
+    !term.is_ascii() && term.contains('.') && !term.contains(char::is_whitespace)
 }
 
 /// How to name the requested terms in an empty-result message.

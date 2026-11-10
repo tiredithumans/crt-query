@@ -28,8 +28,11 @@
 //!
 //! `SEARCH_SQL` and `EXPIRING_SQL` evaluate validity windows server-side
 //! against `now()`, so a cached result is the window as it stood when written.
-//! The drift is bounded by the TTL, well under the day granularity of the
-//! window flags; `--refresh` forces a re-fetch.
+//! Rows that have since left the back of it are dropped on the way out (see
+//! [`crate::queries::drop_lapsed`]); rows that have since entered it cannot be
+//! added. That drift is bounded by the TTL — well under the day granularity of
+//! the window flags at the default, not at a `cache_ttl_secs` of a day —
+//! and `--refresh` forces a re-fetch.
 //!
 //! # Failure policy
 //!
@@ -86,7 +89,9 @@ pub struct Key {
     /// invalidates every entry that came from the old one, which extends the
     /// golden-SQL discipline in `queries/mod.rs` to cache correctness for free.
     pub sql: String,
-    /// The search term, verbatim.
+    /// The search term, lower-cased by [`crate::queries::fetch_by_term`]: the
+    /// match is case-insensitive, so two spellings are one question. A `cert`
+    /// lookup's term is its ID or fingerprint.
     pub term: String,
     /// The remaining bind parameters, rendered. `--valid-since 365` and
     /// `--valid-since 30` are different questions and must not share an entry.
@@ -106,6 +111,15 @@ struct Entry<T> {
     /// The client clock when this was written.
     fetched_at: DateTime<Utc>,
     payload: T,
+}
+
+/// What [`Cache::clear`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Cleared {
+    /// Entries deleted.
+    pub removed: usize,
+    /// Entries still there because deleting them failed.
+    pub failed: usize,
 }
 
 /// How a run may use the cache.
@@ -286,31 +300,44 @@ impl Cache {
         let (mut rows, age) = self.get::<Vec<RawRow>>(key)?;
         let age = chrono::Duration::from_std(age).ok()?;
         for row in &mut rows {
-            row.server_now += age;
+            // Checked: `+=` panics on overflow, and an entry is a file anyone
+            // with the directory can edit. One carrying a clock at the end of
+            // chrono's range took the run down with exit 101, where the
+            // module's promise is that nothing in the cache can fail a run.
+            row.server_now = row.server_now.checked_add_signed(age)?;
         }
         Some(rows)
     }
 
-    /// Delete every entry. Returns how many files went.
-    pub fn clear(&self) -> std::io::Result<usize> {
+    /// Delete every entry, reporting how many went and how many would not.
+    ///
+    /// An entry that could not be deleted used to be skipped without a word,
+    /// so `cache clear` announced success over a directory still holding the
+    /// searched-for names it was asked to remove.
+    pub fn clear(&self) -> std::io::Result<Cleared> {
+        let mut cleared = Cleared::default();
         let Some(dir) = self.dir.as_deref() else {
-            return Ok(0);
+            return Ok(cleared);
         };
-        let mut removed = 0;
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             // Never created, so nothing to clear.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cleared),
             Err(e) => return Err(e),
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") && std::fs::remove_file(&path).is_ok()
-            {
-                removed += 1;
+            if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => cleared.removed += 1,
+                // Another run's prune got there first: gone is gone.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => cleared.failed += 1,
             }
         }
-        Ok(removed)
+        Ok(cleared)
     }
 
     /// Drop entries that have outlived their lifetime.
@@ -841,16 +868,20 @@ mod tests {
         let cache = scratch("clear", Mode::Enabled, DEFAULT_TTL);
         cache.put(&key("a.example"), &vec![row(1, Utc::now())]);
         cache.put(&key("b.example"), &vec![row(2, Utc::now())]);
-        assert_eq!(cache.clear().unwrap(), 2);
+        assert_eq!(cache.clear().unwrap().removed, 2);
         assert!(cache.get_rows(&key("a.example")).is_none());
-        assert_eq!(cache.clear().unwrap(), 0, "clearing twice is not an error");
+        assert_eq!(
+            cache.clear().unwrap(),
+            Cleared::default(),
+            "clearing twice is not an error"
+        );
 
         let missing = Cache::at(
             std::env::temp_dir().join("crt-query-cache-never-created"),
             Mode::Enabled,
             DEFAULT_TTL,
         );
-        assert_eq!(missing.clear().unwrap(), 0);
+        assert_eq!(missing.clear().unwrap(), Cleared::default());
     }
 
     /// A cache that cannot find a home must not fail the run.
@@ -864,8 +895,61 @@ mod tests {
         };
         nowhere.put(&key("example.com"), &vec![row(1, Utc::now())]);
         assert!(nowhere.get_rows(&key("example.com")).is_none());
-        assert_eq!(nowhere.clear().unwrap(), 0);
+        assert_eq!(nowhere.clear().unwrap(), Cleared::default());
         assert!(nowhere.dir().is_none());
+    }
+
+    /// The replayed clock is added to a value read from a file. `+=` panics
+    /// when that overflows, which turned one edited entry into an exit-101
+    /// crash on every run that hit it.
+    #[test]
+    fn an_entry_whose_clock_cannot_be_replayed_is_a_miss_not_a_panic() {
+        let cache = scratch("overflow", Mode::Enabled, DEFAULT_TTL);
+        let k = key("example.com");
+        cache.put(&k, &vec![row(1, DateTime::<Utc>::MAX_UTC)]);
+        // The entry itself reads back, so the miss below is the replay
+        // refusing to overflow rather than the file failing to parse.
+        assert!(cache.get::<Vec<RawRow>>(&k).is_some());
+        // Long enough that the entry's age is not zero on a coarse clock.
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(cache.get_rows(&k).is_none());
+    }
+
+    /// An entry that will not delete has to be counted, not passed over: the
+    /// caller reports the clear as a failure on the strength of it.
+    #[cfg(unix)]
+    #[test]
+    fn clear_counts_an_entry_it_could_not_delete() {
+        use std::os::unix::fs::PermissionsExt;
+        let cache = scratch("clear-denied", Mode::Enabled, DEFAULT_TTL);
+        let k = key("example.com");
+        cache.put(&k, &vec![row(1, Utc::now())]);
+        let dir = cache.dir().unwrap().to_path_buf();
+        let entry = cache.path(&k).unwrap();
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let cleared = cache.clear().unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Root ignores the directory mode, so the delete succeeds there.
+        if entry.exists() {
+            assert_eq!(
+                cleared,
+                Cleared {
+                    removed: 0,
+                    failed: 1
+                }
+            );
+        } else {
+            assert_eq!(
+                cleared,
+                Cleared {
+                    removed: 1,
+                    failed: 0
+                }
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A scratch file left by an interrupted write is not an entry, and must
@@ -878,7 +962,11 @@ mod tests {
         let stray = cache.path(&k).unwrap().with_extension("tmp");
         std::fs::write(&stray, "half-written").unwrap();
 
-        assert_eq!(cache.clear().unwrap(), 1, "only the .json entry counts");
+        assert_eq!(
+            cache.clear().unwrap().removed,
+            1,
+            "only the .json entry counts"
+        );
         assert!(stray.exists(), "clear must not touch a foreign file");
         let _ = std::fs::remove_file(&stray);
     }

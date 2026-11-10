@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::types::Type;
 
 use crate::cache::{Cache, Key};
-use crate::db::Source;
+use crate::db::{Source, Statement};
 use crate::output::{OutputRecord, csv_opt, csv_ts, expand_column, fmt_opt, fmt_ts};
 use crate::queries::{column, timestamp};
 
@@ -219,11 +219,19 @@ pub async fn run_cert(
     let db = source.db().await?;
     let subject = lookup.to_string();
     let rows = match lookup {
-        CertRef::Id(id) => db.query(&subject, CERT_SQL, &[(id, Type::INT8)]).await?,
+        CertRef::Id(id) => {
+            db.query(&subject, Statement::Lookup, CERT_SQL, &[(id, Type::INT8)])
+                .await?
+        }
         CertRef::Sha256(digest) => {
             let digest: &[u8] = digest;
-            db.query(&subject, CERT_BY_SHA256_SQL, &[(&digest, Type::BYTEA)])
-                .await?
+            db.query(
+                &subject,
+                Statement::Lookup,
+                CERT_BY_SHA256_SQL,
+                &[(&digest, Type::BYTEA)],
+            )
+            .await?
         }
     };
     let detail = match rows.first() {
