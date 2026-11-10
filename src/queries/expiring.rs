@@ -148,6 +148,8 @@ pub async fn run_expiring(
         rows: assemble_expiring(raw, dedupe),
         raw_rows,
         saturated: fetched.saturated,
+        empty: fetched.empty,
+        cached: fetched.cached,
     })
 }
 

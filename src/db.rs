@@ -360,16 +360,68 @@ enum Ending {
 ///
 /// `attempts` is how many were made, not `CONNECT_ATTEMPTS`: the budget can
 /// stop the loop early.
-fn connect_advice(target: &str, host: &str, ending: Ending, attempts: u32) -> String {
+///
+/// Nor is it for every failure against the guest database. `Obstacle` is what
+/// the last attempt ran into, and only a refusal is evidence of load: a name
+/// that did not resolve is the caller's network, and silence is as likely a
+/// firewall dropping outbound 5432 — common on office networks — as a busy
+/// server. All three used to be told to "wait a moment and retry".
+fn connect_advice(
+    target: &str,
+    host: &str,
+    ending: Ending,
+    attempts: u32,
+    obstacle: Obstacle,
+) -> String {
     let plural = if attempts == 1 { "attempt" } else { "attempts" };
-    match ending {
-        Ending::Fatal => format!("could not connect to {target}"),
-        Ending::Exhausted if host == crate::config::DEFAULT_HOST => format!(
-            "could not connect to {target} after {attempts} {plural}; the crt.sh \
-             guest database is shared and may be overloaded — wait a moment and retry"
+    let guest = host == crate::config::DEFAULT_HOST;
+    let failed = format!("could not connect to {target} after {attempts} {plural}");
+    match (ending, obstacle) {
+        (Ending::Fatal, _) => format!("could not connect to {target}"),
+        (Ending::Exhausted, Obstacle::Unresolved) => format!(
+            "{failed}; the host name did not resolve — check it, and your \
+             network connection and DNS"
         ),
-        Ending::Exhausted => {
-            format!("could not connect to {target} after {attempts} {plural}")
+        (Ending::Exhausted, Obstacle::Silent) if guest => format!(
+            "{failed}; nothing answered — the crt.sh guest database is shared \
+             and may be overloaded, or a firewall is blocking the outbound TCP \
+             connection this tool needs"
+        ),
+        (Ending::Exhausted, Obstacle::Silent) => format!(
+            "{failed}; nothing answered — check the host is reachable and that \
+             no firewall blocks the port"
+        ),
+        (Ending::Exhausted, Obstacle::Other) if guest => format!(
+            "{failed}; the crt.sh guest database is shared and may be \
+             overloaded — wait a moment and retry"
+        ),
+        (Ending::Exhausted, Obstacle::Other) => failed,
+    }
+}
+
+/// What the last connection attempt ran into, as far as its message tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Obstacle {
+    /// Name resolution failed.
+    Unresolved,
+    /// The attempt timed out without an answer.
+    Silent,
+    /// Anything else: a refusal, a reset, a server that said no.
+    Other,
+}
+
+impl Obstacle {
+    /// Read from the rendered cause, because that is all there is: the driver
+    /// exposes no kind for a connect failure, and the stall is this module's
+    /// own message. A wording change upstream degrades this to `Other`, which
+    /// is the advice everyone got before.
+    fn of(cause: &str) -> Self {
+        if cause.contains("failed to lookup address") {
+            Self::Unresolved
+        } else if cause.starts_with("no response from") || cause.contains("timed out") {
+            Self::Silent
+        } else {
+            Self::Other
         }
     }
 }
@@ -531,7 +583,10 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
             }
         }
     }
-    let advice = connect_advice(&target, &host, ending, made);
+    let obstacle = causes
+        .last()
+        .map_or(Obstacle::Other, |cause| Obstacle::of(cause));
+    let advice = connect_advice(&target, &host, ending, made, obstacle);
     let context = match earlier_causes(&causes) {
         Some(earlier) => format!("{advice} ({earlier})"),
         None => advice,
@@ -979,7 +1034,13 @@ mod tests {
 
     #[test]
     fn overload_advice_is_only_offered_where_it_could_be_true() {
-        let guest = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted, CONNECT_ATTEMPTS);
+        let guest = connect_advice(
+            "crt.sh:5432",
+            "crt.sh",
+            Ending::Exhausted,
+            CONNECT_ATTEMPTS,
+            Obstacle::Other,
+        );
         assert!(guest.contains("guest database is shared"), "{guest}");
 
         // A host the caller pointed us at themselves. Telling them to wait out
@@ -989,15 +1050,62 @@ mod tests {
             "db.internal",
             Ending::Exhausted,
             CONNECT_ATTEMPTS,
+            Obstacle::Other,
         );
         assert!(!own.contains("guest database"), "{own}");
         assert!(own.contains("db.internal:6432"), "{own}");
 
         // A rejected password stopped after one attempt; it was never load,
         // and the SQLSTATE behind this context is what names the real problem.
-        let fatal = connect_advice("crt.sh:5432", "crt.sh", Ending::Fatal, 1);
+        let fatal = connect_advice("crt.sh:5432", "crt.sh", Ending::Fatal, 1, Obstacle::Other);
         assert!(!fatal.contains("overloaded"), "{fatal}");
         assert!(!fatal.contains("attempts"), "{fatal}");
+    }
+
+    /// Being offline and being firewalled were both answered with "may be
+    /// overloaded — wait a moment and retry", which no amount of waiting fixes.
+    #[test]
+    fn the_advice_follows_what_the_last_attempt_ran_into() {
+        assert_eq!(
+            Obstacle::of(
+                "error connecting to server: failed to lookup address information: \
+                 nodename nor servname provided, or not known"
+            ),
+            Obstacle::Unresolved
+        );
+        assert_eq!(
+            Obstacle::of("no response from crt.sh:5432 within 15s (name resolution, …)"),
+            Obstacle::Silent
+        );
+        assert_eq!(
+            Obstacle::of("error connecting to server: connection timed out"),
+            Obstacle::Silent
+        );
+        assert_eq!(
+            Obstacle::of("error connecting to server: Connection refused (os error 61)"),
+            Obstacle::Other
+        );
+
+        let advice = |host: &str, obstacle| {
+            connect_advice(
+                &format!("{host}:5432"),
+                host,
+                Ending::Exhausted,
+                CONNECT_ATTEMPTS,
+                obstacle,
+            )
+        };
+        let offline = advice("crt.sh", Obstacle::Unresolved);
+        assert!(offline.contains("did not resolve"), "{offline}");
+        assert!(!offline.contains("overloaded"), "{offline}");
+
+        let silent = advice("crt.sh", Obstacle::Silent);
+        assert!(silent.contains("firewall"), "{silent}");
+        assert!(silent.contains("overloaded"), "{silent}");
+
+        let own = advice("db.internal", Obstacle::Silent);
+        assert!(own.contains("firewall"), "{own}");
+        assert!(!own.contains("crt.sh"), "{own}");
     }
 
     #[test]
@@ -1005,13 +1113,25 @@ mod tests {
         // The wall-clock budget can stop the loop before the attempts run out,
         // so this cannot go back to reading CONNECT_ATTEMPTS: it would report a
         // count nobody made. Three stalled attempts is the realistic shape.
-        let short = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted, 3);
+        let short = connect_advice(
+            "crt.sh:5432",
+            "crt.sh",
+            Ending::Exhausted,
+            3,
+            Obstacle::Other,
+        );
         assert!(short.contains("after 3 attempts"), "{short}");
         assert!(
             !short.contains(&format!("after {CONNECT_ATTEMPTS} attempts")),
             "reported the budget rather than the attempts made: {short}"
         );
-        let one = connect_advice("crt.sh:5432", "crt.sh", Ending::Exhausted, 1);
+        let one = connect_advice(
+            "crt.sh:5432",
+            "crt.sh",
+            Ending::Exhausted,
+            1,
+            Obstacle::Other,
+        );
         assert!(one.contains("after 1 attempt;"), "{one}");
     }
 

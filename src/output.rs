@@ -75,6 +75,63 @@ fn constrain_columns(table: &mut Table, headers: &[&str]) {
     }
 }
 
+/// Columns the automatic layout gives up, in this order, when the table cannot
+/// otherwise fit its target width.
+///
+/// The constraints above put a floor under every column, and the floors alone
+/// came to 166 columns for `search` and 193 for `expiring` — wider than most
+/// terminals and than [`PIPED_WIDTH`]. Past that the terminal did the
+/// wrapping, mid-border, and the table stopped being one. Leaving a column out
+/// keeps the rest readable; these are the ones a person scanning a report
+/// misses least, and all of them are still in `--json`, `--csv`, and the table
+/// at an explicit `--width`.
+const HIDE_ORDER: &[&str] = &["Serial", "Issuer CA ID", "Not Before (UTC)", "Common Name"];
+
+/// Left and right padding comfy-table puts around a cell.
+const CELL_PADDING: usize = 2;
+
+/// The narrowest a column can render under [`constrain_columns`], padding
+/// included: its content for a no-wrap column, its floor for a free-text one.
+fn column_floor(header: &str, column: usize, rows: &[Vec<String>]) -> usize {
+    if NO_WRAP_HEADERS.contains(&header) {
+        let widest = rows
+            .iter()
+            .filter_map(|cells| cells.get(column))
+            .map(|cell| cell.chars().count())
+            .max()
+            .unwrap_or(0);
+        return widest.max(header.chars().count()) + CELL_PADDING;
+    }
+    MIN_WIDTH_HEADERS
+        .iter()
+        .find(|(name, _)| *name == header)
+        // A lower boundary already counts the padding.
+        .map_or(1 + CELL_PADDING, |(_, min)| usize::from(*min))
+}
+
+/// The indices of the columns to show so the table fits `target`, hiding from
+/// [`HIDE_ORDER`] only as far as needed.
+///
+/// Best effort: once the list is spent the table is as narrow as it gets, and
+/// a terminal narrower than that still overflows.
+fn fitting_columns(headers: &[&str], rows: &[Vec<String>], target: usize) -> Vec<usize> {
+    let floors: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, header)| column_floor(header, i, rows))
+        .collect();
+    let mut shown: Vec<usize> = (0..headers.len()).collect();
+    // One border either side of every column.
+    let width = |shown: &[usize]| shown.iter().map(|&i| floors[i]).sum::<usize>() + shown.len() + 1;
+    for hide in HIDE_ORDER {
+        if width(&shown) <= target {
+            break;
+        }
+        shown.retain(|&i| headers[i] != *hide);
+    }
+    shown
+}
+
 const TS_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// One implementation per record type feeds all three output formats:
@@ -152,11 +209,23 @@ pub fn csv_ts(ts: Option<&DateTime<Utc>>) -> String {
 /// truncated, and an absent destination is not created: an empty file where
 /// the contract promises a header row is worse than no file.
 pub fn precheck_csv(out: &OutputOpts) -> Result<()> {
-    if let Some(path) = &out.csv {
+    if let Some(path) = out.csv.as_deref().filter(|_| !csv_on_stdout(out)) {
         check_replaceable(path)
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Whether `--csv -` asked for the CSV on stdout in place of the table.
+///
+/// There was no way to pipe the CSV: `-` made a file of that name, and
+/// `/dev/stdout` failed the precheck, which needs a scratch file beside the
+/// destination. The table is not line-oriented — a wrapped cell continues on a
+/// row of its own — so it is the wrong thing to feed `grep` or `cut`.
+pub fn csv_on_stdout(out: &OutputOpts) -> bool {
+    out.csv
+        .as_deref()
+        .is_some_and(|path| path.as_os_str() == "-")
 }
 
 fn check_replaceable(path: &Path) -> io::Result<()> {
@@ -272,6 +341,9 @@ pub fn emit_exiting<T: OutputRecord>(
     broken_pipe_exit: i32,
 ) -> Result<()> {
     write_csv_if_requested(rows, out)?;
+    if csv_on_stdout(out) {
+        return on_stdout_with(broken_pipe_exit, |w| csv_to(w, rows));
+    }
     if out.json {
         return on_stdout_with(broken_pipe_exit, |w| json_to(w, rows));
     }
@@ -279,8 +351,17 @@ pub fn emit_exiting<T: OutputRecord>(
         // The caller has already explained the empty result on stderr.
         return Ok(());
     }
-    let table = build_table(rows, out);
-    on_stdout_with(broken_pipe_exit, |w| writeln!(w, "{table}"))
+    let (table, hidden) = build_table(rows, out);
+    on_stdout_with(broken_pipe_exit, |w| writeln!(w, "{table}"))?;
+    if !hidden.is_empty() {
+        // Said once, after the table, or a column that was there yesterday in
+        // a wider window looks like it was removed.
+        notice!(
+            "note: left out {} to fit the width; --width <COLS>, --json or --csv shows every column.",
+            hidden.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Render a single record as a key/value detail table, a JSON object,
@@ -293,19 +374,49 @@ pub fn emit_detail<T: OutputRecord>(record: &T, out: &OutputOpts) -> Result<()> 
         "OutputRecord headers()/cells() arity must match, or fields are silently dropped"
     );
     write_csv_if_requested(std::slice::from_ref(record), out)?;
+    if csv_on_stdout(out) {
+        return on_stdout(|w| csv_to(w, std::slice::from_ref(record)));
+    }
     if out.json {
         return write_json(record);
     }
+    print_table(&build_detail(T::headers(), cells, out))
+}
+
+/// The key/value table for one record.
+fn build_detail(headers: &[&str], cells: Vec<String>, out: &OutputOpts) -> Table {
     let mut table = new_table(out);
     // Through `display_safe_row`, the same helper `build_table` uses, rather
     // than calling `display_safe` again here: this is the only view that
     // renders Subject and SANs, and a second sanitising path is one nothing
     // was covering.
-    for (header, cell) in T::headers().iter().zip(display_safe_row(cells)) {
+    let cells = display_safe_row(cells);
+    // The value column is free text, so it wraps — and it wrapped the SHA-256
+    // fingerprint two characters from the end, leaving a value that could not
+    // be copied out of the terminal whole. The widest value with no wrap point
+    // of its own sets a floor instead. Automatic layout only, like every other
+    // constraint here: an explicit `--width` is met exactly.
+    let atomic = headers
+        .iter()
+        .zip(&cells)
+        .filter(|(header, _)| NO_WRAP_HEADERS.contains(header) || **header == FINGERPRINT_HEADER)
+        .map(|(_, cell)| cell.chars().count())
+        .max();
+    for (header, cell) in headers.iter().zip(cells) {
         table.add_row(vec![(*header).to_string(), cell]);
     }
-    print_table(&table)
+    if out.width.is_none()
+        && let Some(widest) = atomic
+        && let Some(column) = table.column_mut(1)
+    {
+        let floor = u16::try_from(widest + CELL_PADDING).unwrap_or(u16::MAX);
+        column.set_constraint(ColumnConstraint::LowerBoundary(Width::Fixed(floor)));
+    }
+    table
 }
+
+/// The one atomic `cert` field that is not also a `search` column.
+const FINGERPRINT_HEADER: &str = "SHA-256 Fingerprint";
 
 /// Emit the "nothing found" shape for a single-record lookup, so `--json` and
 /// `--csv` hold their contracts on this exit path too.
@@ -315,6 +426,9 @@ pub fn emit_detail<T: OutputRecord>(record: &T, out: &OutputOpts) -> Result<()> 
 /// exit 3 into success — see [`on_stdout_with`].
 pub fn emit_missing<T: OutputRecord>(out: &OutputOpts, broken_pipe_exit: i32) -> Result<()> {
     write_csv_if_requested::<T>(&[], out)?;
+    if csv_on_stdout(out) {
+        return on_stdout_with(broken_pipe_exit, |w| csv_to::<T>(w, &[]));
+    }
     if out.json {
         return on_stdout_with(broken_pipe_exit, |w| {
             serde_json::to_writer_pretty(&mut *w, &serde_json::Value::Null)
@@ -379,14 +493,19 @@ impl OutputRecord for UpdateStatus {
 /// `--csv`.
 pub fn emit_update_status(status: &UpdateStatus, out: &OutputOpts) -> Result<()> {
     write_csv_if_requested(std::slice::from_ref(status), out)?;
+    if csv_on_stdout(out) {
+        return on_stdout(|w| csv_to(w, std::slice::from_ref(status)));
+    }
     if out.json {
         return write_json(status);
     }
     on_stdout(|w| writeln!(w, "{}", status.summary()))
 }
 
+/// Write the CSV file, when `--csv` names one. `--csv -` is not a file: the
+/// callers send that to stdout themselves, in place of the table.
 fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Result<()> {
-    if let Some(path) = &out.csv {
+    if let Some(path) = out.csv.as_deref().filter(|_| !csv_on_stdout(out)) {
         let written = replace_file(path, |file| write_csv(rows, file))
             .with_context(|| format!("cannot write CSV to {}", path.display()))?;
         notice!("wrote {written} CSV row(s) to {}", path.display());
@@ -396,6 +515,16 @@ fn write_csv_if_requested<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Resu
 
 /// Write `rows` as CSV and return the number of data rows written.
 pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
+    Ok(csv_records(rows, w)?)
+}
+
+/// The CSV document on stdout, for `--csv -`. An `io::Error` so a reader that
+/// has gone away is still recognised as one by [`on_stdout_with`].
+fn csv_to<T: OutputRecord>(w: &mut dyn Write, rows: &[T]) -> io::Result<()> {
+    csv_records(rows, w).map(|_| ()).map_err(io::Error::from)
+}
+
+fn csv_records<T: OutputRecord, W: Write>(rows: &[T], w: W) -> csv::Result<usize> {
     let mut w = csv::Writer::from_writer(w);
     w.write_record(T::headers())?;
     let mut written = 0;
@@ -409,17 +538,39 @@ pub fn write_csv<T: OutputRecord, W: Write>(rows: &[T], w: W) -> Result<usize> {
     Ok(written)
 }
 
-/// Build the table for `rows`, sized per [`new_table`].
-fn build_table<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> Table {
+/// Build the table for `rows`, sized per [`new_table`], and name any columns
+/// left out to make it fit (see [`HIDE_ORDER`]).
+///
+/// Columns are only ever left out of the automatic layout. `--width` asks for
+/// a width and gets every column at it.
+fn build_table<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> (Table, Vec<&'static str>) {
     let mut table = new_table(out);
-    table.set_header(T::headers().to_vec());
+    let headers = T::headers();
+    let cells: Vec<Vec<String>> = rows.iter().map(|r| display_safe_row(r.cells())).collect();
+    let shown: Vec<usize> = match (out.width, table.width()) {
+        (None, Some(target)) => fitting_columns(headers, &cells, usize::from(target)),
+        _ => (0..headers.len()).collect(),
+    };
+    let pick = |i: &usize| headers[*i];
+    let shown_headers: Vec<&str> = shown.iter().map(pick).collect();
+    table.set_header(shown_headers.clone());
     if out.width.is_none() {
-        constrain_columns(&mut table, T::headers());
+        constrain_columns(&mut table, &shown_headers);
     }
-    for r in rows {
-        table.add_row(display_safe_row(r.cells()));
+    for mut row in cells {
+        let mut i = 0;
+        row.retain(|_| {
+            i += 1;
+            shown.contains(&(i - 1))
+        });
+        table.add_row(row);
     }
-    table
+    let hidden = headers
+        .iter()
+        .copied()
+        .filter(|header| !shown_headers.contains(header))
+        .collect();
+    (table, hidden)
 }
 
 /// An empty table sized for `out`.
@@ -560,6 +711,7 @@ mod tests {
     /// preset uses is single-width, so counting chars is counting columns.
     fn rendered_width<T: OutputRecord>(rows: &[T], out: &OutputOpts) -> usize {
         build_table(rows, out)
+            .0
             .to_string()
             .lines()
             .map(|l| l.chars().count())
@@ -631,16 +783,123 @@ mod tests {
         }
     }
 
+    /// The floors under every column came to 166 columns for this row, so on
+    /// anything narrower the terminal wrapped each line mid-border. The
+    /// automatic layout now gives up columns instead, and says which.
+    #[test]
+    fn the_automatic_layout_drops_columns_rather_than_overflow() {
+        let rows = [wide_row()];
+        let (table, hidden) = build_table(&rows, &opts(None));
+        let rendered = table.to_string();
+        let widest = rendered.lines().map(|l| l.chars().count()).max().unwrap();
+        assert!(
+            widest <= usize::from(PIPED_WIDTH),
+            "{widest} columns does not fit {PIPED_WIDTH}:\n{rendered}"
+        );
+        assert_eq!(hidden, vec!["Issuer CA ID", "Serial"]);
+        assert!(!rendered.contains("Serial"), "{rendered}");
+        // What it is for: the columns a report is read by are all still there.
+        for kept in [
+            "crt.sh ID",
+            "Issuer",
+            "Matched Identities",
+            "Not After (UTC)",
+        ] {
+            assert!(rendered.contains(kept), "{kept} went missing:\n{rendered}");
+        }
+    }
+
+    #[test]
+    fn columns_are_given_up_in_order_and_only_as_far_as_needed() {
+        let headers = SearchRow::headers();
+        let cells = vec![wide_row().cells()];
+        let shown = |target| -> Vec<&str> {
+            fitting_columns(headers, &cells, target)
+                .into_iter()
+                .map(|i| headers[i])
+                .collect()
+        };
+        assert_eq!(shown(400), headers, "room for everything hides nothing");
+        assert!(!shown(140).contains(&"Serial"));
+        assert!(
+            shown(140).contains(&"Issuer CA ID"),
+            "one column was enough"
+        );
+        let narrow = shown(40);
+        assert_eq!(
+            narrow,
+            vec![
+                "crt.sh ID",
+                "Issuer",
+                "Matched Identities",
+                "Not After (UTC)"
+            ],
+            "the list is spent; what is left is the report"
+        );
+    }
+
+    /// `--width` is an instruction: every column, at that width.
+    #[test]
+    fn an_explicit_width_hides_nothing() {
+        let (table, hidden) = build_table(&[wide_row()], &opts(Some(100)));
+        assert!(hidden.is_empty());
+        assert!(table.to_string().contains("Serial"));
+    }
+
+    /// The value column wraps, and it used to wrap a fingerprint two
+    /// characters from its end.
+    #[test]
+    fn the_detail_view_keeps_a_fingerprint_on_one_line() {
+        // Longer than a real one, and than the 120 columns a test's piped
+        // stdout is laid out for: only the floor can keep it whole.
+        let fingerprint = "ab".repeat(75);
+        let headers = ["Subject", FINGERPRINT_HEADER, "SANs"];
+        let cells = vec![
+            "CN=example.com, O=An Organisation With A Long Name, L=Somewhere, C=GB".repeat(3),
+            fingerprint.clone(),
+            "a.example.com\nb.example.com".to_string(),
+        ];
+        let mut out = opts(None);
+        let rendered = build_detail(&headers, cells.clone(), &out).to_string();
+        assert!(
+            rendered.lines().any(|l| l.contains(&fingerprint)),
+            "the fingerprint was split:\n{rendered}"
+        );
+        // An explicit width still wins, as it does everywhere else.
+        out.width = Some(60);
+        let narrow = build_detail(&headers, cells, &out).to_string();
+        assert!(narrow.lines().all(|l| l.chars().count() <= 60), "{narrow}");
+    }
+
+    #[test]
+    fn a_dash_as_the_csv_destination_means_stdout_not_a_file() {
+        let mut out = opts(None);
+        assert!(!csv_on_stdout(&out));
+        out.csv = Some(PathBuf::from("-"));
+        assert!(csv_on_stdout(&out));
+        // No probe, no scratch file, nothing named `-` left behind.
+        precheck_csv(&out).unwrap();
+        write_csv_if_requested(&[row(&["example.com"])], &out).unwrap();
+        assert!(!Path::new("-").exists());
+        out.csv = Some(PathBuf::from("./-"));
+        assert!(!csv_on_stdout(&out), "a path that names the file is a file");
+
+        let mut buf = Vec::new();
+        csv_to(&mut buf, &[row(&["example.com"])]).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.starts_with("crt.sh ID,"), "{text}");
+        assert_eq!(text.lines().count(), 2);
+    }
+
     #[test]
     fn the_automatic_layout_still_refuses_to_wrap_atomic_columns() {
-        // With no --width the readability constraints stay on, so a hex serial
-        // is never broken across lines even under real wrapping pressure.
+        // With no --width the readability constraints stay on, so a timestamp
+        // is never broken at its space even under real wrapping pressure.
         let rows = [wide_row()];
-        let rendered = build_table(&rows, &opts(None)).to_string();
-        let serial = rows[0].serial.as_deref().unwrap();
+        let rendered = build_table(&rows, &opts(None)).0.to_string();
         assert!(
-            rendered.lines().any(|l| l.contains(serial)),
-            "the 34-character serial was split across lines, so the atomic-column \
+            rendered.lines().any(|l| l.contains("2026-04-01 00:00")),
+            "the timestamp was split across lines, so the atomic-column \
              constraint did not apply:\n{rendered}"
         );
         // The same row must still be wrapped somewhere — otherwise the fixture
@@ -656,7 +915,7 @@ mod tests {
         // --width is an instruction, not a hint: it overrides the readability
         // constraints above rather than being clamped by them.
         for width in [60_u16, 100, 200] {
-            let rendered = build_table(&[wide_row()], &opts(Some(width))).to_string();
+            let rendered = build_table(&[wide_row()], &opts(Some(width))).0.to_string();
             let widest = rendered
                 .lines()
                 .map(str::chars)
@@ -961,7 +1220,9 @@ mod tests {
         );
         assert!(data.contains(",,"), "expected empty fields, got: {data}");
         // The table still shows the dash — this changed CSV only.
-        let table = build_table(&[row(&["example.com"])], &opts(None)).to_string();
+        let table = build_table(&[row(&["example.com"])], &opts(None))
+            .0
+            .to_string();
         assert!(table.contains(DASH) || !table.is_empty());
     }
 
@@ -1005,7 +1266,7 @@ mod tests {
         let mut r = row(&["example.com"]);
         r.common_name = Some("evil\u{1b}[31mred\u{1b}[0m".to_string());
         r.issuer_name = Some("carriage\rreturn".to_string());
-        let rendered = build_table(&[r], &opts(None)).to_string();
+        let rendered = build_table(&[r], &opts(None)).0.to_string();
         assert!(
             !rendered.contains('\u{1b}'),
             "an ESC reached the rendered table:\n{rendered:?}"
@@ -1029,7 +1290,7 @@ mod tests {
         let mut r = row(&["\u{202e}moc.elpmaxe.live"]);
         r.common_name = Some("safe\u{2066}spoofed".to_string());
         r.issuer_name = Some("mark\u{200f}here".to_string());
-        let rendered = build_table(&[r], &opts(None)).to_string();
+        let rendered = build_table(&[r], &opts(None)).0.to_string();
         for (name, c) in [
             ("RIGHT-TO-LEFT OVERRIDE", '\u{202e}'),
             ("LEFT-TO-RIGHT ISOLATE", '\u{2066}'),

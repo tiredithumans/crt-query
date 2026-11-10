@@ -75,13 +75,14 @@ pub struct OutputOpts {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
-    /// Additionally write results as CSV to this file
+    /// Additionally write results as CSV to this file. `-` writes the CSV to
+    /// stdout in place of the table, for piping
     #[arg(long, global = true, value_name = "PATH")]
     pub csv: Option<PathBuf>,
 
-    /// Render the table at exactly this width. Overrides the column
-    /// heuristics used for the automatic layout, which otherwise defaults to
-    /// the terminal width, or 120 when stdout is not a terminal
+    /// Render the table at exactly this width, with every column. The
+    /// automatic layout otherwise fits the terminal, or 120 columns when
+    /// stdout is not one, leaving out the least-read columns if it must
     #[arg(
         long,
         global = true,
@@ -112,6 +113,7 @@ pub struct CacheOpts {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Search certificates by domain or identity (crt.sh-style)
+    #[command(after_help = SEARCH_EXAMPLES)]
     Search {
         /// Domains or identities to search for. `%` and `_` act as wildcards
         /// in the substring match, but the full-text identity predicate has
@@ -149,6 +151,7 @@ pub enum Commands {
         #[arg(
             long,
             default_value_t = 100,
+            value_name = "ROWS",
             allow_negative_numbers = true,
             value_parser = clap::value_parser!(i64).range(1..=100_000),
         )]
@@ -162,6 +165,7 @@ pub enum Commands {
 
     /// Show full details for one certificate, by crt.sh ID or SHA-256
     /// fingerprint
+    #[command(after_help = CERT_EXAMPLES)]
     Cert {
         /// crt.sh certificate ID, or the certificate's SHA-256 fingerprint
         /// (64 hex digits; colons, as openssl prints them, are allowed)
@@ -170,6 +174,7 @@ pub enum Commands {
     },
 
     /// Report expired or soon-expiring certificates for one or more domains
+    #[command(after_help = EXPIRING_EXAMPLES)]
     Expiring {
         /// Domains to check; --limit applies per domain, and results are
         /// merged (and deduplicated) across all of them
@@ -207,6 +212,7 @@ pub enum Commands {
         #[arg(
             long,
             default_value_t = 500,
+            value_name = "ROWS",
             allow_negative_numbers = true,
             value_parser = clap::value_parser!(i64).range(1..=100_000),
         )]
@@ -235,12 +241,50 @@ pub enum Commands {
     CheckUpdate,
 
     /// Generate a shell completion script on stdout
+    #[command(after_help = COMPLETIONS_EXAMPLES)]
     Completions {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: Shell,
     },
 }
+
+// Examples, because the flags that matter most are the ones nobody finds by
+// reading a list: the cron form of `expiring`, the fingerprint form of `cert`,
+// and where a completion script goes. Kept short of 80 columns so wrapping
+// never reflows a command line.
+const SEARCH_EXAMPLES: &str = "\
+Examples:
+  crt-query search example.com
+  crt-query search example.com example.org --skip-expired
+  crt-query search example.com --all-history --limit 1000 --json";
+
+const CERT_EXAMPLES: &str = "\
+Examples:
+  crt-query cert 1234567890
+  crt-query cert \"$(openssl x509 -in cert.pem -noout -fingerprint -sha256 \\
+      | cut -d= -f2)\"";
+
+const EXPIRING_EXAMPLES: &str = "\
+Examples:
+  crt-query expiring example.com --within 14
+  crt-query expiring example.com example.org --skip-expired --csv report.csv
+
+  In cron, where exit 4 means there is something to act on:
+  crt-query --quiet expiring example.com --skip-expired --fail-on-expiring";
+
+const COMPLETIONS_EXAMPLES: &str = "\
+Examples:
+  zsh (needs `fpath+=(~/.zfunc)` before `compinit` in ~/.zshrc):
+    mkdir -p ~/.zfunc && crt-query completions zsh > ~/.zfunc/_crt-query
+  bash:
+    mkdir -p ~/.local/share/bash-completion/completions
+    crt-query completions bash \\
+      > ~/.local/share/bash-completion/completions/crt-query
+  fish:
+    crt-query completions fish > ~/.config/fish/completions/crt-query.fish
+  PowerShell (add to $PROFILE):
+    crt-query completions powershell | Out-String | Invoke-Expression";
 
 /// What `crt-query cache` should do.
 #[derive(Subcommand, Clone, Copy)]
@@ -341,6 +385,13 @@ impl Cli {
     /// `--fail-on-expiring` could never fire. A check that cannot alert is
     /// worse than one that fails to start.
     pub fn validate(&self) -> Result<(), clap::Error> {
+        // Both claim stdout, and a document that is half of each is neither.
+        if self.out.json && crate::output::csv_on_stdout(&self.out) {
+            return Err(Self::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--csv - and --json both write to stdout; give --csv a file, or drop one",
+            ));
+        }
         if let Commands::Expiring {
             within: 0,
             skip_expired: true,
@@ -509,6 +560,42 @@ mod tests {
                 panic!("accepted {bad:?}");
             };
             assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn csv_on_stdout_and_json_cannot_share_it() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().validate();
+        let err = parse(&["crt-query", "--json", "--csv", "-", "search", "a.example"])
+            .expect_err("two documents on one stdout were accepted");
+        assert_eq!(err.exit_code(), 2);
+        parse(&["crt-query", "--csv", "-", "search", "a.example"]).unwrap();
+        parse(&[
+            "crt-query",
+            "--json",
+            "--csv",
+            "out.csv",
+            "search",
+            "a.example",
+        ])
+        .unwrap();
+    }
+
+    /// Help is wrapped to the terminal, 100 columns at most when there is none
+    /// to measure. Unwrapped, one paragraph of `search --help` ran past 300.
+    #[test]
+    fn help_text_is_wrapped_and_carries_examples() {
+        let mut command = Cli::command();
+        command.build();
+        for name in ["search", "cert", "expiring", "completions"] {
+            let help = command
+                .find_subcommand_mut(name)
+                .expect("subcommand exists")
+                .render_long_help()
+                .to_string();
+            assert!(help.contains("Examples:"), "{name} has no examples");
+            let widest = help.lines().map(|l| l.chars().count()).max().unwrap();
+            assert!(widest <= 100, "{name} help has a {widest}-column line");
         }
     }
 

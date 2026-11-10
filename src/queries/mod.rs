@@ -110,6 +110,11 @@ pub struct Fetched {
     /// the limit has to be raised for. A bare `true` would leave the caller
     /// telling someone to widen a search without saying which half of it.
     pub saturated: Vec<String>,
+    /// The terms that returned no row at all.
+    pub empty: Vec<String>,
+    /// How old the oldest cache entry used was, if any term was answered from
+    /// the cache.
+    pub cached: Option<std::time::Duration>,
 }
 
 /// A finished report, plus enough of what it cost to build for the caller to
@@ -120,6 +125,14 @@ pub struct Report<T> {
     pub raw_rows: usize,
     /// The terms that filled their `--limit` window.
     pub saturated: Vec<String>,
+    /// The terms that matched nothing.
+    ///
+    /// A run over several names only said so when *every* name came back
+    /// empty, so a typo among them was indistinguishable from a name with no
+    /// certificates — and in `expiring`, from a name with nothing to renew.
+    pub empty: Vec<String>,
+    /// How old the oldest cache entry behind this report was, if any.
+    pub cached: Option<std::time::Duration>,
 }
 
 impl<T> Report<T> {
@@ -174,6 +187,8 @@ pub async fn fetch_by_term(
 
     let mut raw = Vec::new();
     let mut saturated = Vec::new();
+    let mut empty = Vec::new();
+    let mut cached: Option<std::time::Duration> = None;
     for term in terms {
         let key = Key {
             target: identity.clone(),
@@ -185,12 +200,16 @@ pub async fn fetch_by_term(
             term: term.to_lowercase(),
             params: params_key.clone(),
         };
-        if let Some(hit) = cache.get_rows(&key) {
+        if let Some((hit, age)) = cache.get_rows_aged(&key) {
             // The limit is part of the key, so a hit was written under this
             // same cap and its length means what a fresh fetch's would.
             if fills(hit.len(), limit) {
                 saturated.push(term.clone());
             }
+            if hit.is_empty() {
+                empty.push(term.clone());
+            }
+            cached = Some(cached.map_or(age, |oldest| oldest.max(age)));
             raw.extend(hit);
             continue;
         }
@@ -212,11 +231,16 @@ pub async fn fetch_by_term(
         if fills(fetched.len(), limit) {
             saturated.push(term.clone());
         }
+        if fetched.is_empty() {
+            empty.push(term.clone());
+        }
         raw.extend(fetched);
     }
     Ok(Fetched {
         rows: raw,
         saturated,
+        empty,
+        cached,
     })
 }
 
@@ -497,6 +521,8 @@ mod tests {
             } else {
                 Vec::new()
             },
+            empty: Vec::new(),
+            cached: None,
         };
         // 10 identity rows in, 2 certificates out, window full.
         assert!(report(2, 10, true).window_filled());

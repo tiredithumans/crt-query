@@ -106,19 +106,24 @@ async fn run() -> Result<i32> {
                     );
                 }
                 punycode_hint(&terms);
-            } else if report.window_filled() {
-                notice!("{}", saturation_note(*limit, &terms, &report));
             }
             // Emitted even when empty: --json still owes the caller `[]`, and
             // --csv still owes a file, or a stale one is silently reused.
             output::emit(&report.rows, &cli.out)?;
+            closing_notes(*limit, &terms, &report);
         }
         Commands::Cert { lookup } => {
             let (mut source, cache) = open_source(&cli)?;
             match queries::cert::run_cert(&mut source, &cache, lookup).await? {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
-                    notice!("No certificate with {lookup}.");
+                    // The hint is appended, never folded into the sentence:
+                    // the first one is what scripts and tests match on.
+                    notice!(
+                        "No certificate with {lookup}. If it was only just logged, \
+                         the guest database may not hold it yet; retry later with \
+                         --refresh."
+                    );
                     output::emit_missing::<CertDetail>(&cli.out, EXIT_NOT_FOUND)?;
                     return Ok(EXIT_NOT_FOUND);
                 }
@@ -164,8 +169,6 @@ async fn run() -> Result<i32> {
                     );
                 }
                 punycode_hint(&domains);
-            } else if report.window_filled() {
-                notice!("{}", saturation_note(*limit, &domains, &report));
             }
             // Decided before writing, so a reader that goes away mid-report
             // cannot turn the alert into a success; see `emit_exiting`.
@@ -175,6 +178,7 @@ async fn run() -> Result<i32> {
                 EXIT_OK
             };
             output::emit_exiting(&report.rows, &cli.out, code)?;
+            closing_notes(*limit, &domains, &report);
             return Ok(code);
         }
         // None of the following needs the database.
@@ -278,6 +282,43 @@ fn run_cache(action: CacheAction) -> Result<()> {
     Ok(())
 }
 
+/// The notes that qualify a report, printed after it.
+///
+/// After, because they used to come first: above a hundred-row table the one
+/// line saying "this is a slice, not the whole answer" had scrolled away
+/// before anyone could read it. On stderr either way, so a pipe sees no
+/// difference.
+///
+/// Three things a report cannot say for itself:
+/// - a term filled its `--limit` window (see [`saturation_note`]);
+/// - a term among several matched nothing, which the rows of the others hide;
+/// - some of it came out of the cache, and how long ago that was written.
+fn closing_notes<T>(limit: i64, terms: &[String], report: &Report<T>) {
+    if !report.rows.is_empty() {
+        if report.window_filled() {
+            notice!("{}", saturation_note(limit, terms, report));
+        }
+        if !report.empty.is_empty() {
+            notice!("note: nothing matched {}.", quoted(&report.empty));
+        }
+    }
+    if let Some(age) = report.cached {
+        notice!(
+            "note: answered from the local cache, stored {} ago; --refresh asks crt.sh again.",
+            rough_age(age)
+        );
+    }
+}
+
+/// An age to the nearest unit worth reading: `40s`, `12 min`, `3 h`.
+fn rough_age(age: std::time::Duration) -> String {
+    match age.as_secs() {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{} min", s / 60),
+        s => format!("{} h", s / 3600),
+    }
+}
+
 /// After an empty result, say why an internationalised name found nothing.
 ///
 /// Certificates carry such a name in its ASCII `xn--` form, so `bücher.de`
@@ -369,6 +410,16 @@ fn plural(n: usize, word: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_cache_age_reads_in_the_largest_whole_unit() {
+        let age = |secs| rough_age(std::time::Duration::from_secs(secs));
+        assert_eq!(age(0), "0s");
+        assert_eq!(age(59), "59s");
+        assert_eq!(age(60), "1 min");
+        assert_eq!(age(3599), "59 min");
+        assert_eq!(age(7300), "2 h");
+    }
+
     /// `saturated` defaults to every term; `note_for_filled` sets it apart.
     fn note_for(limit: i64, terms: &[&str], certs: usize, raw_rows: usize) -> String {
         note_for_filled(limit, terms, terms, certs, raw_rows)
@@ -389,6 +440,8 @@ mod tests {
                 rows: vec![(); certs],
                 raw_rows,
                 saturated: saturated.iter().map(ToString::to_string).collect(),
+                empty: Vec::new(),
+                cached: None,
             },
         )
     }

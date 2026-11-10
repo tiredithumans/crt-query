@@ -30,7 +30,10 @@ anyhow = "1.0.104"
 # iana-time-zone and whoami (through web-sys) still name them for wasm32. What
 # goes is chrono asking for them itself.
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde"] }
-clap = { version = "4.6.7", features = ["derive"] }
+# `wrap_help` fits help text to the terminal. Without it clap prints each
+# paragraph as one line, some over 300 characters, and the terminal's own
+# wrap restarts them at column 0, under the flag names.
+clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
 clap_complete = "4.6.11"
 comfy-table = "8.0.1"
 csv = "1.4.0"
