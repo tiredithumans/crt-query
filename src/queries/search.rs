@@ -64,6 +64,22 @@ impl SearchRow {
     }
 }
 
+impl SearchRow {
+    /// The CSV cells, with `identities` in the multi-valued column.
+    fn csv_cells_with(&self, identities: String) -> Vec<String> {
+        vec![
+            self.id.to_string(),
+            csv_opt(self.issuer_ca_id),
+            csv_opt(self.issuer_name.as_deref()),
+            identities,
+            csv_opt(self.common_name.as_deref()),
+            csv_opt(self.serial.as_deref()),
+            csv_ts(self.not_before.as_ref()),
+            csv_ts(self.not_after.as_ref()),
+        ]
+    }
+}
+
 impl From<RawRow> for SearchRow {
     fn from(r: RawRow) -> Self {
         Self {
@@ -107,20 +123,18 @@ impl OutputRecord for SearchRow {
     }
 
     fn csv_cells(&self) -> Vec<String> {
-        vec![
-            self.id.to_string(),
-            csv_opt(self.issuer_ca_id),
-            csv_opt(self.issuer_name.as_deref()),
-            self.matched_identities.join(", "),
-            csv_opt(self.common_name.as_deref()),
-            csv_opt(self.serial.as_deref()),
-            csv_ts(self.not_before.as_ref()),
-            csv_ts(self.not_after.as_ref()),
-        ]
+        self.csv_cells_with(self.matched_identities.join(", "))
     }
 
     fn csv_rows(&self) -> Vec<Vec<String>> {
-        expand_column(self.csv_cells(), IDENTITIES_COL, &self.matched_identities)
+        // The identity cell is overwritten once per value, so joining them
+        // all first only built a string to throw away. With no identities
+        // the join is empty too, so the placeholder is the same cell.
+        expand_column(
+            self.csv_cells_with(String::new()),
+            IDENTITIES_COL,
+            &self.matched_identities,
+        )
     }
 }
 

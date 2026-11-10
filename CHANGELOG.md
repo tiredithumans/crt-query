@@ -26,6 +26,8 @@ extracted from the matching section. No `v` prefix, ASCII hyphen.
   Serial, Issuer CA ID, Not Before and Common Name columns as needed, and says
   which on stderr; `--width` still shows every column. (#68)
 - The `--limit` note now prints after the table instead of before it. (#68)
+- The connection to the database is closed as soon as the results are fetched,
+  not held while they are printed or paged. (#70)
 - A run answered from the cache says so on stderr, with how long ago the answer
   was stored. (#68)
 - A run over several names notes each one that matched nothing. (#68)
