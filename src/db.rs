@@ -69,6 +69,9 @@ pub struct Db {
     conn_err: Arc<OnceLock<String>>,
     /// Host and port for user-facing messages, never the raw `--db-url`.
     target: String,
+    /// The task driving the socket. Kept so [`Source::close`] can wait for it
+    /// to hang up; it used to be spawned and forgotten.
+    task: tokio::task::JoinHandle<()>,
 }
 
 /// What kind of statement failed, which decides the advice worth giving.
@@ -558,7 +561,7 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
             Ok((client, connection)) => {
                 let conn_err: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
                 let slot = Arc::clone(&conn_err);
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     if let Err(e) = connection.await {
                         let _ = slot.set(chain(&e));
                     }
@@ -567,6 +570,7 @@ pub async fn connect(conn: &Conn) -> Result<Db> {
                     client,
                     conn_err,
                     target,
+                    task,
                 });
             }
             Err(e) => {
@@ -631,6 +635,28 @@ impl Source {
             self.db = Some(connect(&self.conn).await?);
         }
         Ok(self.db.as_ref().expect("just connected"))
+    }
+
+    /// Hang up, if a connection was ever made, and wait for that to happen.
+    ///
+    /// Called once the rows are in hand and before any of them is written.
+    /// The connection used to live until the process exited, so the client
+    /// slot it held — the resource the guest database runs out of, and what
+    /// this module's retry budget exists for — stayed taken while a table was
+    /// rendered, a CSV was synced to disk, and for as long as `less` sat on
+    /// the output. Dropping the client is not enough on its own: the driver
+    /// sends its goodbye from the connection task, and on a current-thread
+    /// runtime that task only runs when something awaits.
+    ///
+    /// Bounded, and deaf to failure: this is a courtesy to the server, and
+    /// the answer is already in hand.
+    pub async fn close(&mut self) {
+        /// Long enough for one write on a healthy socket; not worth more.
+        const GOODBYE: Duration = Duration::from_secs(2);
+        if let Some(Db { client, task, .. }) = self.db.take() {
+            drop(client);
+            let _ = tokio::time::timeout(GOODBYE, task).await;
+        }
     }
 
     /// Host, port and database, for keying the cache, without dialling
@@ -930,6 +956,54 @@ mod tests {
         let silent = unanswered("db.internal:6432", Statement::Lookup);
         assert!(!silent.contains("--limit"), "{silent}");
         assert!(unanswered("crt.sh:5432", Statement::Window).contains("--limit"));
+    }
+
+    /// The connection has to be gone before the output starts, not when the
+    /// process ends: the server here reports the moment its client leaves,
+    /// and the source is still alive when it is asked.
+    #[tokio::test]
+    async fn closing_the_source_hangs_up_before_it_is_dropped() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (gone, left) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut len = [0u8; 4];
+            stream.read_exact(&mut len).unwrap();
+            let mut rest = vec![0u8; (u32::from_be_bytes(len) as usize).saturating_sub(4)];
+            stream.read_exact(&mut rest).unwrap();
+            stream
+                .write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I")
+                .unwrap();
+            // Terminate ('X') and then end of stream, or just the latter.
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+            let _ = gone.send(());
+        });
+
+        let mut source = Source::new(Conn {
+            host: "127.0.0.1".into(),
+            port,
+            dbname: crate::config::DEFAULT_DBNAME.into(),
+            user: "guest".into(),
+            db_url: None,
+        });
+        source.db().await.expect("the dial");
+        assert!(
+            left.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the connection closed on its own; this test proves nothing"
+        );
+
+        source.close().await;
+        left.recv_timeout(Duration::from_secs(5))
+            .expect("the server never saw the client leave");
+        assert!(source.db.is_none());
+        // A second close has nothing to do, and must not hang or panic.
+        source.close().await;
     }
 
     /// The guest database drops idle connections. A dead one used to be kept

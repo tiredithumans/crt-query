@@ -149,10 +149,19 @@ const ZERO_WIDTH_FORMATS: &[char] = &[
     '\u{feff}', // BYTE ORDER MARK
 ];
 
+/// The lowest character [`FORMAT_RANGES`] names: U+00AD, the soft hyphen.
+const FIRST_FORMAT_CONTROL: char = '\u{ad}';
+
 /// Whether a character takes width away without giving anything back: it
 /// reorders the text around it, hides inside it, or breaks it. See
 /// [`FORMAT_RANGES`].
 fn is_format_control(c: char) -> bool {
+    // Nearly every character in a certificate is ASCII, and nothing below
+    // the first range can match, so the table need not be walked for it.
+    // `the_format_ranges_are_sorted` holds the first range to that.
+    if c < FIRST_FORMAT_CONTROL {
+        return false;
+    }
     FORMAT_RANGES
         .iter()
         .any(|&(first, last)| (first..=last).contains(&c))
@@ -209,13 +218,31 @@ fn display_safe(value: &str) -> Cow<'_, str> {
 pub(super) fn display_safe_row(cells: Vec<String>) -> Vec<String> {
     cells
         .into_iter()
-        .map(|c| display_safe(&c).into_owned())
+        // A clean cell — nearly all of them — is handed back as it came,
+        // rather than copied out of the borrow `display_safe` returns for it.
+        .map(|cell| match display_safe(&cell) {
+            Cow::Borrowed(_) => cell,
+            Cow::Owned(escaped) => escaped,
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `is_format_control` skips the table for anything below its first
+    /// entry. A range added out of order, or below U+00AD, would be skipped
+    /// with it — silently letting the characters it names through.
+    #[test]
+    fn the_format_ranges_are_sorted() {
+        assert_eq!(FORMAT_RANGES[0].0, FIRST_FORMAT_CONTROL);
+        for pair in FORMAT_RANGES.windows(2) {
+            assert!(pair[0].1 < pair[1].0, "{pair:?} out of order");
+        }
+        assert!(!is_format_control('a') && !is_format_control('\u{ac}'));
+        assert!(is_format_control('\u{ad}'));
+    }
 
     /// days_left is the column most likely to be read as a number, and the
     /// numeric exemption exists so its negatives survive untouched.

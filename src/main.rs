@@ -93,6 +93,9 @@ async fn run() -> Result<i32> {
                 !no_dedupe,
             )
             .await?;
+            // Everything is fetched: give the client slot back before a
+            // table is rendered or a pager holds stdout. See `Source::close`.
+            source.close().await;
             if report.rows.is_empty() {
                 let names = quoted(&terms);
                 if *skip_expired {
@@ -114,7 +117,9 @@ async fn run() -> Result<i32> {
         }
         Commands::Cert { lookup } => {
             let (mut source, cache) = open_source(&cli)?;
-            match queries::cert::run_cert(&mut source, &cache, lookup).await? {
+            let found = queries::cert::run_cert(&mut source, &cache, lookup).await?;
+            source.close().await;
+            match found {
                 Some(detail) => output::emit_detail(&detail, &cli.out)?,
                 None => {
                     // The hint is appended, never folded into the sentence:
@@ -155,6 +160,7 @@ async fn run() -> Result<i32> {
                 },
             )
             .await?;
+            source.close().await;
             if report.rows.is_empty() {
                 // No `--limit` caveat: an empty result is a window that never
                 // filled, so it is the whole answer. It used to end "(in the

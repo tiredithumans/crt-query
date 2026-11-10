@@ -530,7 +530,12 @@ fn csv_records<T: OutputRecord, W: Write>(rows: &[T], w: W) -> csv::Result<usize
     let mut written = 0;
     for r in rows {
         for record in r.csv_rows() {
-            w.write_record(record.iter().map(|v| csv_safe(v).into_owned()))?;
+            // Field by field, so a clean value is written straight from the
+            // borrow `csv_safe` returns instead of being copied first.
+            for value in &record {
+                w.write_field(csv_safe(value).as_bytes())?;
+            }
+            w.write_record(None::<&[u8]>)?;
             written += 1;
         }
     }
