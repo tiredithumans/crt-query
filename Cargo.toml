@@ -7,7 +7,6 @@ description = "Query crt.sh certificate-transparency data directly from its publ
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/tiredithumans/crt-query"
-homepage = "https://github.com/tiredithumans/crt-query"
 documentation = "https://github.com/tiredithumans/crt-query#readme"
 # Shipped as release binaries (directly, through Homebrew or the install
 # scripts) or built from source with `cargo install --git`. It is not on
